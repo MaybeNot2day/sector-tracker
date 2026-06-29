@@ -1,0 +1,15 @@
+[Unit]
+Description=Cross Asset Market Board
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ds/cross-asset-board
+ExecStart=/home/ds/cross-asset-board/scripts/run.sh
+Restart=always
+RestartSec=5
+EnvironmentFile=/home/ds/cross-asset-board/.env
+
+[Install]
+WantedBy=multi-user.target
+

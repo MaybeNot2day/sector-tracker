@@ -1,0 +1,260 @@
+groups:
+- name: MAG7
+  assets:
+  - symbol: AAPL
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Apple
+  - symbol: MSFT
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Microsoft
+  - symbol: NVDA
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Nvidia
+  - symbol: AMZN
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Amazon
+  - symbol: GOOGL
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Alphabet
+  - symbol: META
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Meta
+  - symbol: TSLA
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Tesla
+- name: SEMIS_COMPUTE
+  assets:
+  - symbol: AMD
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+  - symbol: AVGO
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+  - symbol: MRVL
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+  - symbol: ARM
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+  - symbol: TSM
+    type: equity
+    source: yahoo
+    exchange: NYSE
+- name: SEMIS_STORAGE
+  assets:
+  - symbol: MU
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+  - symbol: WDC
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+  - symbol: STX
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+- name: CRYPTO
+  assets:
+  - symbol: BTC
+    type: crypto_perp
+    source: hyperliquid
+    name: Bitcoin
+  - symbol: ETH
+    type: crypto_perp
+    source: hyperliquid
+    name: Ethereum
+  - symbol: SOL
+    type: crypto_perp
+    source: hyperliquid
+    name: Solana
+  - symbol: HYPE
+    type: crypto_perp
+    source: hyperliquid
+    name: Hyperliquid
+- name: CRYPTO_EQUITIES
+  assets:
+  - symbol: COIN
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+  - symbol: MSTR
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+  - symbol: MARA
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+  - symbol: RIOT
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+  - symbol: CLSK
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+- name: AI_INFRA
+  assets:
+  - symbol: IREN
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+  - symbol: CIFR
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+  - symbol: WULF
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+  - symbol: NBIS
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+- name: METALS
+  assets:
+  - symbol: XME
+    type: etf
+    source: yahoo
+    exchange: NYSEARCA
+    name: Metals & Mining ETF
+  - symbol: GDX
+    type: etf
+    source: yahoo
+    exchange: NYSEARCA
+    name: Gold Miners ETF
+  - symbol: FCX
+    type: equity
+    source: yahoo
+    exchange: NYSE
+    name: Freeport-McMoRan
+  - symbol: SCCO
+    type: equity
+    source: yahoo
+    exchange: NYSE
+    name: Southern Copper
+  - symbol: NEM
+    type: equity
+    source: yahoo
+    exchange: NYSE
+    name: Newmont
+  - symbol: AA
+    type: equity
+    source: yahoo
+    exchange: NYSE
+    name: Alcoa
+- name: BIOTECH
+  assets:
+  - symbol: XBI
+    type: etf
+    source: yahoo
+    exchange: NYSEARCA
+    name: Biotech ETF
+  - symbol: IBB
+    type: etf
+    source: yahoo
+    exchange: NASDAQ
+    name: Nasdaq Biotechnology ETF
+  - symbol: REGN
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Regeneron
+  - symbol: VRTX
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Vertex
+  - symbol: MRNA
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Moderna
+  - symbol: CRSP
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: CRISPR Therapeutics
+- name: POWER_GRID
+  assets:
+  - symbol: XLU
+    type: etf
+    source: yahoo
+    exchange: NYSEARCA
+    name: Utilities ETF
+  - symbol: CEG
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Constellation Energy
+  - symbol: VST
+    type: equity
+    source: yahoo
+    exchange: NYSE
+    name: Vistra
+  - symbol: NEE
+    type: equity
+    source: yahoo
+    exchange: NYSE
+    name: NextEra Energy
+  - symbol: ETN
+    type: equity
+    source: yahoo
+    exchange: NYSE
+    name: Eaton
+  - symbol: PWR
+    type: equity
+    source: yahoo
+    exchange: NYSE
+    name: Quanta Services
+- name: ETF_MACRO
+  assets:
+  - symbol: SPY
+    type: etf
+    source: yahoo
+    exchange: NYSEARCA
+    name: S&P 500 ETF
+  - symbol: QQQ
+    type: etf
+    source: yahoo
+    exchange: NASDAQ
+    name: Nasdaq 100 ETF
+  - symbol: SMH
+    type: etf
+    source: yahoo
+    exchange: NASDAQ
+    name: Semiconductors ETF
+  - symbol: TLT
+    type: etf
+    source: yahoo
+    exchange: NASDAQ
+    name: 20Y Treasury ETF
+  - symbol: GLD
+    type: etf
+    source: yahoo
+    exchange: NYSEARCA
+    name: Gold ETF
+  - symbol: USO
+    type: etf
+    source: yahoo
+    exchange: NYSEARCA
+    name: Oil ETF

@@ -1,0 +1,12 @@
+.env
+.env.local
+.venv/
+build/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+data/*.sqlite3
+
+.vercel/
