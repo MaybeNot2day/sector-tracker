@@ -1,4 +1,5 @@
 from app.services.crypto_etf_flows import (
+    parse_farside_table,
     parse_pipe_table,
     parse_token_table,
     summarize_flow_asset,
@@ -58,6 +59,104 @@ def test_parse_pipe_table_normalizes_ethereum_farside_rows() -> None:
     assert rows[0]["etf_flows"][2]["flow_usd"] == -484_100_000  # type: ignore[index]
     assert payload["latest_date"] == "2024-07-24"
     assert payload["laggards"][0]["ticker"] == "ETHE"  # type: ignore[index]
+
+
+def test_parse_pipe_table_handles_date_header_farside_rows() -> None:
+    markdown = """
+| Date | IBIT | FBTC | GBTC | BTC | Total |
+| --- | --- | --- | --- | --- | --- |
+| 26 Jun 2026 | (444.5) | - | 0.0 | - | (444.5) |
+| 29 Jun 2026 | - | - | - | - | 0.0 |
+"""
+
+    rows = parse_pipe_table(markdown)
+    payload = summarize_flow_asset("BTC", "BTC Spot ETFs", rows)
+
+    assert rows[0]["date"] == "2026-06-26"
+    assert rows[0]["flow_usd"] == -444_500_000
+    assert rows[0]["etf_flows"][0]["ticker"] == "IBIT"  # type: ignore[index]
+    assert payload["latest_date"] == "2026-06-26"
+    assert payload["latest_flow_usd"] == -444_500_000
+    assert payload["laggards"][0]["ticker"] == "IBIT"  # type: ignore[index]
+
+
+def test_parse_token_table_handles_plain_text_farside_rows() -> None:
+    markdown = """
+Ethereum ETF Flow – All Data (US$m)
+
+Blackrock
+Fidelity
+Grayscale
+Total
+
+ETHA
+FETH
+ETHE
+ETH
+
+Fee
+0.25%
+0.25%
+2.50%
+0.15%
+
+Seed
+10.6
+4.4
+9,199.3*
+1,022.5*
+10,360
+
+23 Jul 2024
+266.5
+71.3
+(484.1)
+15.1
+(131.2)
+
+24 Jul 2024
+17.4
+74.5
+(326.9)
+-
+(235.0)
+"""
+
+    rows = parse_token_table(markdown)
+    payload = summarize_flow_asset("ETH", "ETH Spot ETFs", rows)
+
+    assert rows[0]["date"] == "2024-07-23"
+    assert rows[0]["flow_usd"] == -131_200_000
+    assert rows[0]["etf_flows"][0]["ticker"] == "ETHA"  # type: ignore[index]
+    assert rows[0]["etf_flows"][2]["flow_usd"] == -484_100_000  # type: ignore[index]
+    assert payload["latest_date"] == "2024-07-24"
+    assert payload["latest_flow_usd"] == -235_000_000
+    assert payload["laggards"][0]["ticker"] == "ETHE"  # type: ignore[index]
+
+
+def test_parse_farside_table_falls_back_between_table_shapes() -> None:
+    pipe_markdown = """
+| Date | IBIT | FBTC | Total |
+| --- | --- | --- | --- |
+| 26 Jun 2026 | (444.5) | - | (444.5) |
+"""
+    text_markdown = """
+Ethereum ETF Flow – All Data (US$m)
+Blackrock
+Total
+ETHA
+Fee
+0.25%
+Seed
+10.6
+10.6
+23 Jul 2024
+266.5
+266.5
+"""
+
+    assert parse_farside_table(pipe_markdown)[0]["date"] == "2026-06-26"
+    assert parse_farside_table(text_markdown)[0]["date"] == "2024-07-23"
 
 
 def test_parse_pipe_table_handles_solana_farside_rows() -> None:
