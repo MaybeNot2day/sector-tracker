@@ -315,6 +315,58 @@ groups:
     source: yahoo
     exchange: NASDAQ
     name: Arbe Robotics
+- name: SPACE
+  assets:
+  - symbol: SPCX
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: SpaceX
+  - symbol: RKLB
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Rocket Lab
+  - symbol: ASTS
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: AST SpaceMobile
+  - symbol: LUNR
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Intuitive Machines
+  - symbol: PL
+    type: equity
+    source: yahoo
+    exchange: NYSE
+    name: Planet Labs
+  - symbol: RDW
+    type: equity
+    source: yahoo
+    exchange: NYSE
+    name: Redwire
+  - symbol: BKSY
+    type: equity
+    source: yahoo
+    exchange: NYSE
+    name: BlackSky
+  - symbol: IRDM
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Iridium
+  - symbol: GSAT
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Globalstar
+  - symbol: VSAT
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Viasat
 - name: ETF_MACRO
   assets:
   - symbol: SPY
