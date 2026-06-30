@@ -130,6 +130,38 @@ groups:
     type: equity
     source: yahoo
     exchange: NASDAQ
+- name: NEOCLOUD
+  assets:
+  - symbol: CRWV
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: CoreWeave
+  - symbol: NBIS
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Nebius
+  - symbol: IREN
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: IREN
+  - symbol: CIFR
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Cipher Digital
+  - symbol: WULF
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: TeraWulf
+  - symbol: CLSK
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: CleanSpark
 - name: METALS
   assets:
   - symbol: XME
@@ -226,6 +258,11 @@ groups:
     source: yahoo
     exchange: NYSE
     name: Quanta Services
+  - symbol: FLNC
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Fluence Energy
 - name: DEFENSE
   assets:
   - symbol: ITA
