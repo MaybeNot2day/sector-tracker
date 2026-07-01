@@ -216,9 +216,12 @@ def _range_52w(current: float | None, bars: list[Bar]) -> dict[str, float] | Non
     if current is None or current <= 0 or not bars:
         return None
     window = bars[-252:] if len(bars) >= 252 else bars
-    low = min(bar.low for bar in window)
+    lows = [bar.low for bar in window if bar.low > 0]
+    if not lows:
+        return None
+    low = min(lows)
     high = max(bar.high for bar in window)
-    if low <= 0 or high <= low:
+    if high <= low:
         return None
     return {
         "low": round(low, 4),

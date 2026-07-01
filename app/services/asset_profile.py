@@ -197,7 +197,7 @@ def _format_ratio(value: float | None) -> str | None:
 
 
 def _format_price(value: float | None, divisor: float | None = 1.0) -> str | None:
-    if value is None:
+    if value is None or value <= 0:
         return None
     if divisor is None or divisor <= 0:
         return None
@@ -216,7 +216,7 @@ def _format_price_range(
     high_text = _format_price(high, divisor)
     if low_text and high_text:
         return f"{low_text} - {high_text}"
-    return low_text or high_text
+    return None
 
 
 def _format_percent(value: float | None) -> str | None:

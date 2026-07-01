@@ -1632,6 +1632,10 @@ h1 {
   border-top-color: var(--line-strong);
 }
 
+.profile-market-context > :only-child {
+  grid-column: 1 / -1;
+}
+
 .profile-range,
 .profile-performance {
   min-width: 0;
