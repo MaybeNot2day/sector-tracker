@@ -9,6 +9,9 @@ const refreshButton = document.querySelector("#refresh-button");
 const viewButtons = Array.from(document.querySelectorAll(".view-tabs button"));
 const dailyView = document.querySelector("#daily-view");
 const marketsView = document.querySelector("#markets-view");
+const marketSearch = document.querySelector("#market-search");
+const marketFilterClear = document.querySelector("#market-filter-clear");
+const marketFilterStatus = document.querySelector("#market-filter-status");
 const modal = document.querySelector("#chart-modal");
 const modalShell = document.querySelector("#chart-modal .modal-shell");
 const modalClose = document.querySelector("#modal-close");
@@ -37,11 +40,15 @@ let latestData = null;
 let latestCryptoEtfFlows = null;
 let watchlistConfig = null;
 let activeSymbol = null;
+let activeAsset = null;
 let activeRange = "ytd";
 let activeInterval = "1d";
 let activeDialog = null;
 let lastFocusedElement = null;
 let chart = null;
+let marketSearchQuery = "";
+let activeGroupFilter = "";
+let marketSort = { key: "configured", direction: "default" };
 
 const sourceLabels = {
   yahoo: "YH",
@@ -68,6 +75,17 @@ function init() {
     button.addEventListener("click", () => selectView(button.dataset.view || "daily"));
     button.addEventListener("keydown", handleViewTabKeydown);
   });
+  marketSearch.addEventListener("input", () => {
+    marketSearchQuery = marketSearch.value.trim();
+    renderBoard(latestData);
+  });
+  marketSearch.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      focusFirstMarketRow();
+    }
+  });
+  marketFilterClear.addEventListener("click", clearMarketFilters);
   modalClose.addEventListener("click", closeModal);
   modal.addEventListener("click", (event) => {
     if (event.target === modal) closeModal();
@@ -80,6 +98,12 @@ function init() {
   document.addEventListener("keydown", (event) => {
     if (event.key === "Tab" && activeDialog) {
       trapDialogFocus(event, activeDialog);
+      return;
+    }
+    if (event.key === "/" && !activeDialog && !isTextInput(event.target)) {
+      event.preventDefault();
+      selectView("markets");
+      marketSearch.focus();
       return;
     }
     if (event.key === "Escape") {
@@ -308,7 +332,18 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
   `;
 
   dailyBoard.querySelectorAll(".benchmark-card").forEach((card) => {
-    card.addEventListener("click", () => openChart(card.dataset.symbol, card.dataset.name, ""));
+    card.addEventListener("click", () => {
+      openChart({
+        symbol: card.dataset.symbol,
+        name: card.dataset.name,
+        type: card.dataset.type || "etf",
+        quote: { provider: card.dataset.provider || "" },
+        summary: findAssetSummary(card.dataset.symbol),
+      });
+    });
+  });
+  dailyBoard.querySelectorAll(".theme-link").forEach((button) => {
+    button.addEventListener("click", () => filterMarketsByGroup(button.dataset.group || ""));
   });
 }
 
@@ -344,7 +379,7 @@ function pairRegimeCell(label, positive, negative, detail) {
 }
 
 function benchmarkCard(item) {
-  return `<button class="benchmark-card" type="button" data-symbol="${escapeHtml(item.symbol)}" data-name="${escapeHtml(item.name || "")}">
+  return `<button class="benchmark-card" type="button" data-symbol="${escapeHtml(item.symbol)}" data-name="${escapeHtml(item.name || "")}" data-type="${escapeHtml(item.type || "etf")}" data-provider="">
     <span class="benchmark-symbol">${escapeHtml(item.symbol)}</span>
     <span class="benchmark-name">${escapeHtml(item.name || item.type || "Benchmark")}</span>
     <span class="metric-lines">
@@ -375,7 +410,7 @@ function themeRow(theme) {
   const score = scorePercent(theme.score);
   return `<tr>
     <td>${formatInteger(theme.rank)}</td>
-    <td>${escapeHtml(displayGroupName(theme.name))}<span class="member-count">${formatInteger(theme.count)}</span></td>
+    <td><button class="theme-link" type="button" data-group="${escapeHtml(theme.name)}" title="Show ${escapeHtml(displayGroupName(theme.name))} in Markets">${escapeHtml(displayGroupName(theme.name))}</button><span class="member-count">${formatInteger(theme.count)}</span></td>
     <td><span class="score-bar" style="--score: ${score}%"><span class="score-value">${formatInteger(theme.score)}</span></span></td>
     <td class="${changeClass(theme.change_1d)}">${formatSignedPct(theme.change_1d)}</td>
     <td class="${changeClass(theme.change_5d)}">${formatSignedPct(theme.change_5d)}</td>
@@ -471,29 +506,180 @@ function cryptoEtfFlowError(error) {
 }
 
 function renderBoard(payload) {
-  const groups = payload.groups || [];
+  if (!payload) return;
+  const groups = visibleGroups(payload.groups || []);
   board.classList.remove("board-loading");
   if (!groups.length) {
-    board.innerHTML = '<div class="empty-state">No groups configured</div>';
+    const totalAssets = countAssets(payload.groups || []);
+    const hasFilter = activeGroupFilter || marketSearchQuery;
+    board.innerHTML = `<div class="empty-state">${hasFilter ? "No matching markets" : "No groups configured"}</div>`;
+    updateMarketFilterStatus(0, totalAssets);
     return;
   }
 
-  board.replaceChildren(
-    ...groups.map((group) => {
-      const panel = document.createElement("section");
-      panel.className = "group-panel";
+  const totalAssets = countAssets(payload.groups || []);
+  const visibleAssets = countAssets(groups);
+  const nextGroups = new Set(groups.map((group) => group.name));
 
-      const header = document.createElement("div");
-      header.className = "group-title";
-      header.innerHTML =
-        "<span></span><span>Last</span><span>1D Abs</span><span>1D %</span><span>Src</span>";
-      header.firstChild.textContent = displayGroupName(group.name);
-      panel.appendChild(header);
+  groups.forEach((group) => {
+    const panel = ensureGroupPanel(group.name);
+    const assets = sortedAssets(group.assets || []);
+    const nextSymbols = new Set(assets.map((asset) => asset.symbol));
 
-      (group.assets || []).forEach((asset) => panel.appendChild(renderRow(asset)));
-      return panel;
-    })
+    assets.forEach((asset) => {
+      let row = panel.querySelector(`.asset-row[data-symbol="${cssEscape(asset.symbol)}"]`);
+      if (!row) {
+        row = renderRow(asset);
+      } else {
+        updateRow(row, asset);
+      }
+      panel.appendChild(row);
+    });
+
+    panel.querySelectorAll(".asset-row").forEach((row) => {
+      if (!nextSymbols.has(row.dataset.symbol)) row.remove();
+    });
+    board.appendChild(panel);
+  });
+
+  board.querySelectorAll(".group-panel").forEach((panel) => {
+    if (!nextGroups.has(panel.dataset.group)) panel.remove();
+  });
+  updateSortHeaders();
+  updateMarketFilterStatus(visibleAssets, totalAssets);
+}
+
+function ensureGroupPanel(groupName) {
+  let panel = board.querySelector(`.group-panel[data-group="${cssEscape(groupName)}"]`);
+  if (panel) return panel;
+
+  panel = document.createElement("section");
+  panel.className = "group-panel";
+  panel.dataset.group = groupName;
+
+  const header = document.createElement("div");
+  header.className = "group-title";
+  header.append(
+    groupHeaderCell(displayGroupName(groupName), "symbol"),
+    groupHeaderCell("Last", "last"),
+    groupHeaderCell("1D Abs", "abs"),
+    groupHeaderCell("1D %", "pct"),
+    groupHeaderCell("Trend", "trend"),
+    groupHeaderCell("Src", "source")
   );
+  panel.appendChild(header);
+  return panel;
+}
+
+function groupHeaderCell(label, sortKey) {
+  const cell = document.createElement("span");
+  if (sortKey === "source" || sortKey === "trend") {
+    cell.textContent = label;
+    return cell;
+  }
+  const button = document.createElement("button");
+  button.type = "button";
+  button.dataset.sortKey = sortKey;
+  button.textContent = label;
+  button.title = `Sort by ${label}`;
+  button.addEventListener("click", () => setMarketSort(sortKey));
+  cell.appendChild(button);
+  return cell;
+}
+
+function setMarketSort(sortKey) {
+  if (marketSort.key === sortKey) {
+    marketSort = {
+      key: sortKey,
+      direction: marketSort.direction === "asc" ? "desc" : "asc",
+    };
+  } else {
+    marketSort = {
+      key: sortKey,
+      direction: sortKey === "symbol" ? "asc" : "desc",
+    };
+  }
+  renderBoard(latestData);
+}
+
+function updateSortHeaders() {
+  board.querySelectorAll(".group-title button").forEach((button) => {
+    const active = button.dataset.sortKey === marketSort.key;
+    button.classList.toggle("active-sort", active);
+    button.setAttribute("aria-sort", active ? (marketSort.direction === "asc" ? "ascending" : "descending") : "none");
+  });
+}
+
+function sortedAssets(assets) {
+  if (marketSort.key === "configured") return [...assets];
+  return [...assets].sort((a, b) => {
+    const direction = marketSort.direction === "asc" ? 1 : -1;
+    if (marketSort.key === "symbol") {
+      return a.symbol.localeCompare(b.symbol) * direction;
+    }
+    const aValue = sortValue(a, marketSort.key);
+    const bValue = sortValue(b, marketSort.key);
+    if (aValue === bValue) return a.symbol.localeCompare(b.symbol);
+    if (aValue === null) return 1;
+    if (bValue === null) return -1;
+    return (aValue - bValue) * direction;
+  });
+}
+
+function sortValue(asset, key) {
+  const quote = asset.quote || {};
+  if (key === "last") return numericOrNull(quote.last);
+  if (key === "abs") return numericOrNull(quote.change_abs);
+  if (key === "pct") return numericOrNull(quote.change_pct);
+  return null;
+}
+
+function visibleGroups(groups) {
+  return groups
+    .filter((group) => !activeGroupFilter || group.name === activeGroupFilter)
+    .map((group) => ({
+      ...group,
+      assets: (group.assets || []).filter((asset) => assetMatchesFilter(asset, group.name)),
+    }))
+    .filter((group) => group.assets.length);
+}
+
+function assetMatchesFilter(asset, groupName) {
+  if (!marketSearchQuery) return true;
+  const haystack = [
+    asset.symbol,
+    asset.name,
+    asset.exchange,
+    asset.type,
+    displayGroupName(groupName),
+  ].filter(Boolean).join(" ").toLowerCase();
+  return haystack.includes(marketSearchQuery.toLowerCase());
+}
+
+function countAssets(groups) {
+  return groups.reduce((total, group) => total + (group.assets || []).length, 0);
+}
+
+function updateMarketFilterStatus(visibleCount, totalCount) {
+  const filters = [];
+  if (activeGroupFilter) filters.push(displayGroupName(activeGroupFilter));
+  if (marketSearchQuery) filters.push(`"${marketSearchQuery}"`);
+  marketFilterStatus.textContent = filters.length
+    ? `${visibleCount}/${totalCount} shown · ${filters.join(" · ")}`
+    : `${totalCount} markets`;
+  marketFilterClear.hidden = !filters.length;
+}
+
+function clearMarketFilters() {
+  activeGroupFilter = "";
+  marketSearchQuery = "";
+  marketSearch.value = "";
+  renderBoard(latestData);
+}
+
+function focusFirstMarketRow() {
+  const row = board.querySelector(".asset-row");
+  if (row) row.focus();
 }
 
 async function openEditor() {
@@ -640,60 +826,140 @@ function setEditorStatus(text) {
 }
 
 function renderRow(asset) {
-  const quote = asset.quote || {};
   const row = document.createElement("button");
   row.type = "button";
-  row.className = `asset-row${quote.is_stale ? " stale-row" : ""}`;
-  row.dataset.symbol = asset.symbol;
-  row.dataset.provider = quote.provider || "";
-  row.setAttribute("aria-label", `${asset.symbol} chart`);
-  row.addEventListener("click", () => openChart(asset.symbol, asset.name, quote.provider, asset.type));
-
-  row.appendChild(symbolCell(asset));
-  row.appendChild(textCell(formatPrice(quote.last, quote.error)));
-  row.appendChild(absChangeCell(formatSigned(quote.change_abs)));
-  row.appendChild(changeCell(formatSignedPct(quote.change_pct), quote.change_pct));
-  row.appendChild(sourceCell(quote));
+  row.addEventListener("click", () => openChart(asset));
+  updateRow(row, asset, { initial: true });
   return row;
 }
 
-function symbolCell(asset) {
-  const cell = document.createElement("span");
+function updateRow(row, asset, options = {}) {
+  const quote = asset.quote || {};
+  row.className = `asset-row${quote.is_stale ? " stale-row" : ""}`;
+  row.dataset.symbol = asset.symbol;
+  row.dataset.provider = quote.provider || "";
+  row.dataset.assetType = asset.type || "";
+  row.dataset.name = asset.name || "";
+  row.setAttribute("aria-label", `${asset.symbol} chart`);
+  row.title = `${asset.symbol} ${asset.name || ""}`.trim();
+
+  updateSymbolCell(ensureRowCell(row, "symbol"), asset);
+  updateValueCell(
+    ensureRowCell(row, "last", "last-cell"),
+    formatPrice(quote.last, quote.error),
+    quote.last,
+    "last-cell",
+    !options.initial
+  );
+  updateValueCell(
+    ensureRowCell(row, "abs", "change-abs-cell"),
+    formatSigned(quote.change_abs),
+    quote.change_abs,
+    "change-abs-cell",
+    !options.initial
+  );
+  updateValueCell(
+    ensureRowCell(row, "pct"),
+    formatSignedPct(quote.change_pct),
+    quote.change_pct,
+    changeClass(quote.change_pct),
+    !options.initial
+  );
+  updateSparklineCell(ensureRowCell(row, "trend", "sparkline-cell"), asset.summary?.sparkline || []);
+  updateSourceCell(ensureRowCell(row, "source", "source-cell"), quote);
+}
+
+function ensureRowCell(row, key, className = "") {
+  let cell = row.querySelector(`[data-cell="${key}"]`);
+  if (cell) return cell;
+  cell = document.createElement("span");
+  cell.dataset.cell = key;
+  if (className) cell.className = className;
+  row.appendChild(cell);
+  return cell;
+}
+
+function updateSymbolCell(cell, asset) {
   cell.className = "symbol-cell";
-  const symbol = document.createElement("strong");
+  cell.title = `${asset.symbol} ${asset.name || asset.exchange || asset.type || ""}`.trim();
+  let symbol = cell.querySelector("strong");
+  let name = cell.querySelector("small");
+  if (!symbol) {
+    symbol = document.createElement("strong");
+    cell.appendChild(symbol);
+  }
+  if (!name) {
+    name = document.createElement("small");
+    cell.appendChild(name);
+  }
   symbol.textContent = asset.symbol;
-  const name = document.createElement("small");
   name.textContent = asset.name || asset.exchange || asset.type || "";
-  cell.append(symbol, name);
-  return cell;
 }
 
-function textCell(text) {
-  const cell = document.createElement("span");
+function updateValueCell(cell, text, value, className, shouldFlash) {
+  const previous = numericOrNull(cell.dataset.value);
   cell.textContent = text;
-  return cell;
+  cell.className = className;
+  cell.title = text;
+  if (typeof value === "number") cell.dataset.value = String(value);
+  else delete cell.dataset.value;
+  if (shouldFlash && previous !== null && typeof value === "number" && value !== previous) {
+    flashCell(cell, value - previous);
+  }
 }
 
-function changeCell(text, changePct) {
-  const cell = textCell(text);
-  cell.classList.add(changeClass(changePct));
-  return cell;
+function updateSparklineCell(cell, values) {
+  cell.className = "sparkline-cell";
+  cell.title = values.length ? "Recent trend" : "No trend history";
+  cell.innerHTML = sparklineSvg(values);
 }
 
-function absChangeCell(text) {
-  const cell = textCell(text);
-  cell.classList.add("change-abs-cell");
-  return cell;
-}
-
-function sourceCell(quote) {
-  const cell = textCell(quote.is_stale ? "STALE" : sourceLabels[quote.provider] || "--");
+function updateSourceCell(cell, quote) {
   cell.className = "source-cell";
-  return cell;
+  cell.textContent = quote.is_stale ? "STALE" : sourceLabels[quote.provider] || "--";
+  cell.title = quote.provider || "Source unavailable";
 }
 
-function openChart(symbol, name, provider, assetType) {
+function flashCell(cell, delta) {
+  cell.classList.remove("flash-up", "flash-down");
+  void cell.offsetWidth;
+  cell.classList.add(delta > 0 ? "flash-up" : "flash-down");
+  window.setTimeout(() => cell.classList.remove("flash-up", "flash-down"), 450);
+}
+
+function sparklineSvg(values) {
+  const points = Array.isArray(values) ? values.map(Number).filter((value) => Number.isFinite(value)) : [];
+  if (points.length < 2) return '<span class="sparkline-empty">--</span>';
+  const width = 64;
+  const height = 22;
+  const min = Math.min(...points);
+  const max = Math.max(...points);
+  const span = max - min || 1;
+  const path = points
+    .map((value, index) => {
+      const x = (index / (points.length - 1)) * width;
+      const y = height - ((value - min) / span) * height;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  const tone = points[points.length - 1] >= points[0] ? "positive" : "negative";
+  return `<svg class="sparkline sparkline-${tone}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true"><polyline points="${path}"></polyline></svg>`;
+}
+
+function filterMarketsByGroup(groupName) {
+  if (!groupName) return;
+  activeGroupFilter = groupName;
+  selectView("markets");
+  renderBoard(latestData);
+}
+
+function openChart(asset) {
+  const symbol = asset?.symbol || "";
+  const name = asset?.name || symbol;
+  const provider = asset?.quote?.provider || asset?.provider || "";
+  const assetType = asset?.type || asset?.asset_type || "";
   activeSymbol = symbol;
+  activeAsset = asset || null;
   activeRange = "ytd";
   activeInterval = "1d";
   intervalButtons.forEach((item) => item.classList.toggle("active", item.dataset.range === "ytd"));
@@ -713,6 +979,7 @@ function openChart(symbol, name, provider, assetType) {
 function closeModal() {
   if (!closeDialog(modal)) return;
   activeSymbol = null;
+  activeAsset = null;
   if (chart) {
     chart.remove();
     chart = null;
@@ -811,6 +1078,7 @@ function renderAssetProfile(profile) {
   }
   showProfilePanel();
   const metrics = Array.isArray(profile.metrics) ? profile.metrics : [];
+  const summary = activeAsset?.summary || findAssetSummary(profile.symbol);
   const name = profile.name || profile.symbol || "Asset";
   const meta = [
     profile.sector,
@@ -839,6 +1107,7 @@ function renderAssetProfile(profile) {
           : '<div class="profile-empty small">Fundamentals unavailable for this asset.</div>'
       }
     </div>
+    ${profileMarketContext(summary)}
   `;
   bindProfileDescriptionToggle();
 }
@@ -849,6 +1118,53 @@ function profileMetric(metric) {
       <span>${escapeHtml(metric.label || "")}</span>
       <strong>${escapeHtml(metric.value || "--")}</strong>
     </div>
+  `;
+}
+
+function profileMarketContext(summary) {
+  const range = summary?.range_52w;
+  const performance = summary?.performance || {};
+  const hasRange = range && typeof range.low === "number" && typeof range.high === "number";
+  const perfKeys = ["1D", "1W", "1M", "3M", "YTD", "1Y"];
+  const hasPerformance = perfKeys.some((key) => typeof performance[key] === "number");
+  if (!hasRange && !hasPerformance) return "";
+
+  return `
+    <div class="profile-market-context">
+      ${hasRange ? profileRangeBar(range) : ""}
+      ${
+        hasPerformance
+          ? `<div class="profile-performance" aria-label="Performance by timeframe">${perfKeys.map((key) => profilePerformanceCell(key, performance[key])).join("")}</div>`
+          : ""
+      }
+    </div>
+  `;
+}
+
+function profileRangeBar(range) {
+  const position = clampNumber(range.position_pct, 0, 100);
+  return `
+    <div class="profile-range" style="--range-position: ${position}%">
+      <div class="profile-range-head">
+        <span>52W Range</span>
+        <strong>${formatUsdPrice(range.current)}</strong>
+      </div>
+      <div class="range-track" aria-hidden="true"><span></span></div>
+      <div class="range-labels">
+        <span>${formatUsdPrice(range.low)}</span>
+        <span>${formatPlainPct(range.off_low_pct)} above low · ${formatPlainPct(range.off_high_pct)} below high</span>
+        <span>${formatUsdPrice(range.high)}</span>
+      </div>
+    </div>
+  `;
+}
+
+function profilePerformanceCell(label, value) {
+  return `
+    <span class="performance-cell ${changeClass(value)}" title="${escapeHtml(label)} ${escapeHtml(formatSignedPct(value))}">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(formatSignedPct(value))}</strong>
+    </span>
   `;
 }
 
@@ -951,6 +1267,30 @@ function focusableElements(container) {
   });
 }
 
+function findAssetSummary(symbol) {
+  if (!symbol || !latestData?.groups) return {};
+  for (const group of latestData.groups) {
+    const asset = (group.assets || []).find((item) => item.symbol === symbol);
+    if (asset) return asset.summary || {};
+  }
+  return {};
+}
+
+function numericOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function cssEscape(value) {
+  if (window.CSS?.escape) return window.CSS.escape(String(value));
+  return String(value).replaceAll('"', '\\"').replaceAll("\\", "\\\\");
+}
+
+function isTextInput(target) {
+  if (!(target instanceof HTMLElement)) return false;
+  return ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) || target.isContentEditable;
+}
+
 function setConnection(state) {
   statusStrip.classList.toggle("live", state === "live");
   statusStrip.classList.toggle("error", state === "error");
@@ -970,6 +1310,11 @@ function formatPrice(value, error) {
   if (Math.abs(value) >= 1000) return value.toLocaleString(undefined, { maximumFractionDigits: 1 });
   if (Math.abs(value) >= 1) return value.toFixed(2);
   return value.toPrecision(4);
+}
+
+function formatUsdPrice(value) {
+  const price = formatPrice(value);
+  return price === "--" ? price : `$${price}`;
 }
 
 function formatSigned(value) {
@@ -1018,6 +1363,11 @@ function formatInteger(value) {
 function scorePercent(value) {
   if (typeof value !== "number") return 0;
   return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function clampNumber(value, min, max) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return min;
+  return Math.max(min, Math.min(max, value));
 }
 
 function formatClock(date) {

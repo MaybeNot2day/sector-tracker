@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=20260701-3" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260701-4" />
   </head>
   <body>
     <header class="app-header">
@@ -115,6 +115,20 @@
       </section>
 
       <section id="markets-view" class="view-panel" role="tabpanel" aria-labelledby="markets-tab" hidden>
+        <div class="market-tools">
+          <label class="market-search" title="Search symbols or sectors">
+            <i data-lucide="search" aria-hidden="true"></i>
+            <input
+              id="market-search"
+              type="search"
+              autocomplete="off"
+              placeholder="Search symbol, sector, asset"
+              aria-label="Search symbols, sectors, or assets"
+            />
+          </label>
+          <button id="market-filter-clear" class="toolbar-button compact" type="button" hidden>Clear</button>
+          <span id="market-filter-status">All markets</span>
+        </div>
         <div id="board" class="board board-loading" aria-live="polite">
           <section class="group-panel loading-panel">
             <div class="group-title"><span></span><span></span><span></span><span></span><span></span></div>
@@ -227,6 +241,6 @@
 
     <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
     <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
-    <script src="/static/app.js?v=20260701-3" defer></script>
+    <script src="/static/app.js?v=20260701-4" defer></script>
   </body>
 </html>

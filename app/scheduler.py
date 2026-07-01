@@ -79,7 +79,8 @@ async def _refresh_daily_history(app_state: Any) -> None:
 
 
 def _board_payload(app_state: Any, grouped: Any) -> dict[str, object]:
-    payload = grouped_quotes_payload(app_state.groups, grouped)
+    summaries = app_state.daily_board_service.market_summaries(app_state.groups, grouped)
+    payload = grouped_quotes_payload(app_state.groups, grouped, summaries=summaries)
     payload["overview"] = app_state.daily_board_service.build(app_state.groups, grouped)
     return payload
 

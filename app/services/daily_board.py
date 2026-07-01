@@ -46,6 +46,23 @@ class DailyBoardService:
             "rotation": rotation,
         }
 
+    def market_summaries(
+        self,
+        groups: list[GroupConfig],
+        grouped_quotes: dict[str, list[Quote]],
+    ) -> dict[str, dict[str, object]]:
+        cached = db.load_bars_by_symbol(self.database_path, "1d")
+        assets = _unique_assets(groups)
+        quotes = _quotes_by_symbol(grouped_quotes)
+        return {
+            symbol: _market_summary(
+                asset,
+                quotes.get(symbol),
+                _preferred_bars(asset, cached),
+            )
+            for symbol, asset in assets.items()
+        }
+
 
 def _unique_assets(groups: list[GroupConfig]) -> dict[str, AssetConfig]:
     assets: dict[str, AssetConfig] = {}
@@ -108,6 +125,55 @@ def _asset_metrics(
         "low_52w": _at_low(current, bars, 252),
         "has_history": bool(bars),
         "is_stale": quote.is_stale if quote else True,
+    }
+
+
+def _market_summary(
+    asset: AssetConfig,
+    quote: Quote | None,
+    bars: list[Bar],
+) -> dict[str, object]:
+    current = quote.last if quote and quote.last > 0 else (bars[-1].close if bars else None)
+    closes = [bar.close for bar in bars]
+    return {
+        "sparkline": _sparkline_values(current, closes),
+        "performance": {
+            "1D": quote.change_pct if quote else None,
+            "1W": _return_from_close(current, closes, 6),
+            "1M": _return_from_close(current, closes, 22),
+            "3M": _return_from_close(current, closes, 64),
+            "YTD": _ytd_return(current, bars),
+            "1Y": _return_from_close(current, closes, 252),
+        },
+        "range_52w": _range_52w(current, bars),
+        "has_history": bool(bars),
+    }
+
+
+def _sparkline_values(current: float | None, closes: list[float], count: int = 32) -> list[float]:
+    values = closes[-count:]
+    if current is not None and current > 0:
+        values = values[-(count - 1) :] if len(values) >= count else values
+        if not values or values[-1] != current:
+            values = [*values, current]
+    return [round(value, 4) for value in values if value > 0]
+
+
+def _range_52w(current: float | None, bars: list[Bar]) -> dict[str, float] | None:
+    if current is None or current <= 0 or not bars:
+        return None
+    window = bars[-252:] if len(bars) >= 252 else bars
+    low = min(bar.low for bar in window)
+    high = max(bar.high for bar in window)
+    if low <= 0 or high <= low:
+        return None
+    return {
+        "low": round(low, 4),
+        "high": round(high, 4),
+        "current": round(current, 4),
+        "position_pct": round((current - low) / (high - low) * 100, 2),
+        "off_low_pct": round((current - low) / low * 100, 2),
+        "off_high_pct": round((high - current) / high * 100, 2),
     }
 
 
@@ -285,6 +351,20 @@ def _return_from_close(current: float | None, closes: list[float], offset: int) 
     if current is None or len(closes) < offset:
         return None
     reference = closes[-offset]
+    if reference == 0:
+        return None
+    return round((current - reference) / reference * 100, 4)
+
+
+def _ytd_return(current: float | None, bars: list[Bar]) -> float | None:
+    if current is None or not bars:
+        return None
+    end = bars[-1].timestamp
+    year_bars = [bar for bar in bars if bar.timestamp.year == end.year]
+    if not year_bars:
+        return None
+    first_year_index = bars.index(year_bars[0])
+    reference = bars[first_year_index - 1].close if first_year_index > 0 else year_bars[0].close
     if reference == 0:
         return None
     return round((current - reference) / reference * 100, 4)

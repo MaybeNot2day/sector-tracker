@@ -140,8 +140,11 @@ class QuoteService:
 
 
 def grouped_quotes_payload(
-    groups: list[GroupConfig], grouped_quotes: dict[str, list[Quote]]
+    groups: list[GroupConfig],
+    grouped_quotes: dict[str, list[Quote]],
+    summaries: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, object]:
+    summaries = summaries or {}
     return {
         "groups": [
             {
@@ -153,6 +156,7 @@ def grouped_quotes_payload(
                         "type": asset.type,
                         "exchange": asset.exchange,
                         "quote": quote_payload(quote),
+                        "summary": summaries.get(asset.symbol, {}),
                     }
                     for asset, quote in zip(
                         group.assets, grouped_quotes.get(group.name, []), strict=False

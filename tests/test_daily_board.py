@@ -33,6 +33,27 @@ def test_daily_board_builds_regime_breadth_and_theme_ranking(tmp_path: Path) -> 
     assert len(payload["benchmarks"]) == 1  # type: ignore[arg-type]
 
 
+def test_market_summaries_include_sparkline_performance_and_range(tmp_path: Path) -> None:
+    database = tmp_path / "board.sqlite3"
+    groups = [
+        GroupConfig(
+            name="TECH",
+            assets=[AssetConfig(symbol="NVDA", type="equity", source="yahoo")],
+        ),
+    ]
+    db.save_bars(database, _rising_bars("NVDA"))
+    grouped_quotes = {"TECH": [_quote("NVDA", "equity", 128.0, 124.0)]}
+
+    summaries = DailyBoardService(database).market_summaries(groups, grouped_quotes)
+    summary = summaries["NVDA"]
+
+    assert len(summary["sparkline"]) == 32  # type: ignore[arg-type]
+    assert summary["performance"]["1D"] == 3.225806  # type: ignore[index]
+    assert summary["performance"]["1W"] is not None  # type: ignore[index]
+    assert summary["range_52w"]["current"] == 128.0  # type: ignore[index]
+    assert summary["range_52w"]["position_pct"] > 90  # type: ignore[index]
+
+
 def _rising_bars(symbol: str) -> list[Bar]:
     start = datetime(2025, 1, 1, tzinfo=UTC)
     bars: list[Bar] = []

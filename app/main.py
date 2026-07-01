@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 from app import db
 from app.config import Settings, find_group, load_watchlists, save_watchlists
-from app.models import AssetConfig, AssetType, GroupConfig, ProviderName
+from app.models import AssetConfig, AssetType, GroupConfig, ProviderName, Quote
 from app.providers.base import QuoteProvider
 from app.providers.finnhub import FinnhubProvider
 from app.providers.hyperliquid import HyperliquidProvider
@@ -247,9 +247,7 @@ def clean_optional(value: str | None) -> str | None:
 @app.get("/api/quotes")
 async def quotes() -> dict[str, object]:
     grouped = await app.state.quote_service.get_board_quotes(app.state.groups)
-    payload = grouped_quotes_payload(app.state.groups, grouped)
-    payload["overview"] = app.state.daily_board_service.build(app.state.groups, grouped)
-    return payload
+    return board_payload(grouped)
 
 
 @app.get("/api/crypto-etf-flows")
@@ -291,12 +289,17 @@ async def quotes_ws(websocket: WebSocket) -> None:
     await manager.connect(websocket)
     try:
         grouped = await app.state.quote_service.get_board_quotes(app.state.groups)
-        payload = grouped_quotes_payload(app.state.groups, grouped)
-        payload["overview"] = app.state.daily_board_service.build(app.state.groups, grouped)
-        await websocket.send_json({"type": "quotes", "data": payload})
+        await websocket.send_json({"type": "quotes", "data": board_payload(grouped)})
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
     except Exception:
         manager.disconnect(websocket)
+
+
+def board_payload(grouped: dict[str, list[Quote]]) -> dict[str, object]:
+    summaries = app.state.daily_board_service.market_summaries(app.state.groups, grouped)
+    payload = grouped_quotes_payload(app.state.groups, grouped, summaries=summaries)
+    payload["overview"] = app.state.daily_board_service.build(app.state.groups, grouped)
+    return payload
