@@ -54,12 +54,30 @@ groups:
     type: equity
     source: yahoo
     exchange: NYSE
-- name: SEMIS_STORAGE
+- name: MEMORY
   assets:
+  - symbol: 005930.KS
+    type: equity
+    source: yahoo
+    exchange: KRX
+    name: Samsung Electronics
+  - symbol: 000660.KS
+    type: equity
+    source: yahoo
+    exchange: KRX
+    name: SK Hynix
+  - symbol: SNDK
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: SanDisk
   - symbol: MU
     type: equity
     source: yahoo
     exchange: NASDAQ
+    name: Micron Technology
+- name: SEMIS_STORAGE
+  assets:
   - symbol: WDC
     type: equity
     source: yahoo

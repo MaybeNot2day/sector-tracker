@@ -56,3 +56,10 @@ def test_save_watchlists_round_trips_empty_group_and_assets(tmp_path: Path) -> N
 
     assert loaded == groups
     assert find_group(loaded, "new_sector") == groups[0]
+
+
+def test_default_watchlist_has_unique_symbols() -> None:
+    groups = load_watchlists(Path("config/watchlists.yaml"))
+    symbols = [asset.symbol for group in groups for asset in group.assets]
+
+    assert len(symbols) == len(set(symbols))
