@@ -44,6 +44,7 @@ class HyperliquidProvider(QuoteProvider):
                     last=last,
                     previous_close=previous_close,
                     timestamp=now,
+                    currency="USD",
                 )
             )
         return quotes

@@ -56,6 +56,11 @@ groups:
     exchange: NYSE
 - name: MEMORY
   assets:
+  - symbol: DRAM
+    type: etf
+    source: yahoo
+    exchange: BATS
+    name: Roundhill Memory ETF
   - symbol: 005930.KS
     type: equity
     source: yahoo
@@ -76,16 +81,16 @@ groups:
     source: yahoo
     exchange: NASDAQ
     name: Micron Technology
-- name: SEMIS_STORAGE
-  assets:
   - symbol: WDC
     type: equity
     source: yahoo
     exchange: NASDAQ
+    name: Western Digital
   - symbol: STX
     type: equity
     source: yahoo
     exchange: NASDAQ
+    name: Seagate Technology
 - name: MEMORY_POOLING
   assets:
   - symbol: ALAB

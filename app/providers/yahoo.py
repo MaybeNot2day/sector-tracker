@@ -228,7 +228,16 @@ def _quote_from_chart_result(asset: AssetConfig, result: dict[str, Any]) -> Quot
         last=last,
         previous_close=previous_close,
         timestamp=market_price[1] if market_price else datetime.now(UTC),
+        currency=_currency(meta),
     )
+
+
+def _currency(meta: dict[str, Any]) -> str | None:
+    value = meta.get("currency")
+    if not isinstance(value, str):
+        return None
+    value = value.strip().upper()
+    return value or None
 
 
 def _latest_market_price(meta: dict[str, Any]) -> tuple[float, datetime] | None:

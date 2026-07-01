@@ -20,6 +20,7 @@ class Quote:
     timestamp: datetime
     is_stale: bool = False
     error: str | None = None
+    currency: str | None = None
 
     @classmethod
     def from_last_and_prev_close(
@@ -33,6 +34,7 @@ class Quote:
         timestamp: datetime,
         is_stale: bool = False,
         error: str | None = None,
+        currency: str | None = None,
     ) -> Quote:
         if previous_close and previous_close != 0:
             change_abs = round(last - previous_close, 6)
@@ -51,6 +53,7 @@ class Quote:
             timestamp=timestamp,
             is_stale=is_stale,
             error=error,
+            currency=currency,
         )
 
 
@@ -80,4 +83,3 @@ class AssetConfig:
 class GroupConfig:
     name: str
     assets: list[AssetConfig]
-

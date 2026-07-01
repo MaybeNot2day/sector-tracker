@@ -845,14 +845,14 @@ function updateRow(row, asset, options = {}) {
   updateSymbolCell(ensureRowCell(row, "symbol"), asset);
   updateValueCell(
     ensureRowCell(row, "last", "last-cell"),
-    formatPrice(quote.last, quote.error),
+    formatBoardPrice(quote.last, quote.error, quote.currency),
     quote.last,
     "last-cell",
     !options.initial
   );
   updateValueCell(
     ensureRowCell(row, "abs", "change-abs-cell"),
-    formatSigned(quote.change_abs),
+    formatBoardSignedChange(quote.change_abs, quote.currency),
     quote.change_abs,
     "change-abs-cell",
     !options.initial
@@ -1150,17 +1150,18 @@ function profileMarketContext(summary) {
 
 function profileRangeBar(range) {
   const position = clampNumber(range.position_pct, 0, 100);
+  const currency = activeAsset?.quote?.currency || "USD";
   return `
     <div class="profile-range" style="--range-position: ${position}%">
       <div class="profile-range-head">
         <span>52W Range</span>
-        <strong>${formatUsdPrice(range.current)}</strong>
+        <strong>${formatCurrencyPrice(range.current, currency)}</strong>
       </div>
       <div class="range-track" aria-hidden="true"><span></span></div>
       <div class="range-labels">
-        <span>${formatUsdPrice(range.low)}</span>
+        <span>${formatCurrencyPrice(range.low, currency)}</span>
         <span>${formatPlainPct(range.off_low_pct)} above low · ${formatPlainPct(range.off_high_pct)} below high</span>
-        <span>${formatUsdPrice(range.high)}</span>
+        <span>${formatCurrencyPrice(range.high, currency)}</span>
       </div>
     </div>
   `;
@@ -1324,11 +1325,30 @@ function formatUsdPrice(value) {
   return price === "--" ? price : `$${price}`;
 }
 
+function formatBoardPrice(value, error, currency) {
+  if (error || typeof value !== "number" || value === 0) return "--";
+  if (!currency || currency === "USD") return formatPrice(value);
+  return `${currencyPrefix(currency)}${formatCompactPrice(value)}`;
+}
+
+function formatCurrencyPrice(value, currency = "USD") {
+  if (typeof value !== "number" || value === 0) return "--";
+  const prefix = currencyPrefix(currency);
+  if (currency && currency !== "USD") return `${prefix}${formatCompactPrice(value)}`;
+  return `${prefix}${formatPrice(value)}`;
+}
+
 function formatSigned(value) {
   if (typeof value !== "number") return "--";
   const abs = Math.abs(value);
   const formatted = abs >= 100 ? abs.toFixed(1) : abs.toFixed(2);
   return `${value >= 0 ? "+" : "-"}${formatted}`;
+}
+
+function formatBoardSignedChange(value, currency) {
+  if (typeof value !== "number") return "--";
+  if (!currency || currency === "USD") return formatSigned(value);
+  return `${value >= 0 ? "+" : "-"}${currencyPrefix(currency)}${formatCompactPrice(Math.abs(value))}`;
 }
 
 function formatSignedPct(value) {
@@ -1344,6 +1364,24 @@ function formatPlainPct(value) {
 function formatSignedNumber(value) {
   if (typeof value !== "number") return "--";
   return `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
+}
+
+function formatCompactPrice(value) {
+  const abs = Math.abs(value);
+  if (abs >= 1_000_000_000) return `${(abs / 1_000_000_000).toFixed(2)}B`;
+  if (abs >= 1_000_000) return `${(abs / 1_000_000).toFixed(2)}M`;
+  if (abs >= 1000) return `${(abs / 1000).toFixed(abs >= 100_000 ? 1 : 2)}K`;
+  return formatPrice(abs);
+}
+
+function currencyPrefix(currency) {
+  return {
+    KRW: "₩",
+    JPY: "¥",
+    EUR: "€",
+    GBP: "£",
+    USD: "$",
+  }[currency] || `${currency} `;
 }
 
 function formatUsdFlow(value) {

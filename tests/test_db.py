@@ -14,6 +14,7 @@ def test_save_and_load_latest_quote(tmp_path: Path) -> None:
         last=510.0,
         previous_close=500.0,
         timestamp=datetime.now(UTC),
+        currency="USD",
     )
 
     db.save_quotes(database, [quote])
@@ -22,6 +23,7 @@ def test_save_and_load_latest_quote(tmp_path: Path) -> None:
     assert loaded is not None
     assert loaded.symbol == "SPY"
     assert loaded.change_pct == 2.0
+    assert loaded.currency == "USD"
 
 
 def test_save_and_load_bars(tmp_path: Path) -> None:
@@ -43,4 +45,3 @@ def test_save_and_load_bars(tmp_path: Path) -> None:
     loaded = db.load_bars(database, "NVDA", "1d", "yahoo")
 
     assert loaded == [bar]
-

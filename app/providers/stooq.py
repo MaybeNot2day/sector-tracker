@@ -43,6 +43,7 @@ class StooqProvider(QuoteProvider):
                     last=close,
                     previous_close=None,
                     timestamp=_parse_stooq_datetime(row.get("Date"), row.get("Time")),
+                    currency=_stooq_currency(asset.symbol),
                 )
             )
         return quotes
@@ -90,6 +91,13 @@ def _stooq_symbol(symbol: str) -> str:
     if "." in lowered:
         return lowered
     return f"{lowered}.us"
+
+
+def _stooq_currency(symbol: str) -> str | None:
+    lowered = symbol.lower()
+    if "." not in lowered or lowered.endswith(".us"):
+        return "USD"
+    return None
 
 
 def _parse_stooq_datetime(date_value: Any, time_value: Any) -> datetime:

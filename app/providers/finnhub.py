@@ -43,6 +43,7 @@ class FinnhubProvider(QuoteProvider):
                         last=last,
                         previous_close=previous_close,
                         timestamp=datetime.now(UTC),
+                        currency="USD",
                     )
                 )
         return quotes

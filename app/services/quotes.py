@@ -180,6 +180,7 @@ def quote_payload(quote: Quote) -> dict[str, object]:
         "timestamp": quote.timestamp.isoformat(),
         "is_stale": quote.is_stale,
         "error": quote.error,
+        "currency": quote.currency,
     }
 
 

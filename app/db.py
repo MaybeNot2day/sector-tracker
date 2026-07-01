@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS latest_quotes (
     change_pct REAL,
     timestamp TEXT NOT NULL,
     is_stale INTEGER NOT NULL DEFAULT 0,
-    error TEXT
+    error TEXT,
+    currency TEXT
 );
 
 CREATE TABLE IF NOT EXISTS bars (
@@ -42,6 +43,7 @@ def init_db(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with _connect(path) as conn:
         conn.executescript(SCHEMA)
+        _ensure_column(conn, "latest_quotes", "currency", "TEXT")
 
 
 def save_quotes(path: Path, quotes: Sequence[Quote]) -> None:
@@ -53,9 +55,9 @@ def save_quotes(path: Path, quotes: Sequence[Quote]) -> None:
             """
             INSERT INTO latest_quotes (
                 symbol, asset_type, provider, last, previous_close, change_abs, change_pct,
-                timestamp, is_stale, error
+                timestamp, is_stale, error, currency
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(symbol) DO UPDATE SET
                 asset_type = excluded.asset_type,
                 provider = excluded.provider,
@@ -65,7 +67,8 @@ def save_quotes(path: Path, quotes: Sequence[Quote]) -> None:
                 change_pct = excluded.change_pct,
                 timestamp = excluded.timestamp,
                 is_stale = excluded.is_stale,
-                error = excluded.error
+                error = excluded.error,
+                currency = excluded.currency
             """,
             [
                 (
@@ -79,6 +82,7 @@ def save_quotes(path: Path, quotes: Sequence[Quote]) -> None:
                     _to_iso(quote.timestamp),
                     int(quote.is_stale),
                     quote.error,
+                    quote.currency,
                 )
                 for quote in quotes
             ],
@@ -91,7 +95,7 @@ def load_latest_quote(path: Path, symbol: str) -> Quote | None:
         row = conn.execute(
             """
             SELECT symbol, asset_type, provider, last, previous_close, change_abs, change_pct,
-                   timestamp, is_stale, error
+                   timestamp, is_stale, error, currency
             FROM latest_quotes
             WHERE symbol = ?
             """,
@@ -206,6 +210,17 @@ def _connect(path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _ensure_column(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def _to_iso(value: datetime) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
@@ -231,6 +246,7 @@ def _quote_from_row(row: sqlite3.Row) -> Quote:
         timestamp=_from_iso(str(row["timestamp"])),
         is_stale=bool(row["is_stale"]),
         error=cast(str | None, row["error"]),
+        currency=cast(str | None, row["currency"]),
     )
 
 
