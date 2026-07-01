@@ -156,22 +156,23 @@ async def delete_group(group_name: str) -> dict[str, object]:
 
 @app.post("/api/groups/{group_name}/assets")
 async def create_asset(group_name: str, request: AssetRequest) -> dict[str, object]:
+    symbol = clean_symbol(request.symbol)
+    asset = AssetConfig(
+        symbol=symbol,
+        type=request.type,
+        source=request.source,
+        exchange=clean_optional(request.exchange),
+        name=clean_optional(request.name),
+    )
+    await validate_symbol_exists(asset)
     async with app.state.watchlist_lock:
         groups_current = load_watchlists(app.state.settings.watchlist_path)
         group = find_group(groups_current, group_name)
         if group is None:
             raise HTTPException(status_code=404, detail="group_not_found")
 
-        symbol = clean_symbol(request.symbol)
-        if any(asset.symbol == symbol for asset in group.assets):
+        if any(existing.symbol == symbol for existing in group.assets):
             raise HTTPException(status_code=409, detail="asset_already_exists")
-        asset = AssetConfig(
-            symbol=symbol,
-            type=request.type,
-            source=request.source,
-            exchange=clean_optional(request.exchange),
-            name=clean_optional(request.name),
-        )
         groups_current = [
             GroupConfig(
                 name=item.name,
@@ -182,6 +183,23 @@ async def create_asset(group_name: str, request: AssetRequest) -> dict[str, obje
         save_watchlists(app.state.settings.watchlist_path, groups_current)
         app.state.groups = load_watchlists(app.state.settings.watchlist_path)
     return groups_payload(app.state.groups)
+
+
+async def validate_symbol_exists(asset: AssetConfig) -> None:
+    """Reject adds only when the provider answers and has no data for the symbol.
+
+    A provider outage must not block edits, so exceptions pass silently.
+    """
+    provider = app.state.quote_service.providers.get(asset.source)
+    if provider is None:
+        return
+    try:
+        quotes = await provider.get_quotes([asset])
+    except Exception:
+        return
+    valid = [quote for quote in quotes if quote.symbol == asset.symbol and quote.error is None]
+    if not valid:
+        raise HTTPException(status_code=422, detail="symbol_not_found")
 
 
 @app.delete("/api/groups/{group_name}/assets/{symbol}")

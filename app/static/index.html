@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=20260702-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260702-2" />
   </head>
   <body>
     <header class="app-header">
@@ -46,7 +46,7 @@
       <div class="topbar-actions">
         <div class="live-badge">
           <span id="connection-state" class="state-dot"></span>
-          <span>Live Feed</span>
+          <span id="feed-mode">Connecting</span>
           <span id="live-freshness" class="live-freshness">Updated --</span>
         </div>
         <button id="refresh-button" class="toolbar-button" type="button">
@@ -122,14 +122,21 @@
               id="market-search"
               type="search"
               autocomplete="off"
-              placeholder="Search symbol, sector, asset"
+              placeholder="Search symbol, sector, asset ( / )"
               aria-label="Search symbols, sectors, or assets"
             />
           </label>
           <button id="market-filter-clear" class="toolbar-button compact" type="button" hidden>Clear</button>
-          <span id="market-filter-status">All markets</span>
+          <button
+            id="market-layout-toggle"
+            class="toolbar-button compact"
+            type="button"
+            aria-pressed="false"
+            title="Flatten all groups into one sortable movers table"
+          >Flat</button>
+          <span id="market-filter-status" aria-live="polite">All markets</span>
         </div>
-        <div id="board" class="board board-loading" aria-live="polite">
+        <div id="board" class="board board-loading">
           <section class="group-panel loading-panel">
             <div class="group-title"><span></span><span></span><span></span><span></span><span></span></div>
             <div class="loading-rows"><span></span><span></span><span></span><span></span><span></span></div>
@@ -151,7 +158,7 @@
         <div class="modal-header">
           <div>
             <h2 id="editor-title">Universe Editor</h2>
-            <p id="editor-status"></p>
+            <p id="editor-status" aria-live="polite"></p>
           </div>
           <button id="editor-close" class="icon-button" type="button" aria-label="Close editor">
             <i data-lucide="x" aria-hidden="true"></i>
@@ -221,15 +228,18 @@
           </button>
         </div>
         <div class="intervals" role="tablist" aria-label="Chart range">
-          <button type="button" data-range="10m" data-interval="1m">10M</button>
-          <button type="button" data-range="30m" data-interval="1m">30M</button>
-          <button type="button" data-range="1h" data-interval="1m">1H</button>
-          <button type="button" data-range="4h" data-interval="5m">4H</button>
-          <button type="button" data-range="1d" data-interval="5m">1D</button>
+          <span class="interval-group" aria-hidden="true">Intraday</span>
+          <button type="button" data-range="10m" data-interval="1m" data-intraday>10m</button>
+          <button type="button" data-range="30m" data-interval="1m" data-intraday>30m</button>
+          <button type="button" data-range="1h" data-interval="1m" data-intraday>1h</button>
+          <button type="button" data-range="4h" data-interval="5m" data-intraday>4h</button>
+          <button type="button" data-range="1d" data-interval="5m" data-intraday>1D</button>
+          <span class="interval-group" aria-hidden="true">History</span>
           <button type="button" data-range="1w" data-interval="15m">1W</button>
-          <button type="button" data-range="1mo" data-interval="1h">1M</button>
-          <button type="button" data-range="3mo" data-interval="1d">3M</button>
+          <button type="button" data-range="1mo" data-interval="1h">1Mo</button>
+          <button type="button" data-range="3mo" data-interval="1d">3Mo</button>
           <button type="button" data-range="ytd" data-interval="1d" class="active">YTD</button>
+          <button type="button" data-range="1y" data-interval="1d">1Y</button>
         </div>
         <div id="chart-error" class="chart-error" hidden></div>
         <div id="chart" class="chart"></div>
@@ -239,8 +249,8 @@
       </div>
     </div>
 
-    <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
-    <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
-    <script src="/static/app.js?v=20260702-1" defer></script>
+    <script src="/static/vendor/lucide.min.js?v=20260702-2"></script>
+    <script src="/static/vendor/lightweight-charts.standalone.production.js?v=20260702-2"></script>
+    <script src="/static/app.js?v=20260702-2" defer></script>
   </body>
 </html>

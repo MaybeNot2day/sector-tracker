@@ -5,12 +5,14 @@ const statusCopy = document.querySelector("#status-copy");
 const statusStrip = document.querySelector("#status-strip");
 const connectionState = document.querySelector("#connection-state");
 const liveFreshness = document.querySelector("#live-freshness");
+const feedModeLabel = document.querySelector("#feed-mode");
 const refreshButton = document.querySelector("#refresh-button");
 const viewButtons = Array.from(document.querySelectorAll(".view-tabs button"));
 const dailyView = document.querySelector("#daily-view");
 const marketsView = document.querySelector("#markets-view");
 const marketSearch = document.querySelector("#market-search");
 const marketFilterClear = document.querySelector("#market-filter-clear");
+const marketLayoutToggle = document.querySelector("#market-layout-toggle");
 const marketFilterStatus = document.querySelector("#market-filter-status");
 const modal = document.querySelector("#chart-modal");
 const modalShell = document.querySelector("#chart-modal .modal-shell");
@@ -54,6 +56,11 @@ let chartResizeFrame = null;
 let marketSearchQuery = "";
 let activeGroupFilter = "";
 let marketSort = { key: "configured", direction: "default" };
+let marketLayout = "grouped"; // "grouped" | "flat"
+let feedMode = "poll"; // "ws" locally, "poll" on serverless deployments
+let activeView = "daily";
+let pendingChartFromUrl = null;
+let restoringUrlState = false;
 
 const sourceLabels = {
   yahoo: "YH",
@@ -62,16 +69,210 @@ const sourceLabels = {
   finnhub: "FH",
 };
 
+// --- Market session awareness -------------------------------------------
+// Client-side session clock per exchange. Timezones handled via Intl, so
+// DST is correct without a tz table. Crypto perps trade 24/7.
+const EXCHANGE_SESSIONS = {
+  NASDAQ: "us",
+  NYSE: "us",
+  NYSEARCA: "us",
+  BATS: "us",
+  CBOE: "us",
+  KRX: "krx",
+};
+
+const SESSION_DEFS = {
+  us: {
+    label: "US",
+    timeZone: "America/New_York",
+    days: [1, 2, 3, 4, 5],
+    open: 9 * 60 + 30,
+    close: 16 * 60,
+    pre: 4 * 60,
+    post: 20 * 60,
+  },
+  krx: {
+    label: "KRX",
+    timeZone: "Asia/Seoul",
+    days: [1, 2, 3, 4, 5],
+    open: 9 * 60,
+    close: 15 * 60 + 30,
+  },
+};
+
+const WEEKDAY_INDEX = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+
+function zonedNow(timeZone) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date());
+  const get = (type) => parts.find((part) => part.type === type)?.value || "";
+  return {
+    day: WEEKDAY_INDEX[get("weekday")] ?? 0,
+    minutes: (Number(get("hour")) % 24) * 60 + Number(get("minute")),
+  };
+}
+
+function sessionState(sessionKey) {
+  const def = SESSION_DEFS[sessionKey];
+  if (!def) return null;
+  const now = zonedNow(def.timeZone);
+  if (!def.days.includes(now.day)) return { key: sessionKey, label: def.label, state: "closed" };
+  if (now.minutes >= def.open && now.minutes < def.close) {
+    return { key: sessionKey, label: def.label, state: "open" };
+  }
+  if (typeof def.pre === "number" && now.minutes >= def.pre && now.minutes < def.open) {
+    return { key: sessionKey, label: def.label, state: "pre" };
+  }
+  if (typeof def.post === "number" && now.minutes >= def.close && now.minutes < def.post) {
+    return { key: sessionKey, label: def.label, state: "post" };
+  }
+  return { key: sessionKey, label: def.label, state: "closed" };
+}
+
+function assetSessionKey(asset) {
+  if (isCryptoAsset(asset.type)) return "crypto";
+  return EXCHANGE_SESSIONS[String(asset.exchange || "").toUpperCase()] || "us";
+}
+
+const SESSION_STATE_COPY = {
+  open: "Open",
+  pre: "Pre",
+  post: "Post",
+  closed: "Closed",
+};
+
+function groupSessionChip(assets) {
+  const keys = [...new Set((assets || []).map(assetSessionKey))];
+  if (!keys.length) return null;
+  if (keys.every((key) => key === "crypto")) return { text: "24/7", state: "open", title: "Crypto trades around the clock" };
+  const states = keys
+    .filter((key) => key !== "crypto")
+    .map(sessionState)
+    .filter(Boolean);
+  if (!states.length) return null;
+  const hasCrypto = keys.includes("crypto");
+  const parts = states.map((item) => `${item.label} ${SESSION_STATE_COPY[item.state]}`);
+  if (hasCrypto) parts.push("Crypto 24/7");
+  const anyOpen = states.some((item) => item.state === "open") || hasCrypto;
+  const anyEdge = states.some((item) => item.state === "pre" || item.state === "post");
+  return {
+    text: parts.join(" · "),
+    state: anyOpen ? "open" : anyEdge ? "edge" : "closed",
+    title: parts.join(", "),
+  };
+}
+
+function quoteAge(quote) {
+  const stamp = Date.parse(quote?.timestamp || "");
+  if (Number.isNaN(stamp)) return null;
+  const seconds = Math.max(0, (Date.now() - stamp) / 1000);
+  if (seconds < 90) return "just now";
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
+  return `${Math.round(seconds / 86400)}d ago`;
+}
+
 init();
+
+// --- URL state ------------------------------------------------------------
+// View, filters, and open chart mirror into the hash so any board state is
+// bookmarkable/shareable. replaceState keeps history clean.
+function syncUrlState() {
+  if (restoringUrlState) return;
+  const params = new URLSearchParams();
+  if (activeView !== "daily") params.set("view", activeView);
+  if (activeGroupFilter) params.set("group", activeGroupFilter);
+  if (marketSearchQuery) params.set("q", marketSearchQuery);
+  if (marketLayout === "flat") params.set("layout", "flat");
+  if (activeSymbol) {
+    params.set("chart", activeSymbol);
+    if (activeRange !== "ytd") params.set("range", activeRange);
+  }
+  const hash = params.toString();
+  const next = hash ? `#${hash}` : window.location.pathname + window.location.search;
+  if (`#${hash}` === window.location.hash || (!hash && !window.location.hash)) return;
+  history.replaceState(null, "", hash ? `#${hash}` : next);
+}
+
+function restoreUrlState() {
+  const raw = window.location.hash.replace(/^#/, "");
+  if (!raw) return;
+  const params = new URLSearchParams(raw);
+  restoringUrlState = true;
+  try {
+    const view = params.get("view");
+    if (view === "markets") selectView("markets");
+    const group = params.get("group");
+    if (group) activeGroupFilter = group;
+    const query = params.get("q");
+    if (query) {
+      marketSearchQuery = query;
+      marketSearch.value = query;
+    }
+    if (params.get("layout") === "flat") {
+      marketLayout = "flat";
+      marketSort = { key: "pct", direction: "desc" };
+      marketLayoutToggle.setAttribute("aria-pressed", "true");
+      marketLayoutToggle.textContent = "Grouped";
+      marketLayoutToggle.title = "Back to sector groups";
+    }
+    const chartSymbol = params.get("chart");
+    if (chartSymbol) {
+      pendingChartFromUrl = {
+        symbol: chartSymbol.toUpperCase(),
+        range: params.get("range") || "ytd",
+      };
+    }
+  } finally {
+    restoringUrlState = false;
+  }
+}
+
+function findAssetConfig(symbol) {
+  if (!symbol || !latestData?.groups) return null;
+  for (const group of latestData.groups) {
+    const asset = (group.assets || []).find((item) => item.symbol === symbol);
+    if (asset) return asset;
+  }
+  return null;
+}
+
+function openPendingChartFromUrl() {
+  if (!pendingChartFromUrl || !latestData) return;
+  const { symbol, range } = pendingChartFromUrl;
+  const asset = findAssetConfig(symbol);
+  pendingChartFromUrl = null;
+  if (asset) openChart(asset, { range });
+}
 
 function init() {
   window.lucide?.createIcons();
   setConnection("connecting");
+  restoreUrlState();
   fetchQuotes();
   fetchCryptoEtfFlows();
-  if (shouldUseWebSocket()) openSocket();
-  window.setInterval(fetchQuotes, 15000);
-  window.setInterval(fetchCryptoEtfFlows, 300000);
+  feedMode = shouldUseWebSocket() ? "ws" : "poll";
+  updateFeedModeLabel();
+  if (feedMode === "ws") openSocket();
+  // Poll only while the tab is visible; a hidden tab otherwise burns
+  // ~5.7k serverless invocations/day for nothing.
+  window.setInterval(() => {
+    if (!document.hidden) fetchQuotes();
+  }, 15000);
+  window.setInterval(() => {
+    if (!document.hidden) fetchCryptoEtfFlows();
+  }, 300000);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      fetchQuotes();
+      fetchCryptoEtfFlows();
+    }
+  });
   refreshButton.addEventListener("click", () => {
     fetchQuotes();
     fetchCryptoEtfFlows();
@@ -83,6 +284,7 @@ function init() {
   marketSearch.addEventListener("input", () => {
     marketSearchQuery = marketSearch.value.trim();
     renderBoard(latestData);
+    syncUrlState();
   });
   marketSearch.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
@@ -91,6 +293,7 @@ function init() {
     }
   });
   marketFilterClear.addEventListener("click", clearMarketFilters);
+  marketLayoutToggle.addEventListener("click", toggleMarketLayout);
   modalClose.addEventListener("click", closeModal);
   modal.addEventListener("click", (event) => {
     if (event.target === modal) closeModal();
@@ -115,6 +318,16 @@ function init() {
     if (event.key === "Escape") {
       closeModal();
       closeEditor();
+      return;
+    }
+    if (
+      (event.key === "j" || event.key === "k") &&
+      !activeDialog &&
+      !isTextInput(event.target) &&
+      !marketsView.hidden
+    ) {
+      event.preventDefault();
+      moveMarketRowFocus(event.key === "j" ? 1 : -1);
     }
   });
   intervalButtons.forEach((button) => {
@@ -123,6 +336,7 @@ function init() {
       activeInterval = button.dataset.interval || "1d";
       intervalButtons.forEach((item) => item.classList.toggle("active", item === button));
       if (activeSymbol) loadChart(activeSymbol, activeRange, activeInterval);
+      syncUrlState();
     });
   });
   groupForm.addEventListener("submit", addGroup);
@@ -131,15 +345,17 @@ function init() {
 }
 
 function selectView(view) {
-  const showDaily = view === "daily";
+  activeView = view === "markets" ? "markets" : "daily";
+  const showDaily = activeView === "daily";
   dailyView.hidden = !showDaily;
   marketsView.hidden = showDaily;
   viewButtons.forEach((button) => {
-    const selected = button.dataset.view === view;
+    const selected = button.dataset.view === activeView;
     button.classList.toggle("active", selected);
     button.setAttribute("aria-selected", String(selected));
     button.tabIndex = selected ? 0 : -1;
   });
+  syncUrlState();
 }
 
 function handleViewTabKeydown(event) {
@@ -186,7 +402,11 @@ function openSocket() {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   const socket = new WebSocket(`${protocol}://${window.location.host}/ws/quotes`);
 
-  socket.addEventListener("open", () => setConnection("live"));
+  socket.addEventListener("open", () => {
+    feedMode = "ws";
+    updateFeedModeLabel();
+    setConnection("live");
+  });
   socket.addEventListener("message", (event) => {
     const message = JSON.parse(event.data);
     if (message.type === "quotes") {
@@ -195,10 +415,20 @@ function openSocket() {
     }
   });
   socket.addEventListener("close", () => {
+    feedMode = "poll";
+    updateFeedModeLabel();
     setConnection("error");
     window.setTimeout(openSocket, 3000);
   });
   socket.addEventListener("error", () => setConnection("error"));
+}
+
+function updateFeedModeLabel() {
+  feedModeLabel.textContent = feedMode === "ws" ? "WS Live" : "Poll 15s";
+  feedModeLabel.title =
+    feedMode === "ws"
+      ? "Streaming over WebSocket"
+      : "Quotes refresh by HTTP poll every 15 seconds";
 }
 
 function applyQuotes(payload) {
@@ -206,6 +436,7 @@ function applyQuotes(payload) {
   renderBoard(payload);
   renderDailyBoard(payload.overview, latestCryptoEtfFlows);
   updateHeader(payload.overview);
+  openPendingChartFromUrl();
 }
 
 async function fetchCryptoEtfFlows() {
@@ -231,17 +462,19 @@ function updateHeader(overview) {
   if (!overview) return;
   const universe = overview.universe || {};
   const asOf = new Date(overview.as_of);
-  const date = Number.isNaN(asOf.getTime()) ? "--" : asOf.toISOString().slice(0, 10);
+  const date = Number.isNaN(asOf.getTime()) ? "--" : formatLocalDate(asOf);
   const time = Number.isNaN(asOf.getTime()) ? "--" : formatClock(asOf);
   boardMeta.textContent = `${date} · ${universe.total || 0} names · universe v2`;
   liveFreshness.textContent = time === "--" ? "Updated --" : `Updated ${time}`;
+  const usSession = sessionState("us");
   statusCopy.textContent = [
-    "LIVE QUOTES",
+    feedMode === "ws" ? "LIVE QUOTES" : "POLLED QUOTES",
+    usSession ? `US ${SESSION_STATE_COPY[usSession.state].toUpperCase()}` : null,
     `${universe.quoted || 0}/${universe.total || 0} QUOTED`,
     `HISTORY ${universe.history_count || 0}/${universe.total || 0}`,
     `FLOWS ${flowStatusLabel(latestCryptoEtfFlows)}`,
     `UPDATED ${time}`,
-  ].join(" · ");
+  ].filter(Boolean).join(" · ");
 }
 
 function renderDailyBoard(overview, cryptoEtfFlows) {
@@ -255,15 +488,20 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
   const benchmarks = overview.benchmarks || [];
   const themes = overview.themes || [];
   const rotation = overview.rotation || {};
-  const movers = [...themes]
+  const movers = themes
+    .filter((theme) => typeof theme.acceleration === "number")
     .sort((a, b) => Math.abs(b.acceleration || 0) - Math.abs(a.acceleration || 0))
     .slice(0, 8);
   const asOf = new Date(overview.as_of);
-  const asOfLabel = Number.isNaN(asOf.getTime()) ? "" : `As of ${asOf.toISOString().slice(0, 10)}`;
+  const asOfLabel = Number.isNaN(asOf.getTime()) ? "" : `As of ${formatLocalDate(asOf)}`;
 
   dailyBoard.innerHTML = `
     <section class="analytics-panel">
-      ${panelHeading("Regime Read", asOfLabel)}
+      ${panelHeading(
+        "Regime Read",
+        asOfLabel,
+        "Risk-on/off from advance %, breadth vs 50/200DMA, and 3%+ movers across the universe"
+      )}
       <div class="regime-grid">
         ${regimeCell(
           "Regime",
@@ -291,14 +529,22 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
 
     <div class="analytics-grid">
       <section class="analytics-panel">
-        ${panelHeading("Benchmarks", "Return / Dist 50DMA / ATR Ext")}
+        ${panelHeading(
+          "Benchmarks",
+          "Return / Dist 50DMA / ATR Ext",
+          "ETF_MACRO group. ATR ext = distance from 20DMA in ATR(14) units; above +2 is stretched"
+        )}
         <div class="benchmark-grid">
           ${benchmarks.map(benchmarkCard).join("") || '<div class="empty-state">Add ETF_MACRO benchmarks</div>'}
         </div>
       </section>
 
       <section class="analytics-panel">
-        ${panelHeading("Breadth", `${universe.history_count || 0} names with history`)}
+        ${panelHeading(
+          "Breadth",
+          `${universe.history_count || 0} names with history`,
+          "Share of universe above moving averages; new 20-day highs/lows and 3%+ movers"
+        )}
         <div class="breadth-grid">
           ${breadthRow("% > 20DMA", formatPlainPct(universe.above_20dma_pct))}
           ${breadthRow("% > 50DMA", formatPlainPct(universe.above_50dma_pct))}
@@ -314,12 +560,20 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
 
     <div class="analytics-grid equal">
       <section class="analytics-panel">
-        ${panelHeading("Dominant Themes", "Score / 1D / 5D / Status")}
+        ${panelHeading(
+          "Dominant Themes",
+          "Score / 1D / 5D / Status",
+          "Score = 50 + 7×avg 1D + 2×avg 5D + 0.18×(advance% − 50) + 0.18×(>50DMA% − 50), clamped 0–100. Status: ≥75 dominant, ≥62 strong, ≥52 emerging, ≥45 neutral, ≥30 deteriorating, else fading"
+        )}
         ${themeTable(themes.slice(0, 8))}
       </section>
       <section class="analytics-panel">
-        ${panelHeading("Momentum Shifts", "Largest momentum shifts")}
-        ${themeTable(movers)}
+        ${panelHeading(
+          "Momentum Shifts",
+          "\u0394 pace = 1D move minus 5D daily pace, pct-pts",
+          "Themes accelerating or decelerating the hardest today versus their recent trend"
+        )}
+        ${themeTable(movers, "momentum")}
       </section>
     </div>
 
@@ -329,7 +583,11 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
     </section>
 
     <section class="analytics-panel">
-      ${panelHeading("Theme Rotation", "1D move versus 5D daily pace")}
+      ${panelHeading(
+        "Theme Rotation",
+        "1D move versus 5D daily pace",
+        "Climbers move faster than their 5-day pace today; fallers slower. Pace in pct-pts per day"
+      )}
       <div class="rotation-grid">
         ${rotationColumn("↑ Climbers", rotation.climbers || [])}
         ${rotationColumn("↓ Fallers", rotation.fallers || [])}
@@ -353,8 +611,9 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
   });
 }
 
-function panelHeading(title, note) {
-  return `<header class="panel-heading"><h2>${escapeHtml(title)}</h2><span>${escapeHtml(note || "")}</span></header>`;
+function panelHeading(title, note, tip = "") {
+  const titleAttr = tip ? ` title="${escapeHtml(tip)}"` : "";
+  return `<header class="panel-heading"${titleAttr}><h2>${escapeHtml(title)}</h2><span>${escapeHtml(note || "")}</span></header>`;
 }
 
 function regimeCell(label, value, detail, tone = "") {
@@ -379,7 +638,7 @@ function themeRegimeCell(label, theme) {
 function pairRegimeCell(label, positive, negative, detail) {
   return `<div class="regime-cell">
     <span class="metric-label">${escapeHtml(label)}</span>
-    <div class="metric-value split-value"><span class="tone-positive">${formatInteger(positive)}</span><span>/</span><span class="tone-negative">${formatInteger(negative)}</span></div>
+    <div class="metric-value split-value"><span class="tone-positive">↑${formatInteger(positive)}</span><span>/</span><span class="tone-negative">↓${formatInteger(negative)}</span></div>
     <span class="metric-detail">${escapeHtml(detail)}</span>
   </div>`;
 }
@@ -389,35 +648,41 @@ function benchmarkCard(item) {
     <span class="benchmark-symbol">${escapeHtml(item.symbol)}</span>
     <span class="benchmark-name">${escapeHtml(item.name || item.type || "Benchmark")}</span>
     <span class="metric-lines">
-      ${metricLine("1D", formatSignedPct(item.change_1d), changeClass(item.change_1d))}
-      ${metricLine("5D", formatSignedPct(item.change_5d), changeClass(item.change_5d))}
-      ${metricLine(">50DMA", formatSignedPct(item.distance_50dma), changeClass(item.distance_50dma))}
-      ${metricLine("ATR ext", formatSignedNumber(item.atr_extension), changeClass(item.atr_extension))}
+      ${metricLine("1D", formatSignedPct(item.change_1d), changeClass(item.change_1d), "Return over the last close")}
+      ${metricLine("5D", formatSignedPct(item.change_5d), changeClass(item.change_5d), "Return over the last 5 sessions")}
+      ${metricLine(">50DMA", formatSignedPct(item.distance_50dma), changeClass(item.distance_50dma), "Distance from the 50-day moving average")}
+      ${metricLine("ATR ext", formatSignedNumber(item.atr_extension), changeClass(item.atr_extension), "Distance from 20DMA in ATR(14) units — above +2 is stretched")}
     </span>
   </button>`;
 }
 
-function metricLine(label, value, tone) {
-  return `<span class="metric-line"><span>${escapeHtml(label)}</span><strong class="${tone}">${escapeHtml(value)}</strong></span>`;
+function metricLine(label, value, tone, tip = "") {
+  const titleAttr = tip ? ` title="${escapeHtml(tip)}"` : "";
+  return `<span class="metric-line"${titleAttr}><span>${escapeHtml(label)}</span><strong class="${tone}">${escapeHtml(value)}</strong></span>`;
 }
 
 function breadthRow(label, value, tone = "") {
   return `<div class="breadth-row"><span>${escapeHtml(label)}</span><strong class="${tone ? `tone-${tone}` : ""}">${escapeHtml(value)}</strong></div>`;
 }
 
-function themeTable(themes) {
+function themeTable(themes, variant = "score") {
+  const momentum = variant === "momentum";
+  const third = momentum ? "\u0394 Pace" : "Score";
   return `<table class="theme-table">
-    <thead><tr><th>#</th><th>Theme</th><th>Score</th><th>1D</th><th>5D</th><th>Status</th></tr></thead>
-    <tbody>${themes.map(themeRow).join("") || '<tr><td colspan="6">No themes configured</td></tr>'}</tbody>
+    <thead><tr><th>#</th><th>Theme</th><th>${third}</th><th>1D</th><th>5D</th><th>Status</th></tr></thead>
+    <tbody>${themes.map((theme) => themeRow(theme, momentum)).join("") || '<tr><td colspan="6">No themes configured</td></tr>'}</tbody>
   </table>`;
 }
 
-function themeRow(theme) {
+function themeRow(theme, momentum = false) {
   const score = scorePercent(theme.score);
+  const third = momentum
+    ? `<td class="${changeClass(theme.acceleration)}" title="1D move minus 5D daily pace">${formatSignedNumber(theme.acceleration)}</td>`
+    : `<td><span class="score-bar" style="--score: ${score}%"><span class="score-value">${formatInteger(theme.score)}</span></span></td>`;
   return `<tr>
     <td>${formatInteger(theme.rank)}</td>
     <td><button class="theme-link" type="button" data-group="${escapeHtml(theme.name)}" title="Show ${escapeHtml(displayGroupName(theme.name))} in Markets">${escapeHtml(displayGroupName(theme.name))}</button><span class="member-count">${formatInteger(theme.count)}</span></td>
-    <td><span class="score-bar" style="--score: ${score}%"><span class="score-value">${formatInteger(theme.score)}</span></span></td>
+    ${third}
     <td class="${changeClass(theme.change_1d)}">${formatSignedPct(theme.change_1d)}</td>
     <td class="${changeClass(theme.change_5d)}">${formatSignedPct(theme.change_5d)}</td>
     <td><span class="status-tag status-${String(theme.status || "neutral").toLowerCase()}">${escapeHtml(theme.status || "NEUTRAL")}</span></td>
@@ -460,13 +725,22 @@ function cryptoEtfFlowPanel(flows) {
     return `<div class="empty-state">${escapeHtml(cryptoEtfFlowError(flows.error))}</div>`;
   }
   const assets = flows.assets || [];
+  const newestDate = assets
+    .filter(hasLatestFlowPrint)
+    .map((asset) => String(asset.latest_date || ""))
+    .sort()
+    .pop() || "";
   return `<div class="crypto-flow-grid">
-    ${assets.map(cryptoEtfFlowCard).join("") || '<div class="empty-state">No ETF flow data</div>'}
+    ${assets.map((asset) => cryptoEtfFlowCard(asset, newestDate)).join("") || '<div class="empty-state">No ETF flow data</div>'}
   </div>`;
 }
 
-function cryptoEtfFlowCard(asset) {
+function cryptoEtfFlowCard(asset, newestDate = "") {
   const hasLatestPrint = hasLatestFlowPrint(asset);
+  const assetDate = String(asset.latest_date || "");
+  const behind = hasLatestPrint && newestDate && assetDate && assetDate < newestDate;
+  const dateTone = behind ? "tone-warn" : "";
+  const dateTip = behind ? `Latest print is older than ${formatFlowDate(newestDate)} — table not updated yet` : "";
   return `<div class="crypto-flow-card">
     <div class="crypto-flow-summary">
       <div>
@@ -474,22 +748,32 @@ function cryptoEtfFlowCard(asset) {
         <strong class="metric-value ${changeClass(hasLatestPrint ? asset.latest_flow_usd : null)}">${hasLatestPrint ? formatUsdFlow(asset.latest_flow_usd) : "No print"}</strong>
       </div>
       <div class="flow-side-metrics">
-        ${metricLine("5D", formatUsdFlow(asset.five_day_flow_usd), changeClass(asset.five_day_flow_usd))}
-        ${metricLine("10D", formatUsdFlow(asset.ten_day_flow_usd), changeClass(asset.ten_day_flow_usd))}
-        ${metricLine("Date", hasLatestPrint ? formatFlowDate(asset.latest_date) : "--", "")}
+        ${metricLine("5D", formatUsdFlow(asset.five_day_flow_usd), changeClass(asset.five_day_flow_usd), "Sum of the last 5 daily prints")}
+        ${metricLine("10D", formatUsdFlow(asset.ten_day_flow_usd), changeClass(asset.ten_day_flow_usd), "Sum of the last 10 daily prints")}
+        ${metricLine("Date", hasLatestPrint ? `${formatFlowDate(asset.latest_date)}${behind ? " ⚠" : ""}` : "--", dateTone, dateTip)}
       </div>
     </div>
-    <div class="crypto-flow-lists">
-      ${flowList("Inflows", asset.leaders || [], "change-positive")}
-      ${flowList("Outflows", asset.laggards || [], "change-negative")}
-    </div>
+    ${cryptoFlowLists(asset)}
   </div>`;
+}
+
+function cryptoFlowLists(asset) {
+  const leaders = asset.leaders || [];
+  const laggards = asset.laggards || [];
+  if (!leaders.length && !laggards.length) {
+    return '<div class="crypto-flow-lists"><span class="flow-empty solo">No fund-level prints reported</span></div>';
+  }
+  const columns = [
+    leaders.length ? flowList("Inflows", leaders, "change-positive") : "",
+    laggards.length ? flowList("Outflows", laggards, "change-negative") : "",
+  ].filter(Boolean);
+  return `<div class="crypto-flow-lists${columns.length === 1 ? " single" : ""}">${columns.join("")}</div>`;
 }
 
 function flowList(label, items, tone) {
   return `<div class="flow-list">
     <span class="flow-list-label">${escapeHtml(label)}</span>
-    ${(items || []).map((item) => flowItem(item, tone)).join("") || '<span class="flow-empty">None reported</span>'}
+    ${(items || []).map((item) => flowItem(item, tone)).join("")}
   </div>`;
 }
 
@@ -513,8 +797,9 @@ function cryptoEtfFlowError(error) {
 
 function renderBoard(payload) {
   if (!payload) return;
-  const groups = visibleGroups(payload.groups || []);
+  const groups = marketLayout === "flat" ? flatGroups(payload.groups || []) : visibleGroups(payload.groups || []);
   board.classList.remove("board-loading");
+  board.classList.toggle("flat", marketLayout === "flat");
   if (!groups.length) {
     const totalAssets = countAssets(payload.groups || []);
     const hasFilter = activeGroupFilter || marketSearchQuery;
@@ -529,6 +814,7 @@ function renderBoard(payload) {
 
   groups.forEach((group) => {
     const panel = ensureGroupPanel(group.name);
+    updateGroupSessionChip(panel, group.assets || []);
     const assets = sortedAssets(group.assets || []);
     const nextSymbols = new Set(assets.map((asset) => asset.symbol));
 
@@ -555,6 +841,34 @@ function renderBoard(payload) {
   updateMarketFilterStatus(visibleAssets, totalAssets);
 }
 
+function toggleMarketLayout() {
+  marketLayout = marketLayout === "flat" ? "grouped" : "flat";
+  if (marketLayout === "flat" && marketSort.key === "configured") {
+    marketSort = { key: "pct", direction: "desc" };
+  }
+  marketLayoutToggle.setAttribute("aria-pressed", String(marketLayout === "flat"));
+  marketLayoutToggle.textContent = marketLayout === "flat" ? "Grouped" : "Flat";
+  marketLayoutToggle.title =
+    marketLayout === "flat"
+      ? "Back to sector groups"
+      : "Flatten all groups into one sortable movers table";
+  renderBoard(latestData);
+  syncUrlState();
+}
+
+function flatGroups(groups) {
+  const seen = new Set();
+  const assets = [];
+  for (const group of visibleGroups(groups)) {
+    for (const asset of group.assets) {
+      if (seen.has(asset.symbol)) continue;
+      seen.add(asset.symbol);
+      assets.push({ ...asset, groupLabel: displayGroupName(group.name) });
+    }
+  }
+  return assets.length ? [{ name: "__ALL__", assets }] : [];
+}
+
 function ensureGroupPanel(groupName) {
   let panel = board.querySelector(`.group-panel[data-group="${cssEscape(groupName)}"]`);
   if (panel) return panel;
@@ -574,6 +888,25 @@ function ensureGroupPanel(groupName) {
   );
   panel.appendChild(header);
   return panel;
+}
+
+function updateGroupSessionChip(panel, assets) {
+  const firstCell = panel.querySelector(".group-title span");
+  if (!firstCell) return;
+  let chip = firstCell.querySelector(".session-chip");
+  const info = groupSessionChip(assets);
+  if (!info) {
+    chip?.remove();
+    return;
+  }
+  if (!chip) {
+    chip = document.createElement("em");
+    chip.className = "session-chip";
+    firstCell.appendChild(chip);
+  }
+  chip.textContent = info.text;
+  chip.title = info.title;
+  chip.dataset.state = info.state;
 }
 
 function groupHeaderCell(label, sortKey) {
@@ -680,6 +1013,7 @@ function clearMarketFilters() {
   marketSearchQuery = "";
   marketSearch.value = "";
   renderBoard(latestData);
+  syncUrlState();
 }
 
 function focusFirstMarketRow() {
@@ -687,9 +1021,26 @@ function focusFirstMarketRow() {
   if (row) row.focus();
 }
 
+function moveMarketRowFocus(step) {
+  const rows = Array.from(board.querySelectorAll(".asset-row"));
+  if (!rows.length) return;
+  const currentIndex = rows.indexOf(document.activeElement);
+  const nextIndex = currentIndex === -1 ? (step > 0 ? 0 : rows.length - 1) : currentIndex + step;
+  const target = rows[Math.max(0, Math.min(rows.length - 1, nextIndex))];
+  target.focus();
+  target.scrollIntoView({ block: "nearest" });
+}
+
 async function openEditor() {
   openDialog(editorModal, groupNameInput);
+  setEditorStatus(persistenceNotice());
   await fetchWatchlistConfig();
+}
+
+function persistenceNotice() {
+  // Local runs persist edits to the YAML file; serverless deployments write
+  // to /tmp and lose edits on the next cold start.
+  return shouldUseWebSocket() ? "" : "Edits are session-only on this deployment — they reset on redeploy/cold start.";
 }
 
 function closeEditor() {
@@ -797,6 +1148,11 @@ async function addAsset(event) {
 }
 
 async function removeGroupByName(groupName) {
+  const group = (watchlistConfig?.groups || []).find((item) => item.name === groupName);
+  const count = group?.assets?.length || 0;
+  const label = displayGroupName(groupName);
+  const detail = count ? ` and its ${count} asset${count === 1 ? "" : "s"}` : "";
+  if (!window.confirm(`Remove group "${label}"${detail}? This cannot be undone.`)) return;
   await mutateWatchlists(`/api/groups/${encodeURIComponent(groupName)}`, { method: "DELETE" });
 }
 
@@ -807,17 +1163,29 @@ async function removeAsset(groupName, symbol) {
   );
 }
 
+const EDITOR_ERROR_COPY = {
+  symbol_not_found: "Symbol not recognized by the selected source — check spelling and source",
+  asset_already_exists: "That symbol is already in this group",
+  group_not_found: "Group no longer exists — reload the editor",
+  group_already_exists: "A group with that name already exists",
+};
+
+function editorErrorCopy(detail) {
+  return EDITOR_ERROR_COPY[detail] || detail || "Save failed";
+}
+
 async function mutateWatchlists(url, options) {
   setEditorStatus("Saving");
   const response = await fetch(url, { headers: { "Content-Type": "application/json" }, ...options });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
-    setEditorStatus(payload.detail || "Save failed");
+    setEditorStatus(editorErrorCopy(payload.detail));
     return;
   }
   watchlistConfig = await response.json();
   renderEditor();
-  setEditorStatus("Saved");
+  const notice = persistenceNotice();
+  setEditorStatus(notice ? `Saved (session only) — ${notice}` : "Saved");
   await fetchQuotes();
 }
 
@@ -862,7 +1230,9 @@ function updateRow(row, asset, options = {}) {
   row.dataset.assetType = asset.type || "";
   row.dataset.name = asset.name || "";
   row.setAttribute("aria-label", `${asset.symbol} chart`);
-  row.title = `${asset.symbol} ${asset.name || ""}`.trim();
+  const age = quoteAge(quote);
+  const ageNote = quote.is_stale ? `Stale quote · last update ${age || "unknown"}` : age ? `Updated ${age}` : "";
+  row.title = [`${asset.symbol} ${asset.name || ""}`.trim(), ageNote].filter(Boolean).join(" · ");
 
   updateSymbolCell(ensureRowCell(row, "symbol"), asset);
   updateValueCell(
@@ -913,7 +1283,8 @@ function updateSymbolCell(cell, asset) {
     cell.appendChild(name);
   }
   symbol.textContent = asset.symbol;
-  name.textContent = asset.name || asset.exchange || asset.type || "";
+  const base = asset.name || asset.exchange || asset.type || "";
+  name.textContent = asset.groupLabel ? `${base} · ${asset.groupLabel}` : base;
 }
 
 function updateValueCell(cell, text, value, className, shouldFlash) {
@@ -967,9 +1338,10 @@ function filterMarketsByGroup(groupName) {
   marketSearch.value = "";
   selectView("markets");
   renderBoard(latestData);
+  syncUrlState();
 }
 
-function openChart(asset) {
+function openChart(asset, options = {}) {
   const symbol = asset?.symbol || "";
   const name = asset?.name || symbol;
   const provider = asset?.quote?.provider || asset?.provider || "";
@@ -978,13 +1350,19 @@ function openChart(asset) {
   activeAsset = asset || null;
   activeHistoryContext = null;
   chartContextLoading = false;
-  activeRange = "ytd";
-  activeInterval = "1d";
-  intervalButtons.forEach((item) => item.classList.toggle("active", item.dataset.range === "ytd"));
+  const requestedRange = options.range || "ytd";
+  const rangeButton =
+    intervalButtons.find((item) => item.dataset.range === requestedRange) ||
+    intervalButtons.find((item) => item.dataset.range === "ytd");
+  activeRange = rangeButton?.dataset.range || "ytd";
+  activeInterval = rangeButton?.dataset.interval || "1d";
+  intervalButtons.forEach((item) => item.classList.toggle("active", item === rangeButton));
+  updateIntradayAvailability(assetType);
   chartTitle.textContent = symbol;
   chartSubtitle.textContent = [name, sourceLabels[provider] || provider].filter(Boolean).join(" / ");
   openDialog(modal, modalClose);
   loadChart(symbol, activeRange, activeInterval);
+  syncUrlState();
   if (isCryptoAsset(assetType)) {
     hideProfilePanel();
   } else {
@@ -992,6 +1370,19 @@ function openChart(asset) {
     setProfileLoading(symbol, asset);
     loadAssetProfile(symbol);
   }
+}
+
+function updateIntradayAvailability(assetType) {
+  const crypto = isCryptoAsset(assetType);
+  const session = crypto ? null : sessionState(EXCHANGE_SESSIONS[String(activeAsset?.exchange || "").toUpperCase()] || "us");
+  const closed = !crypto && session && session.state !== "open";
+  intervalButtons.forEach((button) => {
+    if (!("intraday" in button.dataset)) return;
+    button.classList.toggle("session-closed", Boolean(closed));
+    button.title = closed
+      ? `${session.label} market ${SESSION_STATE_COPY[session.state].toLowerCase()} — shows last session's bars`
+      : "";
+  });
 }
 
 function closeModal() {
@@ -1008,6 +1399,7 @@ function closeModal() {
   showProfilePanel();
   profileElement.innerHTML = '<div class="profile-empty">Select an asset to load profile data</div>';
   resetProfileScroll();
+  syncUrlState();
 }
 
 async function loadChart(symbol, range, interval) {
@@ -1038,6 +1430,7 @@ async function loadChart(symbol, range, interval) {
       high: Number(bar.high),
       low: Number(bar.low),
       close: Number(bar.close),
+      volume: numericOrNull(bar.volume),
     }));
     if (!bars.length) throw new Error("No history available");
     chartElement.replaceChildren();
@@ -1045,7 +1438,7 @@ async function loadChart(symbol, range, interval) {
     activeHistoryContext = profileMarketContextFromHistory(rawBars);
     chartContextLoading = false;
     updateProfileMarketContext();
-    chartSubtitle.textContent = `${symbol} / ${range.toUpperCase()} / ${interval} / ${bars.length} bars`;
+    chartSubtitle.textContent = chartSubtitleText(symbol, range, interval, rawBars, bars.length);
     scheduleChartResize();
   } catch (error) {
     if (activeSymbol !== symbol || requestId !== chartLoadToken) return;
@@ -1058,6 +1451,31 @@ async function loadChart(symbol, range, interval) {
   }
 }
 
+const INTRADAY_INTERVALS = new Set(["1m", "5m", "15m", "1h"]);
+
+function chartSubtitleText(symbol, range, interval, rawBars, barCount) {
+  const base = `${symbol} / ${range.toUpperCase()} / ${interval} / ${barCount} bars`;
+  if (!INTRADAY_INTERVALS.has(interval) || !rawBars.length) return base;
+  const first = new Date(rawBars[0].timestamp);
+  const last = new Date(rawBars[rawBars.length - 1].timestamp);
+  if (Number.isNaN(first.getTime()) || Number.isNaN(last.getTime())) return base;
+  const dateFmt = new Intl.DateTimeFormat([], { month: "short", day: "numeric" });
+  const timeFmt = new Intl.DateTimeFormat([], { hour: "2-digit", minute: "2-digit" });
+  const sameDay = first.toDateString() === last.toDateString();
+  const window = sameDay
+    ? `${dateFmt.format(last)} ${timeFmt.format(first)}–${timeFmt.format(last)}`
+    : `${dateFmt.format(first)} ${timeFmt.format(first)} – ${dateFmt.format(last)} ${timeFmt.format(last)}`;
+  const ageMs = Date.now() - last.getTime();
+  const staleNote = ageMs > 2 * 3600 * 1000 ? " · prev session" : "";
+  return `${base} · ${window}${staleNote}`;
+}
+
+const MA_OVERLAYS = [
+  { period: 20, color: "#b8a06a" },
+  { period: 50, color: "#5b8dbf" },
+  { period: 200, color: "#9a6dbf" },
+];
+
 function renderChart(bars, interval) {
   if (!window.LightweightCharts) throw new Error("Chart library unavailable");
   const chartWidth = chartElement.clientWidth || 900;
@@ -1067,7 +1485,7 @@ function renderChart(bars, interval) {
     height: chartHeight,
     layout: { background: { color: "#0a0b0c" }, textColor: "#a4abb3" },
     grid: { vertLines: { color: "#181a1d" }, horzLines: { color: "#181a1d" } },
-    rightPriceScale: { borderColor: "#23262a" },
+    rightPriceScale: { borderColor: "#23262a", scaleMargins: { top: 0.05, bottom: 0.22 } },
     timeScale: { borderColor: "#23262a", timeVisible: interval !== "1d" },
     crosshair: { mode: window.LightweightCharts.CrosshairMode.Normal },
   });
@@ -1080,8 +1498,88 @@ function renderChart(bars, interval) {
     wickDownColor: "#e0635f",
   });
   series.setData(bars);
+
+  const drawnMas = drawMovingAverages(bars);
+  drawVolumePane(bars);
+  drawPreviousCloseLine(series, interval);
+  renderChartLegend(drawnMas);
+
   chart.timeScale().fitContent();
   scheduleChartResize();
+}
+
+function drawMovingAverages(bars) {
+  const closes = bars.map((bar) => bar.close);
+  const drawn = [];
+  MA_OVERLAYS.forEach(({ period, color }) => {
+    if (closes.length < period) return;
+    const points = [];
+    let sum = 0;
+    for (let index = 0; index < closes.length; index += 1) {
+      sum += closes[index];
+      if (index >= period) sum -= closes[index - period];
+      if (index >= period - 1) {
+        points.push({ time: bars[index].time, value: sum / period });
+      }
+    }
+    const line = chart.addLineSeries({
+      color,
+      lineWidth: 1,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
+    line.setData(points);
+    drawn.push({ period, color });
+  });
+  return drawn;
+}
+
+function drawVolumePane(bars) {
+  if (!bars.some((bar) => typeof bar.volume === "number" && bar.volume > 0)) return;
+  const volumeSeries = chart.addHistogramSeries({
+    priceScaleId: "volume",
+    priceFormat: { type: "volume" },
+    priceLineVisible: false,
+    lastValueVisible: false,
+  });
+  chart.priceScale("volume").applyOptions({ scaleMargins: { top: 0.84, bottom: 0 } });
+  volumeSeries.setData(
+    bars
+      .filter((bar) => typeof bar.volume === "number")
+      .map((bar) => ({
+        time: bar.time,
+        value: bar.volume,
+        color: bar.close >= bar.open ? "rgba(77, 179, 138, 0.35)" : "rgba(224, 99, 95, 0.35)",
+      }))
+  );
+}
+
+function drawPreviousCloseLine(series, interval) {
+  if (!INTRADAY_INTERVALS.has(interval)) return;
+  const quote = activeAsset?.quote || {};
+  const prevClose = numericOrNull(
+    typeof quote.display_previous_close === "number" ? quote.display_previous_close : quote.previous_close
+  );
+  if (prevClose === null || prevClose <= 0) return;
+  series.createPriceLine({
+    price: prevClose,
+    color: "#8a9098",
+    lineWidth: 1,
+    lineStyle: window.LightweightCharts.LineStyle.Dashed,
+    axisLabelVisible: true,
+    title: "prev close",
+  });
+}
+
+function renderChartLegend(mas) {
+  if (!mas.length) return;
+  const legend = document.createElement("div");
+  legend.className = "chart-legend";
+  legend.innerHTML = mas
+    .map(({ period, color }) => `<span><i style="background:${color}"></i>MA${period}</span>`)
+    .join("");
+  chartElement.appendChild(legend);
 }
 
 function setupChartResizeObserver() {
@@ -1403,6 +1901,7 @@ function openDialog(dialog, focusTarget) {
   dialog.classList.add("open");
   dialog.setAttribute("aria-hidden", "false");
   activeDialog = dialog;
+  document.body.classList.add("modal-open");
   window.requestAnimationFrame(() => {
     const target = focusTarget || firstFocusableElement(dialog);
     target?.focus();
@@ -1414,6 +1913,7 @@ function closeDialog(dialog) {
   dialog.classList.remove("open");
   dialog.setAttribute("aria-hidden", "true");
   if (activeDialog === dialog) activeDialog = null;
+  if (!document.querySelector(".modal.open")) document.body.classList.remove("modal-open");
   const returnTarget = dialogReturnTarget(lastFocusedElement);
   if (returnTarget) {
     returnTarget.focus();
@@ -1612,10 +2112,23 @@ function clampNumber(value, min, max) {
 }
 
 function formatClock(date) {
-  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return date.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZoneName: "short",
+  });
+}
+
+function formatLocalDate(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function displayGroupName(value) {
+  if (value === "__ALL__") return "All Markets";
   return String(value || "--").replaceAll("_", " ");
 }
 

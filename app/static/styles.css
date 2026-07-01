@@ -45,6 +45,10 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+body.modal-open {
+  overflow: hidden;
+}
+
 button,
 input,
 select {
@@ -328,7 +332,7 @@ h1 {
 .panel-heading span {
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.04em;
   text-align: right;
   text-transform: uppercase;
@@ -357,7 +361,7 @@ h1 {
 .metric-label {
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 600;
   letter-spacing: var(--track-label);
   text-transform: uppercase;
@@ -386,7 +390,7 @@ h1 {
   overflow: hidden;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.03em;
   text-overflow: ellipsis;
   text-transform: uppercase;
@@ -470,7 +474,7 @@ h1 {
   overflow: hidden;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.05em;
   text-overflow: ellipsis;
   text-transform: uppercase;
@@ -491,7 +495,7 @@ h1 {
   gap: 8px;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
@@ -555,6 +559,14 @@ h1 {
   grid-template-columns: 1fr 1fr;
 }
 
+.crypto-flow-lists.single {
+  grid-template-columns: 1fr;
+}
+
+.crypto-flow-lists.single .flow-list:first-child {
+  border-right: 0;
+}
+
 .flow-list {
   min-width: 0;
   padding: 11px 13px;
@@ -569,7 +581,7 @@ h1 {
   margin-bottom: 8px;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -583,7 +595,7 @@ h1 {
   gap: 10px;
   border-bottom: 1px solid var(--line-soft);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .flow-item:last-child {
@@ -598,9 +610,18 @@ h1 {
 .flow-empty {
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.03em;
   text-transform: uppercase;
+}
+
+.flow-empty.solo {
+  display: block;
+  padding: 11px 13px;
+}
+
+.tone-warn {
+  color: var(--accent);
 }
 
 .theme-table {
@@ -629,7 +650,7 @@ h1 {
   height: 28px;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -706,7 +727,7 @@ h1 {
   margin-left: 6px;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 400;
 }
 
@@ -745,7 +766,7 @@ h1 {
   background: transparent;
   padding: 0;
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -786,7 +807,7 @@ h1 {
   border-bottom: 1px solid var(--line-soft);
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 600;
   letter-spacing: var(--track-label);
   text-transform: uppercase;
@@ -828,6 +849,11 @@ h1 {
 .board {
   column-gap: 12px;
   columns: 390px;
+}
+
+.board.flat {
+  columns: auto;
+  max-width: 860px;
 }
 
 .market-tools {
@@ -903,6 +929,37 @@ h1 {
 }
 
 .group-title span:first-child {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--accent);
+}
+
+.group-title span:first-child button {
+  width: auto;
+  flex: 0 1 auto;
+}
+
+.session-chip {
+  flex: 0 1 auto;
+  overflow: hidden;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+  letter-spacing: 0.05em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-chip[data-state="open"] {
+  border-color: rgba(77, 179, 138, 0.35);
+  color: var(--green);
+}
+
+.session-chip[data-state="edge"] {
+  border-color: rgba(184, 160, 106, 0.4);
   color: var(--accent);
 }
 
@@ -1022,7 +1079,7 @@ h1 {
   overflow: hidden;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.03em;
   text-overflow: ellipsis;
   text-transform: uppercase;
@@ -1031,7 +1088,7 @@ h1 {
 
 .source-cell {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.04em;
 }
 
@@ -1286,7 +1343,7 @@ h1 {
   gap: 5px;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.05em;
   text-transform: uppercase;
 }
@@ -1319,7 +1376,7 @@ h1 {
   cursor: pointer;
   padding: 0 11px;
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.05em;
   text-transform: uppercase;
   transition: border-color 0.12s ease;
@@ -1378,7 +1435,7 @@ h1 {
 .editor-asset {
   border-top: 1px solid var(--line-soft);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .editor-asset span {
@@ -1392,7 +1449,7 @@ h1 {
   padding: 10px;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.03em;
   text-transform: uppercase;
 }
@@ -1401,35 +1458,57 @@ h1 {
   grid-area: modal-intervals;
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 0;
   padding: 10px 14px;
   border-bottom: 1px solid var(--line);
 }
 
+.interval-group {
+  margin: 0 8px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+}
+
+.interval-group:first-child {
+  margin-left: 0;
+}
+
 .intervals button {
   min-width: 48px;
   min-height: 29px;
+  margin-right: -1px;
   border: 1px solid var(--line);
-  border-right: 0;
   background: var(--surface-raised);
   color: var(--muted-strong);
   cursor: pointer;
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.04em;
   transition: border-color 0.12s ease, color 0.12s ease;
 }
 
-.intervals button:last-child {
-  border-right: 1px solid var(--line);
+.intervals button.session-closed {
+  color: var(--muted);
+  background: var(--surface);
+  text-decoration: line-through;
+  text-decoration-color: var(--line-strong);
 }
 
 .intervals button:hover {
+  position: relative;
+  z-index: 1;
   border-color: var(--line-strong);
   color: var(--text);
 }
 
 .intervals button.active {
+  position: relative;
+  z-index: 1;
   border-color: var(--accent-dim);
   background: var(--surface-selected);
   color: var(--accent);
@@ -1444,6 +1523,35 @@ h1 {
   font-family: var(--font-mono);
   font-size: 10px;
   letter-spacing: 0.03em;
+}
+
+.chart-legend {
+  position: absolute;
+  top: 8px;
+  left: 10px;
+  z-index: 3;
+  display: flex;
+  gap: 10px;
+  padding: 3px 7px;
+  background: rgba(10, 11, 12, 0.72);
+  border: 1px solid var(--line-soft);
+  color: var(--muted-strong);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  pointer-events: none;
+}
+
+.chart-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.chart-legend i {
+  width: 10px;
+  height: 2px;
+  display: inline-block;
 }
 
 .chart {
@@ -1517,7 +1625,7 @@ h1 {
 
 .profile-kicker {
   color: var(--accent);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 600;
 }
 
@@ -1533,7 +1641,7 @@ h1 {
   margin-left: 6px;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 500;
 }
 
@@ -1541,7 +1649,7 @@ h1 {
   min-width: 0;
   overflow: hidden;
   color: var(--muted-strong);
-  font-size: 9px;
+  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1570,7 +1678,7 @@ h1 {
   cursor: pointer;
   padding: 1px 0 0;
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 600;
   letter-spacing: var(--track-label);
   text-transform: uppercase;
@@ -1603,7 +1711,7 @@ h1 {
   min-width: 0;
   overflow: hidden;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1660,7 +1768,7 @@ h1 {
 .range-labels {
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
@@ -1733,7 +1841,7 @@ h1 {
   background: var(--surface);
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.05em;
   text-transform: uppercase;
 }
@@ -1750,7 +1858,7 @@ h1 {
 
 .performance-cell span {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.04em;
 }
 
@@ -1767,7 +1875,7 @@ h1 {
   justify-items: start;
   padding: 14px;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .profile-empty strong {
@@ -2047,6 +2155,7 @@ h1 {
   .modal-shell,
   .editor-shell {
     height: 100vh;
+    height: 100dvh; /* stable under iOS Safari's dynamic toolbar */
     border-right: 0;
     border-left: 0;
   }
