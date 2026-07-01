@@ -265,7 +265,24 @@ def clean_optional(value: str | None) -> str | None:
 @app.get("/api/quotes")
 async def quotes() -> dict[str, object]:
     grouped = await app.state.quote_service.get_board_quotes(app.state.groups)
+    await _heal_stale_history()
     return board_payload(grouped)
+
+
+async def _heal_stale_history() -> None:
+    """Refresh a small batch of stale daily bars before building the board.
+
+    Bounded by a hard timeout so a slow provider can never stall the quotes
+    response by more than a few seconds; without a background scheduler
+    (serverless) this is what keeps daily-board metrics from going stale.
+    """
+    try:
+        await asyncio.wait_for(
+            app.state.history_service.refresh_stale_daily_bars(app.state.groups),
+            timeout=8.0,
+        )
+    except Exception:
+        pass
 
 
 @app.get("/api/crypto-etf-flows")

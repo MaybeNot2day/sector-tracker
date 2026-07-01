@@ -222,6 +222,17 @@ def load_bars_by_symbol(
     return {key: bars[-limit_per_series:] for key, bars in grouped.items()}
 
 
+def newest_bar_timestamps(path: Path, interval: str) -> dict[str, datetime]:
+    """Newest bar timestamp per symbol for one interval (any provider)."""
+    init_db(path)
+    with _connect(path) as conn:
+        rows = conn.execute(
+            "SELECT symbol, MAX(timestamp) AS newest FROM bars WHERE interval = ? GROUP BY symbol",
+            (interval,),
+        ).fetchall()
+    return {str(row["symbol"]): _from_iso(str(row["newest"])) for row in rows if row["newest"]}
+
+
 def mark_stale(quote: Quote, *, error: str | None = None) -> Quote:
     return replace(quote, is_stale=True, error=error or quote.error)
 

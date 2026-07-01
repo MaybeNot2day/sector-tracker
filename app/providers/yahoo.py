@@ -13,8 +13,6 @@ from typing import Any
 from urllib.parse import quote as url_quote
 from urllib.parse import urlencode
 
-import yfinance as yf
-
 from app.models import AssetConfig, Bar, Quote
 from app.providers.base import QuoteProvider
 
@@ -127,37 +125,74 @@ class YahooProvider(QuoteProvider):
 
 
 def _get_raw_history_sync(asset: AssetConfig, interval: str, range_: str) -> list[Bar]:
-    ticker = yf.Ticker(asset.symbol)
-    df = ticker.history(
-        period=_yahoo_period(range_),
-        interval=interval,
-        auto_adjust=False,
-        prepost=True,
-    )
+    """Fetch OHLCV bars from Yahoo's v8 chart API.
+
+    Uses the same curl transport + query1/query2 retry as quotes; yfinance's
+    cookie/crumb scraping gets rate-limited from datacenter IPs (Vercel),
+    which made history silently fall back to stale cached bars.
+    """
+    params = {
+        "interval": interval,
+        "range": _yahoo_period(range_),
+        "includePrePost": "true",
+        "events": "div,splits",
+    }
+    try:
+        payload = _get_json_with_retry(
+            tuple(
+                url.format(symbol=url_quote(asset.symbol, safe=""))
+                for url in YAHOO_CHART_URLS
+            ),
+            params=params,
+        )
+    except Exception:
+        return []
+    result = _first_chart_result(payload)
+    if result is None:
+        return []
+    return _bars_from_chart_result(asset, result, interval)
+
+
+def _bars_from_chart_result(
+    asset: AssetConfig,
+    result: dict[str, Any],
+    interval: str,
+) -> list[Bar]:
+    timestamps = result.get("timestamp")
+    if not isinstance(timestamps, list) or not timestamps:
+        return []
+    indicators = result.get("indicators")
+    quotes = indicators.get("quote") if isinstance(indicators, dict) else None
+    quote = quotes[0] if isinstance(quotes, list) and quotes else None
+    if not isinstance(quote, dict):
+        return []
+    opens = quote.get("open") or []
+    highs = quote.get("high") or []
+    lows = quote.get("low") or []
+    closes = quote.get("close") or []
+    volumes = quote.get("volume") or []
     bars: list[Bar] = []
-    if df.empty:
-        return bars
-    for idx, row in df.iterrows():
-        open_ = _number(row.get("Open"))
-        high = _number(row.get("High"))
-        low = _number(row.get("Low"))
-        close = _number(row.get("Close"))
+    for index, raw_ts in enumerate(timestamps):
+        ts_number = _number(raw_ts)
+        if ts_number is None:
+            continue
+        open_ = _number(opens[index]) if index < len(opens) else None
+        high = _number(highs[index]) if index < len(highs) else None
+        low = _number(lows[index]) if index < len(lows) else None
+        close = _number(closes[index]) if index < len(closes) else None
         if open_ is None or high is None or low is None or close is None:
             continue
-        ts = idx.to_pydatetime()
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=UTC)
         bars.append(
             Bar(
                 symbol=asset.symbol,
                 provider="yahoo",
                 interval=interval,
-                timestamp=ts,
+                timestamp=datetime.fromtimestamp(int(ts_number), UTC),
                 open=open_,
                 high=high,
                 low=low,
                 close=close,
-                volume=_number(row.get("Volume")),
+                volume=_number(volumes[index]) if index < len(volumes) else None,
             )
         )
     return bars
@@ -426,6 +461,12 @@ def _number(value: Any) -> float | None:
 
 
 def _yahoo_period(range_: str) -> str:
+    """Map board ranges to chart-API ranges.
+
+    Daily ranges over-fetch to 2y: the extra bars land in the SQLite cache and
+    feed 200DMA / 52-week metrics on the daily board, and the history service
+    trims the response back to the requested range.
+    """
     return {
         "10m": "1d",
         "30m": "1d",
@@ -434,6 +475,8 @@ def _yahoo_period(range_: str) -> str:
         "1d": "1d",
         "1w": "5d",
         "1mo": "1mo",
-        "3mo": "3mo",
-        "ytd": "ytd",
+        "3mo": "2y",
+        "ytd": "2y",
+        "1y": "2y",
+        "5y": "5y",
     }.get(range_, range_)

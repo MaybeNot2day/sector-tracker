@@ -1486,7 +1486,7 @@ function renderChart(bars, interval) {
     layout: { background: { color: "#0a0b0c" }, textColor: "#a4abb3" },
     grid: { vertLines: { color: "#181a1d" }, horzLines: { color: "#181a1d" } },
     rightPriceScale: { borderColor: "#23262a", scaleMargins: { top: 0.05, bottom: 0.22 } },
-    timeScale: { borderColor: "#23262a", timeVisible: interval !== "1d" },
+    timeScale: { borderColor: "#23262a", timeVisible: !DATE_ONLY_INTERVALS.has(interval) },
     crosshair: { mode: window.LightweightCharts.CrosshairMode.Normal },
   });
   const series = chart.addCandlestickSeries({
@@ -2141,7 +2141,9 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+const DATE_ONLY_INTERVALS = new Set(["1d", "1wk"]);
+
 function toChartTime(value, interval) {
-  if (interval === "1d") return value.slice(0, 10);
+  if (DATE_ONLY_INTERVALS.has(interval)) return value.slice(0, 10);
   return Math.floor(new Date(value).getTime() / 1000);
 }

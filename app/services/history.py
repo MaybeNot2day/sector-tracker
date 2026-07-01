@@ -1,17 +1,24 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from time import monotonic
 
 from app import db
 from app.models import AssetConfig, Bar, GroupConfig, ProviderName
 from app.providers.base import QuoteProvider
+
+STALE_BAR_AGE = timedelta(hours=26)
+SELF_HEAL_COOLDOWN_SECONDS = 3600.0
+SELF_HEAL_BATCH = 4
 
 
 class HistoryService:
     def __init__(self, database_path: Path, providers: dict[ProviderName, QuoteProvider]) -> None:
         self.database_path = database_path
         self.providers = providers
+        self._heal_attempts: dict[str, float] = {}
 
     async def get_history(
         self,
@@ -46,6 +53,42 @@ class HistoryService:
             return filter_bars_to_range(cached, range_)
         cached_any_provider = db.load_bars(self.database_path, asset.symbol, interval)
         return filter_bars_to_range(cached_any_provider, range_)
+
+    async def refresh_stale_daily_bars(self, groups: list[GroupConfig]) -> None:
+        """Opportunistically refresh the stalest daily histories.
+
+        Serverless deployments have no background scheduler, so cached bars
+        (and the daily board metrics built on them) only advance when a chart
+        is opened. This picks up to SELF_HEAL_BATCH symbols whose newest 1d
+        bar is older than STALE_BAR_AGE and re-fetches them; a per-symbol
+        cooldown keeps weekends/holidays from re-fetching a closed market
+        every poll. Called fire-and-forget from the quotes route.
+        """
+        newest = db.newest_bar_timestamps(self.database_path, "1d")
+        now_dt = datetime.now(UTC)
+        now_mono = monotonic()
+        candidates: list[tuple[datetime, str]] = []
+        for group in groups:
+            for asset in group.assets:
+                last_attempt = self._heal_attempts.get(asset.symbol, 0.0)
+                if now_mono - last_attempt < SELF_HEAL_COOLDOWN_SECONDS:
+                    continue
+                newest_ts = newest.get(asset.symbol)
+                if newest_ts is None or now_dt - newest_ts > STALE_BAR_AGE:
+                    candidates.append((newest_ts or datetime.min.replace(tzinfo=UTC), asset.symbol))
+        if not candidates:
+            return
+        candidates.sort()
+        batch = [symbol for _, symbol in candidates[:SELF_HEAL_BATCH]]
+        for symbol in batch:
+            self._heal_attempts[symbol] = now_mono
+        await asyncio.gather(
+            *(
+                self.get_history(groups, symbol, interval="1d", range_="1y")
+                for symbol in batch
+            ),
+            return_exceptions=True,
+        )
 
 
 def find_asset(groups: list[GroupConfig], symbol: str) -> AssetConfig | None:
