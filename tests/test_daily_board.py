@@ -54,11 +54,64 @@ def test_market_summaries_include_sparkline_performance_and_range(tmp_path: Path
     assert summary["range_52w"]["position_pct"] > 90  # type: ignore[index]
 
 
-def _rising_bars(symbol: str) -> list[Bar]:
+def test_market_summaries_convert_cached_foreign_bars_to_display_currency(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "board.sqlite3"
+    groups = [
+        GroupConfig(
+            name="MEMORY",
+            assets=[AssetConfig(symbol="000660.KS", type="equity", source="yahoo")],
+        ),
+    ]
+    db.save_bars(
+        database,
+        [
+            *_rising_bars("000660.KS", start_price=2_400_000.0),
+            Bar(
+                symbol="000660.KS",
+                provider="yahoo",
+                interval="1d",
+                timestamp=datetime(2025, 8, 1, tzinfo=UTC),
+                open=1500.0,
+                high=1700.0,
+                low=1450.0,
+                close=1650.0,
+            ),
+        ],
+    )
+    grouped_quotes = {
+        "MEMORY": [
+            Quote.from_last_and_prev_close(
+                symbol="000660.KS",
+                asset_type="equity",
+                provider="yahoo",
+                last=2_560_000.0,
+                previous_close=2_650_000.0,
+                timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+                currency="KRW",
+                display_last=1_600.0,
+                display_previous_close=1_700.0,
+                display_change_abs=-100.0,
+                display_change_pct=-5.882353,
+                display_currency="USD",
+            )
+        ]
+    }
+
+    summaries = DailyBoardService(database).market_summaries(groups, grouped_quotes)
+    summary = summaries["000660.KS"]
+
+    assert summary["performance"]["1D"] == -5.882353  # type: ignore[index]
+    assert summary["range_52w"]["current"] == 1600.0  # type: ignore[index]
+    assert 1000 < summary["range_52w"]["high"] < 2000  # type: ignore[index]
+
+
+def _rising_bars(symbol: str, start_price: float = 100.0) -> list[Bar]:
     start = datetime(2025, 1, 1, tzinfo=UTC)
     bars: list[Bar] = []
     for index in range(210):
-        close = 100 + index * 0.1
+        close = start_price + index * 0.1
         bars.append(
             Bar(
                 symbol=symbol,

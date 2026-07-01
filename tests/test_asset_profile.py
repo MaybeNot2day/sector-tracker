@@ -1,6 +1,11 @@
 from app.models import AssetConfig
 from app.services import asset_profile
-from app.services.asset_profile import AssetProfileService, _equity_metrics, _etf_metrics
+from app.services.asset_profile import (
+    AssetProfileService,
+    _equity_metrics,
+    _etf_metrics,
+    _profile_from_yahoo_info,
+)
 
 
 def test_equity_average_volume_is_not_currency_prefixed() -> None:
@@ -34,6 +39,38 @@ def test_etf_average_volume_is_not_currency_prefixed() -> None:
 
     assert by_label["Assets"] == "$18.00B"
     assert by_label["Avg Volume"] == "1.2M"
+
+
+def test_non_usd_profile_monetary_metrics_are_converted(monkeypatch) -> None:
+    monkeypatch.setattr(asset_profile, "_usd_money_divisor", lambda _info: 1_550.0)
+    asset = AssetConfig(
+        symbol="000660.KS",
+        type="equity",
+        source="yahoo",
+        exchange="KRX",
+        name="SK Hynix",
+    )
+
+    profile = _profile_from_yahoo_info(
+        asset,
+        {
+            "currency": "KRW",
+            "longName": "SK hynix Inc.",
+            "marketCap": 1_550_000_000_000,
+            "enterpriseValue": 3_100_000_000_000,
+            "totalRevenue": 155_000_000_000,
+            "averageVolume": 5_100_000,
+            "fiftyTwoWeekLow": 155_000,
+            "fiftyTwoWeekHigh": 3_100_000,
+        },
+    )
+    by_label = {str(metric["label"]): metric["value"] for metric in profile["metrics"]}  # type: ignore[index]
+
+    assert by_label["Market Cap"] == "$1.00B"
+    assert by_label["EV"] == "$2.00B"
+    assert by_label["Revenue"] == "$100.0M"
+    assert by_label["Avg Volume"] == "5.1M"
+    assert by_label["52W Range"] == "$100.00 - $2,000"
 
 
 def test_partial_profile_failures_are_not_long_cached(monkeypatch) -> None:

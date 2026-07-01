@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from statistics import fmean
@@ -98,9 +99,10 @@ def _asset_metrics(
     quote: Quote | None,
     bars: list[Bar],
 ) -> dict[str, Any]:
-    current = quote.last if quote and quote.last > 0 else (bars[-1].close if bars else None)
+    bars = _display_bars(quote, bars)
+    current = _current_price(quote, bars)
     closes = [bar.close for bar in bars]
-    one_day = quote.change_pct if quote else None
+    one_day = _quote_change_pct(quote)
     five_day = _return_from_close(current, closes, 6)
     dma20 = _mean_tail(closes, 20)
     dma50 = _mean_tail(closes, 50)
@@ -133,12 +135,13 @@ def _market_summary(
     quote: Quote | None,
     bars: list[Bar],
 ) -> dict[str, object]:
-    current = quote.last if quote and quote.last > 0 else (bars[-1].close if bars else None)
+    bars = _display_bars(quote, bars)
+    current = _current_price(quote, bars)
     closes = [bar.close for bar in bars]
     return {
         "sparkline": _sparkline_values(current, closes),
         "performance": {
-            "1D": quote.change_pct if quote else None,
+            "1D": _quote_change_pct(quote),
             "1W": _return_from_close(current, closes, 6),
             "1M": _return_from_close(current, closes, 22),
             "3M": _return_from_close(current, closes, 64),
@@ -148,6 +151,56 @@ def _market_summary(
         "range_52w": _range_52w(current, bars),
         "has_history": bool(bars),
     }
+
+
+def _quote_last(quote: Quote | None) -> float | None:
+    if quote is None:
+        return None
+    return quote.display_last if quote.display_last is not None else quote.last
+
+
+def _display_bars(quote: Quote | None, bars: list[Bar]) -> list[Bar]:
+    if (
+        quote is None
+        or quote.display_last is None
+        or quote.last <= 0
+        or quote.display_last <= 0
+        or not bars
+    ):
+        return bars
+    divisor = quote.last / quote.display_last
+    if divisor <= 10:
+        return bars
+    threshold = quote.display_last * 10
+    return [
+        _display_bar(bar, divisor, threshold)
+        for bar in bars
+    ]
+
+
+def _display_bar(bar: Bar, divisor: float, threshold: float) -> Bar:
+    if max(bar.open, bar.high, bar.low, bar.close) <= threshold:
+        return bar
+    return replace(
+        bar,
+        open=round(bar.open / divisor, 6),
+        high=round(bar.high / divisor, 6),
+        low=round(bar.low / divisor, 6),
+        close=round(bar.close / divisor, 6),
+    )
+
+
+def _current_price(quote: Quote | None, bars: list[Bar]) -> float | None:
+    quoted = _quote_last(quote)
+    if quoted is not None and quoted > 0:
+        return quoted
+    return bars[-1].close if bars else None
+
+
+def _quote_change_pct(quote: Quote | None) -> float | None:
+    if quote is None:
+        return None
+    return quote.display_change_pct if quote.display_change_pct is not None else quote.change_pct
 
 
 def _sparkline_values(current: float | None, closes: list[float], count: int = 32) -> list[float]:

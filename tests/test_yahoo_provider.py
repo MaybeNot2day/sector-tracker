@@ -1,7 +1,8 @@
 from datetime import UTC, datetime
 
-from app.models import AssetConfig, Quote
+from app.models import AssetConfig, Bar, Quote
 from app.providers.yahoo import (
+    _bar_to_usd,
     _quote_from_chart_result,
     _quote_with_usd_display,
     _quotes_from_spark_payload,
@@ -104,3 +105,26 @@ def test_quote_with_usd_display_converts_foreign_quote() -> None:
     assert converted.display_previous_close == 216.88311688311688
     assert converted.display_change_abs == -13.979891
     assert converted.display_change_pct == -6.445818
+
+
+def test_bar_to_usd_converts_ohlc_and_keeps_volume() -> None:
+    bar = Bar(
+        symbol="000660.KS",
+        provider="yahoo",
+        interval="1d",
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        open=2_480_000,
+        high=2_600_000,
+        low=2_450_000,
+        close=2_560_000,
+        volume=5_100_000,
+    )
+
+    converted = _bar_to_usd(bar, 1_550)
+
+    assert converted.symbol == "000660.KS"
+    assert converted.open == 1600.0
+    assert converted.high == 1677.419355
+    assert converted.low == 1580.645161
+    assert converted.close == 1651.612903
+    assert converted.volume == 5_100_000

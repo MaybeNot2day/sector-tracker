@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import bisect
 import json
 import math
 import subprocess
@@ -121,40 +122,109 @@ class YahooProvider(QuoteProvider):
         }
 
     def _get_history_sync(self, asset: AssetConfig, interval: str, range_: str) -> list[Bar]:
-        ticker = yf.Ticker(asset.symbol)
-        df = ticker.history(
-            period=_yahoo_period(range_),
-            interval=interval,
-            auto_adjust=False,
-            prepost=True,
-        )
-        bars: list[Bar] = []
-        if df.empty:
-            return bars
-        for idx, row in df.iterrows():
-            open_ = _number(row.get("Open"))
-            high = _number(row.get("High"))
-            low = _number(row.get("Low"))
-            close = _number(row.get("Close"))
-            if open_ is None or high is None or low is None or close is None:
-                continue
-            ts = idx.to_pydatetime()
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=UTC)
-            bars.append(
-                Bar(
-                    symbol=asset.symbol,
-                    provider="yahoo",
-                    interval=interval,
-                    timestamp=ts,
-                    open=open_,
-                    high=high,
-                    low=low,
-                    close=close,
-                    volume=_number(row.get("Volume")),
-                )
-            )
+        bars = _get_raw_history_sync(asset, interval, range_)
+        return _bars_with_usd_display(asset, bars, interval, range_)
+
+
+def _get_raw_history_sync(asset: AssetConfig, interval: str, range_: str) -> list[Bar]:
+    ticker = yf.Ticker(asset.symbol)
+    df = ticker.history(
+        period=_yahoo_period(range_),
+        interval=interval,
+        auto_adjust=False,
+        prepost=True,
+    )
+    bars: list[Bar] = []
+    if df.empty:
         return bars
+    for idx, row in df.iterrows():
+        open_ = _number(row.get("Open"))
+        high = _number(row.get("High"))
+        low = _number(row.get("Low"))
+        close = _number(row.get("Close"))
+        if open_ is None or high is None or low is None or close is None:
+            continue
+        ts = idx.to_pydatetime()
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        bars.append(
+            Bar(
+                symbol=asset.symbol,
+                provider="yahoo",
+                interval=interval,
+                timestamp=ts,
+                open=open_,
+                high=high,
+                low=low,
+                close=close,
+                volume=_number(row.get("Volume")),
+            )
+        )
+    return bars
+
+
+def _bars_with_usd_display(
+    asset: AssetConfig,
+    bars: list[Bar],
+    interval: str,
+    range_: str,
+) -> list[Bar]:
+    currency = _asset_listing_currency(asset)
+    fx_symbol = YAHOO_USD_FX_SYMBOLS.get(currency or "")
+    if not bars or fx_symbol is None:
+        return bars
+    fx_bars = _get_raw_history_sync(
+        AssetConfig(symbol=fx_symbol, type="index_proxy", source="yahoo"),
+        interval,
+        range_,
+    )
+    fx_rates = _fx_rates(fx_bars)
+    if not fx_rates:
+        return bars
+    return [_bar_to_usd(bar, _matching_fx_rate(bar.timestamp, fx_rates)) for bar in bars]
+
+
+def _asset_listing_currency(asset: AssetConfig) -> str | None:
+    if asset.exchange == "KRX" or asset.symbol.upper().endswith(".KS"):
+        return "KRW"
+    return None
+
+
+def _fx_rates(fx_bars: list[Bar]) -> list[tuple[datetime, float]]:
+    return [
+        (bar.timestamp, bar.close)
+        for bar in fx_bars
+        if bar.close > 0 and math.isfinite(bar.close)
+    ]
+
+
+def _matching_fx_rate(timestamp: datetime, rates: list[tuple[datetime, float]]) -> float:
+    timestamps = [item[0] for item in rates]
+    index = bisect.bisect_left(timestamps, timestamp)
+    candidates = []
+    if index < len(rates):
+        candidates.append(rates[index])
+    if index > 0:
+        candidates.append(rates[index - 1])
+    if not candidates:
+        candidates.append(rates[0])
+    return min(candidates, key=lambda item: abs((item[0] - timestamp).total_seconds()))[1]
+
+
+def _bar_to_usd(bar: Bar, fx_rate: float) -> Bar:
+    if fx_rate <= 0:
+        return bar
+    return Bar(
+        symbol=bar.symbol,
+        provider=bar.provider,
+        interval=bar.interval,
+        timestamp=bar.timestamp,
+        open=round(bar.open / fx_rate, 6),
+        high=round(bar.high / fx_rate, 6),
+        low=round(bar.low / fx_rate, 6),
+        close=round(bar.close / fx_rate, 6),
+        volume=bar.volume,
+    )
 
 
 def _get_json_with_retry(

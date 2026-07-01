@@ -1166,7 +1166,7 @@ function profileMarketContext(summary) {
 
 function profileRangeBar(range) {
   const position = clampNumber(range.position_pct, 0, 100);
-  const currency = activeAsset?.quote?.currency || "USD";
+  const currency = activeAsset?.quote?.display_currency || activeAsset?.quote?.currency || "USD";
   return `
     <div class="profile-range" style="--range-position: ${position}%">
       <div class="profile-range-head">
