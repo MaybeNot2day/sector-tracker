@@ -1450,12 +1450,13 @@ h1 {
   grid-area: modal-chart;
   position: relative;
   height: 100%;
-  min-height: 340px;
+  min-height: 320px;
+  overflow: hidden;
 }
 
 .chart-loading {
   height: 100%;
-  min-height: 340px;
+  min-height: 320px;
   display: flex;
   align-items: center;
   justify-content: center;

@@ -49,6 +49,8 @@ let lastFocusedElement = null;
 let chart = null;
 let chartLoadToken = 0;
 let chartContextLoading = false;
+let chartResizeObserver = null;
+let chartResizeFrame = null;
 let marketSearchQuery = "";
 let activeGroupFilter = "";
 let marketSort = { key: "configured", direction: "default" };
@@ -93,6 +95,7 @@ function init() {
   modal.addEventListener("click", (event) => {
     if (event.target === modal) closeModal();
   });
+  setupChartResizeObserver();
   editorOpen.addEventListener("click", openEditor);
   editorClose.addEventListener("click", closeEditor);
   editorModal.addEventListener("click", (event) => {
@@ -1043,6 +1046,7 @@ async function loadChart(symbol, range, interval) {
     chartContextLoading = false;
     updateProfileMarketContext();
     chartSubtitle.textContent = `${symbol} / ${range.toUpperCase()} / ${interval} / ${bars.length} bars`;
+    scheduleChartResize();
   } catch (error) {
     if (activeSymbol !== symbol || requestId !== chartLoadToken) return;
     chartContextLoading = false;
@@ -1057,7 +1061,7 @@ async function loadChart(symbol, range, interval) {
 function renderChart(bars, interval) {
   if (!window.LightweightCharts) throw new Error("Chart library unavailable");
   const chartWidth = chartElement.clientWidth || 900;
-  const chartHeight = Math.max(chartElement.clientHeight, 340);
+  const chartHeight = Math.max(chartElement.clientHeight, 320);
   chart = window.LightweightCharts.createChart(chartElement, {
     width: chartWidth,
     height: chartHeight,
@@ -1077,6 +1081,32 @@ function renderChart(bars, interval) {
   });
   series.setData(bars);
   chart.timeScale().fitContent();
+  scheduleChartResize();
+}
+
+function setupChartResizeObserver() {
+  window.addEventListener("resize", scheduleChartResize);
+  if (!("ResizeObserver" in window)) return;
+  chartResizeObserver = new ResizeObserver(scheduleChartResize);
+  [chartElement, modalShell, profileElement].forEach((element) => {
+    if (element) chartResizeObserver.observe(element);
+  });
+}
+
+function scheduleChartResize() {
+  if (!chart || !modal.classList.contains("open")) return;
+  if (chartResizeFrame !== null) return;
+  chartResizeFrame = window.requestAnimationFrame(() => {
+    chartResizeFrame = null;
+    resizeChartToContainer();
+  });
+}
+
+function resizeChartToContainer() {
+  if (!chart) return;
+  const width = Math.max(1, Math.floor(chartElement.clientWidth || 0));
+  const height = Math.max(320, Math.floor(chartElement.clientHeight || 0));
+  chart.applyOptions({ width, height });
 }
 
 async function loadAssetProfile(symbol) {
@@ -1097,6 +1127,7 @@ async function loadAssetProfile(symbol) {
       ${profileMarketContext(mergedProfileMarketContext(summary), { loading: chartContextLoading })}
     `;
     resetProfileScroll();
+    scheduleChartResize();
   }
 }
 
@@ -1111,6 +1142,7 @@ function setProfileLoading(symbol, asset) {
     ${profileMarketContext(mergedProfileMarketContext(summary), { loading: chartContextLoading })}
   `;
   resetProfileScroll();
+  scheduleChartResize();
 }
 
 function renderAssetProfile(profile) {
@@ -1153,6 +1185,7 @@ function renderAssetProfile(profile) {
   `;
   resetProfileScroll();
   bindProfileDescriptionToggle();
+  scheduleChartResize();
 }
 
 function resetProfileScroll() {
@@ -1227,6 +1260,7 @@ function updateProfileMarketContext() {
   } else if (html) {
     profileElement.insertAdjacentHTML("beforeend", html);
   }
+  scheduleChartResize();
 }
 
 function profileMarketContextFromHistory(rawBars) {
@@ -1338,12 +1372,14 @@ function profilePerformanceCell(label, value) {
 function showProfilePanel() {
   profileElement.hidden = false;
   modalShell.classList.remove("profile-hidden");
+  scheduleChartResize();
 }
 
 function hideProfilePanel() {
   profileElement.hidden = true;
   modalShell.classList.add("profile-hidden");
   profileElement.replaceChildren();
+  scheduleChartResize();
 }
 
 function isCryptoAsset(assetType) {
@@ -1358,6 +1394,7 @@ function bindProfileDescriptionToggle() {
     const expanded = description.classList.toggle("expanded");
     toggle.setAttribute("aria-expanded", String(expanded));
     toggle.textContent = expanded ? "Less" : "More";
+    scheduleChartResize();
   });
 }
 
