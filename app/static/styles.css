@@ -1435,8 +1435,33 @@ h1 {
 
 .chart {
   grid-area: modal-chart;
+  position: relative;
   height: 100%;
   min-height: 340px;
+}
+
+.chart-loading {
+  height: 100%;
+  min-height: 340px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--muted-strong);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.loading-spinner {
+  width: 15px;
+  height: 15px;
+  display: inline-block;
+  border: 1px solid var(--line-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
 }
 
 .asset-profile {
@@ -1589,6 +1614,10 @@ h1 {
   background: var(--line-soft);
 }
 
+.profile-market-context.is-loading {
+  border-top-color: var(--line-strong);
+}
+
 .profile-range,
 .profile-performance {
   min-width: 0;
@@ -1675,6 +1704,22 @@ h1 {
   padding: 0;
 }
 
+.profile-context-loading {
+  grid-column: 1 / -1;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--line-soft);
+  background: var(--surface);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
 .performance-cell {
   min-width: 0;
   display: grid;
@@ -1701,6 +1746,7 @@ h1 {
   display: grid;
   gap: 4px;
   align-content: center;
+  justify-items: start;
   padding: 14px;
   color: var(--muted);
   font-size: 9px;

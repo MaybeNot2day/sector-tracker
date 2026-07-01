@@ -41,11 +41,14 @@ let latestCryptoEtfFlows = null;
 let watchlistConfig = null;
 let activeSymbol = null;
 let activeAsset = null;
+let activeHistoryContext = null;
 let activeRange = "ytd";
 let activeInterval = "1d";
 let activeDialog = null;
 let lastFocusedElement = null;
 let chart = null;
+let chartLoadToken = 0;
+let chartContextLoading = false;
 let marketSearchQuery = "";
 let activeGroupFilter = "";
 let marketSort = { key: "configured", direction: "default" };
@@ -968,6 +971,8 @@ function openChart(asset) {
   const assetType = asset?.type || asset?.asset_type || "";
   activeSymbol = symbol;
   activeAsset = asset || null;
+  activeHistoryContext = null;
+  chartContextLoading = false;
   activeRange = "ytd";
   activeInterval = "1d";
   intervalButtons.forEach((item) => item.classList.toggle("active", item.dataset.range === "ytd"));
@@ -986,8 +991,11 @@ function openChart(asset) {
 
 function closeModal() {
   if (!closeDialog(modal)) return;
+  chartLoadToken += 1;
   activeSymbol = null;
   activeAsset = null;
+  activeHistoryContext = null;
+  chartContextLoading = false;
   if (chart) {
     chart.remove();
     chart = null;
@@ -998,9 +1006,14 @@ function closeModal() {
 }
 
 async function loadChart(symbol, range, interval) {
+  const requestId = chartLoadToken + 1;
+  chartLoadToken = requestId;
+  chartContextLoading = true;
+  activeHistoryContext = null;
   chartError.hidden = true;
   chartError.textContent = "";
-  chartElement.replaceChildren();
+  chartElement.innerHTML = chartLoadingMarkup("Loading chart data");
+  updateProfileMarketContext();
   if (chart) {
     chart.remove();
     chart = null;
@@ -1012,7 +1025,9 @@ async function loadChart(symbol, range, interval) {
     );
     if (!response.ok) throw new Error("history_failed");
     const payload = await response.json();
-    const bars = (payload.bars || []).map((bar) => ({
+    if (activeSymbol !== symbol || requestId !== chartLoadToken) return;
+    const rawBars = payload.bars || [];
+    const bars = rawBars.map((bar) => ({
       time: toChartTime(bar.timestamp, interval),
       open: Number(bar.open),
       high: Number(bar.high),
@@ -1020,9 +1035,18 @@ async function loadChart(symbol, range, interval) {
       close: Number(bar.close),
     }));
     if (!bars.length) throw new Error("No history available");
+    chartElement.replaceChildren();
     renderChart(bars, interval);
+    activeHistoryContext = profileMarketContextFromHistory(rawBars);
+    chartContextLoading = false;
+    updateProfileMarketContext();
     chartSubtitle.textContent = `${symbol} / ${range.toUpperCase()} / ${interval} / ${bars.length} bars`;
   } catch (error) {
+    if (activeSymbol !== symbol || requestId !== chartLoadToken) return;
+    chartContextLoading = false;
+    activeHistoryContext = null;
+    updateProfileMarketContext();
+    chartElement.replaceChildren();
     chartError.textContent = error.message === "No history available" ? error.message : "Chart unavailable";
     chartError.hidden = false;
   }
@@ -1068,7 +1092,7 @@ async function loadAssetProfile(symbol) {
         <strong>Profile unavailable</strong>
         <span>Company data could not be loaded for ${escapeHtml(symbol)}.</span>
       </div>
-      ${profileMarketContext(summary)}
+      ${profileMarketContext(mergedProfileMarketContext(summary), { loading: chartContextLoading })}
     `;
     resetProfileScroll();
   }
@@ -1078,10 +1102,11 @@ function setProfileLoading(symbol, asset) {
   const summary = asset?.summary || findAssetSummary(symbol);
   profileElement.innerHTML = `
     <div class="profile-empty">
+      <span class="loading-spinner" aria-hidden="true"></span>
       <strong>${escapeHtml(symbol)}</strong>
       <span>Loading profile and fundamentals</span>
     </div>
-    ${profileMarketContext(summary)}
+    ${profileMarketContext(mergedProfileMarketContext(summary), { loading: chartContextLoading })}
   `;
   resetProfileScroll();
 }
@@ -1122,7 +1147,7 @@ function renderAssetProfile(profile) {
           : '<div class="profile-empty small">Fundamentals unavailable for this asset.</div>'
       }
     </div>
-    ${profileMarketContext(summary)}
+    ${profileMarketContext(mergedProfileMarketContext(summary), { loading: chartContextLoading })}
   `;
   resetProfileScroll();
   bindProfileDescriptionToggle();
@@ -1144,22 +1169,138 @@ function profileMetric(metric) {
   `;
 }
 
-function profileMarketContext(summary) {
+function profileMarketContext(summary, options = {}) {
   const range = summary?.range_52w;
   const performance = summary?.performance || {};
   const hasRange = range && typeof range.low === "number" && typeof range.high === "number";
   const perfKeys = ["1D", "1W", "1M", "3M", "YTD", "1Y"];
   const hasPerformance = perfKeys.some((key) => typeof performance[key] === "number");
-  if (!hasRange && !hasPerformance) return "";
+  const isLoading = Boolean(options.loading);
+  if (!hasRange && !hasPerformance && !isLoading) return "";
 
   return `
-    <div class="profile-market-context">
+    <div class="profile-market-context${isLoading ? " is-loading" : ""}" data-profile-context>
       ${hasRange ? profileRangeBar(range) : ""}
       ${
         hasPerformance
           ? `<div class="profile-performance" aria-label="Performance by timeframe">${perfKeys.map((key) => profilePerformanceCell(key, performance[key])).join("")}</div>`
           : ""
       }
+      ${isLoading ? profileContextLoadingMarkup(hasRange || hasPerformance ? "Updating chart context" : "Loading chart context") : ""}
+    </div>
+  `;
+}
+
+function mergedProfileMarketContext(summary) {
+  const base = summary && typeof summary === "object" ? summary : {};
+  const merged = {
+    ...base,
+    performance: {
+      ...(base.performance || {}),
+    },
+  };
+  if (activeHistoryContext?.performance) {
+    merged.performance = {
+      ...merged.performance,
+      ...activeHistoryContext.performance,
+    };
+  }
+  if (activeHistoryContext?.range_52w) {
+    merged.range_52w = activeHistoryContext.range_52w;
+  }
+  return merged;
+}
+
+function updateProfileMarketContext() {
+  if (!activeSymbol || profileElement.hidden) return;
+  const existing = profileElement.querySelector("[data-profile-context]");
+  const summary = activeAsset?.summary || findAssetSummary(activeSymbol);
+  const html = profileMarketContext(mergedProfileMarketContext(summary), { loading: chartContextLoading });
+  if (existing) {
+    if (html) {
+      existing.outerHTML = html;
+    } else {
+      existing.remove();
+    }
+  } else if (html) {
+    profileElement.insertAdjacentHTML("beforeend", html);
+  }
+}
+
+function profileMarketContextFromHistory(rawBars) {
+  const rows = normalizeHistoryRows(rawBars);
+  if (!rows.length) return {};
+  const quote = activeAsset?.quote || {};
+  const current = numericOrNull(quote.display_last) ?? numericOrNull(quote.last) ?? rows[rows.length - 1].close;
+  const performance = {};
+  const quoteChangePct = numericOrNull(quote.display_change_pct) ?? numericOrNull(quote.change_pct);
+  if (quoteChangePct !== null) {
+    performance["1D"] = quoteChangePct;
+  } else {
+    addLookbackReturn(performance, "1D", rows, current, 1);
+  }
+  addLookbackReturn(performance, "1W", rows, current, 7);
+  addLookbackReturn(performance, "1M", rows, current, 31);
+  addLookbackReturn(performance, "3M", rows, current, 93);
+  addYtdReturn(performance, rows, current);
+  addLookbackReturn(performance, "1Y", rows, current, 366);
+  return { performance };
+}
+
+function normalizeHistoryRows(rawBars) {
+  return (Array.isArray(rawBars) ? rawBars : [])
+    .map((bar) => ({
+      timestamp: new Date(bar.timestamp),
+      close: Number(bar.close),
+    }))
+    .filter((bar) => Number.isFinite(bar.timestamp.getTime()) && Number.isFinite(bar.close) && bar.close > 0)
+    .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+}
+
+function addLookbackReturn(performance, label, rows, current, lookbackDays) {
+  const value = returnFromLookback(rows, current, lookbackDays);
+  if (typeof value === "number") performance[label] = value;
+}
+
+function returnFromLookback(rows, current, lookbackDays) {
+  if (!rows.length || typeof current !== "number" || current <= 0) return null;
+  const lastTimestamp = rows[rows.length - 1].timestamp.getTime();
+  const target = lastTimestamp - lookbackDays * 24 * 60 * 60 * 1000;
+  let reference = null;
+  for (const row of rows) {
+    if (row.timestamp.getTime() <= target) {
+      reference = row.close;
+    } else {
+      break;
+    }
+  }
+  if (typeof reference !== "number" || reference <= 0) return null;
+  return ((current - reference) / reference) * 100;
+}
+
+function addYtdReturn(performance, rows, current) {
+  if (!rows.length || typeof current !== "number" || current <= 0) return;
+  const year = rows[rows.length - 1].timestamp.getUTCFullYear();
+  const firstYearIndex = rows.findIndex((row) => row.timestamp.getUTCFullYear() === year);
+  if (firstYearIndex < 0) return;
+  const reference = firstYearIndex > 0 ? rows[firstYearIndex - 1].close : rows[firstYearIndex].close;
+  if (reference > 0) performance.YTD = ((current - reference) / reference) * 100;
+}
+
+function chartLoadingMarkup(message) {
+  return `
+    <div class="chart-loading" role="status" aria-live="polite">
+      <span class="loading-spinner" aria-hidden="true"></span>
+      <span>${escapeHtml(message)}</span>
+    </div>
+  `;
+}
+
+function profileContextLoadingMarkup(message) {
+  return `
+    <div class="profile-context-loading" role="status" aria-live="polite">
+      <span class="loading-spinner" aria-hidden="true"></span>
+      <span>${escapeHtml(message)}</span>
     </div>
   `;
 }
