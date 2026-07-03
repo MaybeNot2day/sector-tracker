@@ -4,8 +4,14 @@ A private Bloomberg-style market board for manual sector and narrative baskets.
 
 The app runs a FastAPI backend with a static dashboard frontend. The Daily Board computes
 regime, breadth, benchmark, theme-strength, five-day rotation metrics, and BTC/ETH/SOL spot
-ETF flow reads from live quotes and cached daily history. The Markets view keeps the full clickable
-watchlist grid and chart workflow.
+ETF flow reads from live quotes and cached daily history. A macro tape (VIX, DXY, US 10Y)
+rides above both views, VIX feeds a volatility read in the regime panel, and the Markets view
+keeps the full clickable watchlist grid with an RVOL (volume vs 20-day average) column and
+chart workflow. Crypto perp rows carry Hyperliquid funding and open-interest reads.
+
+The daily board persists a condensed snapshot per UTC day (regime, breadth, theme scores)
+to SQLite; the UI uses it for the 50DMA breadth trend sparkline and day-over-day theme
+score deltas, and `/api/snapshots?days=30` serves the raw history.
 
 Watchlists live in YAML and can also be edited in the app. Quotes and OHLC bars are cached in
 SQLite, and market data providers are isolated behind a common interface so Yahoo,
@@ -53,6 +59,7 @@ pytest -v
 curl http://127.0.0.1:8000/api/health
 curl http://127.0.0.1:8000/api/groups
 curl http://127.0.0.1:8000/api/quotes
+curl http://127.0.0.1:8000/api/snapshots
 ```
 
 ## Deployment
@@ -69,7 +76,8 @@ production instead of opening the local WebSocket.
 vercel --prod
 ```
 
-Watchlist edits on Vercel are runtime-only unless an external persistent store is added.
+Watchlist edits on Vercel are runtime-only unless an external persistent store is added; the
+same applies to daily-board snapshots, which live in the runtime SQLite file.
 For durable always-on background quote/history polling, use the VPS deployment below.
 
 ### VPS

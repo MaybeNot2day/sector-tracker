@@ -26,6 +26,9 @@ class Quote:
     display_change_abs: float | None = None
     display_change_pct: float | None = None
     display_currency: str | None = None
+    volume: float | None = None
+    funding_rate: float | None = None
+    open_interest_usd: float | None = None
 
     @classmethod
     def from_last_and_prev_close(
@@ -45,6 +48,9 @@ class Quote:
         display_change_abs: float | None = None,
         display_change_pct: float | None = None,
         display_currency: str | None = None,
+        volume: float | None = None,
+        funding_rate: float | None = None,
+        open_interest_usd: float | None = None,
     ) -> Quote:
         if previous_close and previous_close != 0:
             change_abs = round(last - previous_close, 6)
@@ -69,6 +75,9 @@ class Quote:
             display_change_abs=display_change_abs,
             display_change_pct=display_change_pct,
             display_currency=display_currency,
+            volume=volume,
+            funding_rate=funding_rate,
+            open_interest_usd=open_interest_usd,
         )
 
 

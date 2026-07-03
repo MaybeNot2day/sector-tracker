@@ -32,10 +32,12 @@ class HyperliquidProvider(QuoteProvider):
             market = markets.get(asset.symbol.upper())
             if market is None:
                 continue
-            last = _number(market.get("midPx")) or _number(market.get("markPx"))
+            mark = _number(market.get("markPx"))
+            last = _number(market.get("midPx")) or mark
             previous_close = _number(market.get("prevDayPx"))
             if last is None:
                 continue
+            open_interest = _number(market.get("openInterest"))
             quotes.append(
                 Quote.from_last_and_prev_close(
                     symbol=asset.symbol,
@@ -45,6 +47,12 @@ class HyperliquidProvider(QuoteProvider):
                     previous_close=previous_close,
                     timestamp=now,
                     currency="USD",
+                    funding_rate=_number(market.get("funding")),
+                    open_interest_usd=(
+                        open_interest * mark
+                        if open_interest is not None and mark is not None
+                        else None
+                    ),
                 )
             )
         return quotes

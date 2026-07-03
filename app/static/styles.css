@@ -288,6 +288,51 @@ h1 {
   text-transform: uppercase;
 }
 
+.macro-strip {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  min-height: 26px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  overflow-x: auto;
+}
+
+.macro-strip[hidden] {
+  display: none;
+}
+
+.macro-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  white-space: nowrap;
+}
+
+.macro-item label {
+  color: var(--muted);
+  font-weight: 600;
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+}
+
+.macro-item strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.macro-item em {
+  font-style: normal;
+}
+
+.macro-item.stale {
+  opacity: 0.55;
+}
+
 .workspace {
   width: min(1780px, 100%);
   margin: 0 auto;
@@ -340,7 +385,7 @@ h1 {
 
 .regime-grid {
   display: grid;
-  grid-template-columns: 1.12fr repeat(5, 1fr);
+  grid-template-columns: 1.12fr repeat(6, 1fr);
 }
 
 .regime-cell {
@@ -517,6 +562,20 @@ h1 {
 .breadth-row {
   min-height: 29px;
   border-bottom: 1px solid var(--line-soft);
+}
+
+.breadth-spark {
+  display: inline-flex;
+  align-items: center;
+}
+
+.breadth-spark .sparkline {
+  width: 92px;
+  height: 16px;
+}
+
+.theme-delta {
+  font-family: var(--font-mono);
 }
 
 .crypto-flow-grid {
@@ -914,7 +973,7 @@ h1 {
 .group-title,
 .asset-row {
   display: grid;
-  grid-template-columns: minmax(96px, 1fr) 72px 64px 64px 62px;
+  grid-template-columns: minmax(96px, 1fr) 72px 64px 60px 58px 62px;
   align-items: stretch;
 }
 
@@ -961,6 +1020,43 @@ h1 {
 .session-chip[data-state="edge"] {
   border-color: rgba(184, 160, 106, 0.4);
   color: var(--accent);
+}
+
+.funding-chip {
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-style: normal;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.funding-chip.funding-hot {
+  border-color: rgba(224, 108, 108, 0.4);
+  color: var(--red);
+}
+
+.funding-chip.funding-negative {
+  border-color: rgba(77, 179, 138, 0.35);
+  color: var(--green);
+}
+
+.rvol-cell {
+  color: var(--muted-strong);
+  font-family: var(--font-mono);
+}
+
+.rvol-cell.rvol-warm {
+  color: var(--accent);
+}
+
+.rvol-cell.rvol-hot {
+  color: var(--text);
+  background: rgba(184, 160, 106, 0.14);
 }
 
 .group-title button {
@@ -2106,7 +2202,7 @@ h1 {
 
   .group-title,
   .asset-row {
-    grid-template-columns: minmax(76px, 1fr) 62px 56px 58px 48px;
+    grid-template-columns: minmax(76px, 1fr) 62px 56px 58px 40px 48px;
   }
 
   .modal-shell {

@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import WebSocket
 
+from app.services.macro import MACRO_TAPE_GROUP_NAME, macro_payload, with_macro_group
 from app.services.quotes import grouped_quotes_payload
 
 
@@ -35,7 +36,9 @@ async def quote_poll_loop(app_state: Any) -> None:
     await asyncio.sleep(1)
     while True:
         try:
-            grouped = await app_state.quote_service.get_board_quotes(app_state.groups)
+            grouped = await app_state.quote_service.get_board_quotes(
+                with_macro_group(app_state.groups)
+            )
             payload = {
                 "type": "quotes",
                 "data": _board_payload(app_state, grouped),
@@ -79,9 +82,10 @@ async def _refresh_daily_history(app_state: Any) -> None:
 
 
 def _board_payload(app_state: Any, grouped: Any) -> dict[str, object]:
-    summaries = app_state.daily_board_service.market_summaries(app_state.groups, grouped)
+    overview, summaries = app_state.daily_board_service.build_board(app_state.groups, grouped)
     payload = grouped_quotes_payload(app_state.groups, grouped, summaries=summaries)
-    payload["overview"] = app_state.daily_board_service.build(app_state.groups, grouped)
+    payload["overview"] = overview
+    payload["macro"] = macro_payload(grouped.get(MACRO_TAPE_GROUP_NAME, []))
     return payload
 
 

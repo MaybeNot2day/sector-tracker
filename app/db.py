@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import replace
@@ -26,7 +27,10 @@ CREATE TABLE IF NOT EXISTS latest_quotes (
     display_previous_close REAL,
     display_change_abs REAL,
     display_change_pct REAL,
-    display_currency TEXT
+    display_currency TEXT,
+    volume REAL,
+    funding_rate REAL,
+    open_interest_usd REAL
 );
 
 CREATE TABLE IF NOT EXISTS bars (
@@ -41,6 +45,12 @@ CREATE TABLE IF NOT EXISTS bars (
     volume REAL,
     PRIMARY KEY (symbol, provider, interval, timestamp)
 );
+
+CREATE TABLE IF NOT EXISTS board_snapshots (
+    snapshot_date TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    payload TEXT NOT NULL
+);
 """
 
 
@@ -54,6 +64,9 @@ def init_db(path: Path) -> None:
         _ensure_column(conn, "latest_quotes", "display_change_abs", "REAL")
         _ensure_column(conn, "latest_quotes", "display_change_pct", "REAL")
         _ensure_column(conn, "latest_quotes", "display_currency", "TEXT")
+        _ensure_column(conn, "latest_quotes", "volume", "REAL")
+        _ensure_column(conn, "latest_quotes", "funding_rate", "REAL")
+        _ensure_column(conn, "latest_quotes", "open_interest_usd", "REAL")
 
 
 def save_quotes(path: Path, quotes: Sequence[Quote]) -> None:
@@ -66,9 +79,10 @@ def save_quotes(path: Path, quotes: Sequence[Quote]) -> None:
             INSERT INTO latest_quotes (
                 symbol, asset_type, provider, last, previous_close, change_abs, change_pct,
                 timestamp, is_stale, error, currency, display_last, display_previous_close,
-                display_change_abs, display_change_pct, display_currency
+                display_change_abs, display_change_pct, display_currency, volume, funding_rate,
+                open_interest_usd
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(symbol) DO UPDATE SET
                 asset_type = excluded.asset_type,
                 provider = excluded.provider,
@@ -84,7 +98,10 @@ def save_quotes(path: Path, quotes: Sequence[Quote]) -> None:
                 display_previous_close = excluded.display_previous_close,
                 display_change_abs = excluded.display_change_abs,
                 display_change_pct = excluded.display_change_pct,
-                display_currency = excluded.display_currency
+                display_currency = excluded.display_currency,
+                volume = excluded.volume,
+                funding_rate = excluded.funding_rate,
+                open_interest_usd = excluded.open_interest_usd
             """,
             [
                 (
@@ -104,6 +121,9 @@ def save_quotes(path: Path, quotes: Sequence[Quote]) -> None:
                     quote.display_change_abs,
                     quote.display_change_pct,
                     quote.display_currency,
+                    quote.volume,
+                    quote.funding_rate,
+                    quote.open_interest_usd,
                 )
                 for quote in quotes
             ],
@@ -117,7 +137,8 @@ def load_latest_quote(path: Path, symbol: str) -> Quote | None:
             """
             SELECT symbol, asset_type, provider, last, previous_close, change_abs, change_pct,
                    timestamp, is_stale, error, currency, display_last, display_previous_close,
-                   display_change_abs, display_change_pct, display_currency
+                   display_change_abs, display_change_pct, display_currency, volume,
+                   funding_rate, open_interest_usd
             FROM latest_quotes
             WHERE symbol = ?
             """,
@@ -233,6 +254,43 @@ def newest_bar_timestamps(path: Path, interval: str) -> dict[str, datetime]:
     return {str(row["symbol"]): _from_iso(str(row["newest"])) for row in rows if row["newest"]}
 
 
+def save_board_snapshot(path: Path, snapshot_date: str, payload: dict[str, object]) -> None:
+    """Upsert one condensed daily-board snapshot keyed by UTC date."""
+    init_db(path)
+    with _connect(path) as conn:
+        conn.execute(
+            """
+            INSERT INTO board_snapshots (snapshot_date, created_at, payload)
+            VALUES (?, ?, ?)
+            ON CONFLICT(snapshot_date) DO UPDATE SET
+                created_at = excluded.created_at,
+                payload = excluded.payload
+            """,
+            (snapshot_date, _to_iso(datetime.now(UTC)), json.dumps(payload)),
+        )
+
+
+def load_board_snapshots(path: Path, limit: int) -> list[dict[str, object]]:
+    """Snapshots for the most recent `limit` dates, oldest first."""
+    init_db(path)
+    with _connect(path) as conn:
+        rows = conn.execute(
+            "SELECT snapshot_date, payload FROM board_snapshots"
+            " ORDER BY snapshot_date DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    snapshots: list[dict[str, object]] = []
+    for row in reversed(rows):
+        try:
+            payload = json.loads(str(row["payload"]))
+        except ValueError:
+            continue
+        if isinstance(payload, dict):
+            payload["date"] = str(row["snapshot_date"])
+            snapshots.append(payload)
+    return snapshots
+
+
 def mark_stale(quote: Quote, *, error: str | None = None) -> Quote:
     return replace(quote, is_stale=True, error=error or quote.error)
 
@@ -285,6 +343,9 @@ def _quote_from_row(row: sqlite3.Row) -> Quote:
         display_change_abs=_optional_float(row["display_change_abs"]),
         display_change_pct=_optional_float(row["display_change_pct"]),
         display_currency=cast(str | None, row["display_currency"]),
+        volume=_optional_float(row["volume"]),
+        funding_rate=_optional_float(row["funding_rate"]),
+        open_interest_usd=_optional_float(row["open_interest_usd"]),
     )
 
 

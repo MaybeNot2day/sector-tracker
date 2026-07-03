@@ -194,6 +194,9 @@ def quote_payload(quote: Quote) -> dict[str, object]:
             quote.display_change_pct if quote.display_change_pct is not None else quote.change_pct
         ),
         "display_currency": quote.display_currency or quote.currency,
+        "volume": quote.volume,
+        "funding_rate": quote.funding_rate,
+        "open_interest_usd": quote.open_interest_usd,
     }
 
 

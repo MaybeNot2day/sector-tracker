@@ -37,9 +37,11 @@ const assetSourceSelect = document.querySelector("#asset-source");
 const assetExchangeInput = document.querySelector("#asset-exchange");
 const assetNameInput = document.querySelector("#asset-name");
 const editorList = document.querySelector("#editor-list");
+const macroStrip = document.querySelector("#macro-strip");
 
 let latestData = null;
 let latestCryptoEtfFlows = null;
+let latestSnapshots = null;
 let watchlistConfig = null;
 let activeSymbol = null;
 let activeAsset = null;
@@ -261,6 +263,7 @@ function init() {
   restoreCachedBoard();
   fetchQuotes();
   fetchCryptoEtfFlows();
+  fetchSnapshots();
   feedMode = shouldUseWebSocket() ? "ws" : "poll";
   updateFeedModeLabel();
   if (feedMode === "ws") openSocket();
@@ -270,7 +273,10 @@ function init() {
     if (!document.hidden) fetchQuotes();
   }, 10000);
   window.setInterval(() => {
-    if (!document.hidden) fetchCryptoEtfFlows();
+    if (!document.hidden) {
+      fetchCryptoEtfFlows();
+      fetchSnapshots();
+    }
   }, 300000);
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) {
@@ -281,6 +287,7 @@ function init() {
   refreshButton.addEventListener("click", () => {
     fetchQuotes();
     fetchCryptoEtfFlows();
+    fetchSnapshots();
   });
   viewButtons.forEach((button) => {
     button.addEventListener("click", () => selectView(button.dataset.view || "daily"));
@@ -468,6 +475,7 @@ function updateFeedModeLabel() {
 function applyQuotes(payload) {
   latestData = payload;
   renderBoard(payload);
+  renderMacroStrip(payload.macro);
   renderDailyBoard(payload.overview, latestCryptoEtfFlows);
   updateHeader(payload.overview);
   openPendingChartFromUrl();
@@ -490,6 +498,58 @@ async function fetchCryptoEtfFlows() {
     renderDailyBoard(latestData.overview, latestCryptoEtfFlows);
     updateHeader(latestData.overview);
   }
+}
+
+async function fetchSnapshots() {
+  try {
+    const response = await fetch("/api/snapshots?days=30");
+    if (!response.ok) throw new Error("snapshots_failed");
+    const payload = await response.json();
+    latestSnapshots = Array.isArray(payload.snapshots) ? payload.snapshots : [];
+  } catch (error) {
+    latestSnapshots = latestSnapshots || [];
+  }
+  if (latestData?.overview) renderDailyBoard(latestData.overview, latestCryptoEtfFlows);
+}
+
+// --- Macro tape ------------------------------------------------------------
+// VIX / DXY / US10Y context strip. These symbols are polled alongside the
+// watchlists but stay out of the universe, so breadth metrics are unaffected.
+function renderMacroStrip(items) {
+  if (!macroStrip) return;
+  if (!Array.isArray(items) || !items.length) {
+    macroStrip.hidden = true;
+    return;
+  }
+  macroStrip.innerHTML = items.map(macroItem).join("");
+  macroStrip.hidden = false;
+}
+
+function macroItem(item) {
+  const isYield = item.unit === "yield";
+  const value =
+    typeof item.last === "number"
+      ? isYield
+        ? `${item.last.toFixed(2)}%`
+        : formatPrice(item.last)
+      : "--";
+  const change = isYield
+    ? typeof item.change_abs === "number"
+      ? `${formatSigned(item.change_abs * 100)}bp`
+      : "--"
+    : formatSignedPct(item.change_pct);
+  // VIX up is risk-off: flip the tone so red means rising volatility.
+  let tone = changeClass(isYield ? item.change_abs : item.change_pct);
+  if (item.invert_tone) {
+    tone =
+      tone === "change-positive"
+        ? "change-negative"
+        : tone === "change-negative"
+          ? "change-positive"
+          : tone;
+  }
+  const title = isYield ? `${item.label} yield · 1D change in bp` : `${item.label} · 1D change`;
+  return `<span class="macro-item${item.is_stale ? " stale" : ""}" title="${escapeHtml(title)}"><label>${escapeHtml(item.label)}</label><strong>${escapeHtml(value)}</strong><em class="${tone}">${escapeHtml(change)}</em></span>`;
 }
 
 function updateHeader(overview) {
@@ -521,9 +581,11 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
   }
   // Rebuilding ~6 panels of innerHTML every poll costs parse + layout and
   // drops hover state; skip when the data is byte-identical.
-  const renderKey = JSON.stringify([overview, cryptoEtfFlows?.status, cryptoEtfFlows?.updated_at]);
+  const renderKey = JSON.stringify([overview, cryptoEtfFlows?.status, cryptoEtfFlows?.updated_at, latestSnapshots]);
   if (renderKey === lastDailyRenderKey) return;
   lastDailyRenderKey = renderKey;
+
+  const prevScores = previousThemeScores();
 
   const regime = overview.regime || {};
   const universe = overview.universe || {};
@@ -551,6 +613,7 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
           `${formatPlainPct(universe.above_50dma_pct)} > 50DMA · ${formatPlainPct(universe.above_200dma_pct)} > 200DMA`,
           `tone-${regime.tone || "neutral"}`
         )}
+        ${vixRegimeCell(regime.vix)}
         ${themeRegimeCell("Dominant", regime.dominant)}
         ${themeRegimeCell("Emerging", regime.emerging)}
         ${themeRegimeCell("Fading", regime.fading)}
@@ -591,6 +654,7 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
           ${breadthRow("% > 20DMA", formatPlainPct(universe.above_20dma_pct))}
           ${breadthRow("% > 50DMA", formatPlainPct(universe.above_50dma_pct))}
           ${breadthRow("% > 200DMA", formatPlainPct(universe.above_200dma_pct))}
+          ${breadthTrendRow()}
           ${breadthRow("Total names", formatInteger(universe.total))}
           ${breadthRow("New 20D highs", formatInteger(universe.highs_20d), "positive")}
           ${breadthRow("New 20D lows", formatInteger(universe.lows_20d), "negative")}
@@ -604,10 +668,10 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
       <section class="analytics-panel">
         ${panelHeading(
           "Dominant Themes",
-          "Score / 1D / 5D / Status",
+          "Score / \u0394 / 1D / 5D / Status",
           "Score = 50 + 7×avg 1D + 2×avg 5D + 0.18×(advance% − 50) + 0.18×(>50DMA% − 50), clamped 0–100. Status: ≥75 dominant, ≥62 strong, ≥52 emerging, ≥45 neutral, ≥30 deteriorating, else fading"
         )}
-        ${themeTable(themes.slice(0, 8))}
+        ${themeTable(themes.slice(0, 8), "score", prevScores)}
       </section>
       <section class="analytics-panel">
         ${panelHeading(
@@ -685,6 +749,17 @@ function pairRegimeCell(label, positive, negative, detail) {
   </div>`;
 }
 
+function vixRegimeCell(vix) {
+  if (!vix) return regimeCell("Volatility", "--", "No VIX read");
+  const level = typeof vix.level === "number" ? vix.level.toFixed(1) : "--";
+  return regimeCell(
+    "Volatility",
+    `VIX ${level}`,
+    `${vix.state || ""} · 1D ${formatSignedPct(vix.change_pct)}`,
+    `tone-${vix.tone || "neutral"}`
+  );
+}
+
 function benchmarkCard(item) {
   return `<button class="benchmark-card" type="button" data-symbol="${escapeHtml(item.symbol)}" data-name="${escapeHtml(item.name || "")}" data-type="${escapeHtml(item.type || "etf")}" data-provider="">
     <span class="benchmark-symbol">${escapeHtml(item.symbol)}</span>
@@ -707,28 +782,69 @@ function breadthRow(label, value, tone = "") {
   return `<div class="breadth-row"><span>${escapeHtml(label)}</span><strong class="${tone ? `tone-${tone}` : ""}">${escapeHtml(value)}</strong></div>`;
 }
 
-function themeTable(themes, variant = "score") {
+function breadthTrendRow() {
+  const series = (latestSnapshots || [])
+    .map((snap) => numericOrNull(snap.universe?.above_50dma_pct))
+    .filter((value) => value !== null);
+  if (series.length < 2) return "";
+  return `<div class="breadth-row" title="% of universe above 50DMA across the last ${series.length} daily snapshots"><span>50DMA trend</span><span class="breadth-spark">${sparklineSvg(series)}</span></div>`;
+}
+
+function previousThemeScores() {
+  if (!Array.isArray(latestSnapshots) || !latestSnapshots.length) return null;
+  const today = String(latestData?.overview?.as_of || "").slice(0, 10);
+  for (let index = latestSnapshots.length - 1; index >= 0; index -= 1) {
+    const snap = latestSnapshots[index];
+    if (!snap?.date || (today && snap.date >= today)) continue;
+    if (!Array.isArray(snap.themes) || !snap.themes.length) continue;
+    const scores = {};
+    for (const theme of snap.themes) {
+      if (theme?.name && typeof theme.score === "number") scores[theme.name] = theme.score;
+    }
+    return scores;
+  }
+  return null;
+}
+
+function themeTable(themes, variant = "score", prevScores = null) {
   const momentum = variant === "momentum";
   const third = momentum ? "\u0394 Pace" : "Score";
+  const deltaHead = momentum
+    ? ""
+    : '<th title="Score change vs the prior session snapshot">\u0394</th>';
+  const columns = momentum ? 6 : 7;
   return `<table class="theme-table">
-    <thead><tr><th>#</th><th>Theme</th><th>${third}</th><th>1D</th><th>5D</th><th>Status</th></tr></thead>
-    <tbody>${themes.map((theme) => themeRow(theme, momentum)).join("") || '<tr><td colspan="6">No themes configured</td></tr>'}</tbody>
+    <thead><tr><th>#</th><th>Theme</th><th>${third}</th>${deltaHead}<th>1D</th><th>5D</th><th>Status</th></tr></thead>
+    <tbody>${themes.map((theme) => themeRow(theme, momentum, prevScores)).join("") || `<tr><td colspan="${columns}">No themes configured</td></tr>`}</tbody>
   </table>`;
 }
 
-function themeRow(theme, momentum = false) {
+function themeRow(theme, momentum = false, prevScores = null) {
   const score = scorePercent(theme.score);
   const third = momentum
     ? `<td class="${changeClass(theme.acceleration)}" title="1D move minus 5D daily pace">${formatSignedNumber(theme.acceleration)}</td>`
     : `<td><span class="score-bar" style="--score: ${score}%"><span class="score-value">${formatInteger(theme.score)}</span></span></td>`;
+  const deltaCell = momentum ? "" : themeDeltaCell(theme, prevScores);
   return `<tr>
     <td>${formatInteger(theme.rank)}</td>
     <td><button class="theme-link" type="button" data-group="${escapeHtml(theme.name)}" title="Show ${escapeHtml(displayGroupName(theme.name))} in Markets">${escapeHtml(displayGroupName(theme.name))}</button><span class="member-count">${formatInteger(theme.count)}</span></td>
     ${third}
+    ${deltaCell}
     <td class="${changeClass(theme.change_1d)}">${formatSignedPct(theme.change_1d)}</td>
     <td class="${changeClass(theme.change_5d)}">${formatSignedPct(theme.change_5d)}</td>
     <td><span class="status-tag status-${String(theme.status || "neutral").toLowerCase()}">${escapeHtml(theme.status || "NEUTRAL")}</span></td>
   </tr>`;
+}
+
+function themeDeltaCell(theme, prevScores) {
+  const prev =
+    prevScores && typeof prevScores[theme.name] === "number" ? prevScores[theme.name] : null;
+  if (prev === null || typeof theme.score !== "number") {
+    return '<td class="theme-delta">--</td>';
+  }
+  const delta = theme.score - prev;
+  const text = delta > 0 ? `+${delta}` : String(delta);
+  return `<td class="theme-delta ${changeClass(delta)}" title="Score vs prior session (${prev})">${text}</td>`;
 }
 
 function rotationColumn(label, themes) {
@@ -926,6 +1042,7 @@ function ensureGroupPanel(groupName) {
     groupHeaderCell("Last", "last"),
     groupHeaderCell("1D Abs", "abs"),
     groupHeaderCell("1D %", "pct"),
+    groupHeaderCell("RVOL", "rvol"),
     groupHeaderCell("Trend", "trend")
   );
   panel.appendChild(header);
@@ -1011,6 +1128,7 @@ function sortValue(asset, key) {
   if (key === "last") return numericOrNull(displayQuoteValue(quote, "last"));
   if (key === "abs") return numericOrNull(displayQuoteValue(quote, "change_abs"));
   if (key === "pct") return numericOrNull(displayQuoteValue(quote, "change_pct"));
+  if (key === "rvol") return numericOrNull(asset.summary?.rvol);
   return null;
 }
 
@@ -1276,7 +1394,9 @@ function updateRow(row, asset, options = {}) {
   const ageNote = quote.is_stale ? `Stale quote · last update ${age || "unknown"}` : age ? `Updated ${age}` : "";
   row.title = [`${asset.symbol} ${asset.name || ""}`.trim(), ageNote].filter(Boolean).join(" · ");
 
-  updateSymbolCell(ensureRowCell(row, "symbol"), asset);
+  const symbolCell = ensureRowCell(row, "symbol");
+  updateSymbolCell(symbolCell, asset);
+  updateFundingChip(symbolCell, quote);
   updateValueCell(
     ensureRowCell(row, "last", "last-cell"),
     formatBoardPrice(display.last, quote.error, display.currency),
@@ -1297,6 +1417,14 @@ function updateRow(row, asset, options = {}) {
     display.change_pct,
     changeClass(display.change_pct),
     !options.initial
+  );
+  const rvol = numericOrNull(asset.summary?.rvol);
+  updateValueCell(
+    ensureRowCell(row, "rvol", "rvol-cell"),
+    formatRvol(rvol),
+    rvol,
+    rvolClass(rvol),
+    false
   );
   updateSparklineCell(ensureRowCell(row, "trend", "sparkline-cell"), asset.summary?.sparkline || []);
 }
@@ -1348,6 +1476,42 @@ function updateSparklineCell(cell, values) {
   cell.className = "sparkline-cell";
   cell.title = values.length ? "Recent trend" : "No trend history";
   cell.innerHTML = sparklineSvg(values);
+}
+
+function formatRvol(value) {
+  return typeof value === "number" ? `${value.toFixed(1)}\u00d7` : "--";
+}
+
+function rvolClass(value) {
+  if (typeof value !== "number") return "rvol-cell";
+  if (value >= 2) return "rvol-cell rvol-hot";
+  if (value >= 1.5) return "rvol-cell rvol-warm";
+  return "rvol-cell";
+}
+
+// Perp funding chip for crypto rows: hourly Hyperliquid rate annualized.
+// Negative funding (shorts pay) reads green; hot positive funding reads red.
+function updateFundingChip(cell, quote) {
+  const rate = typeof quote.funding_rate === "number" ? quote.funding_rate : null;
+  let chip = cell.querySelector(".funding-chip");
+  if (rate === null) {
+    chip?.remove();
+    return;
+  }
+  if (!chip) {
+    chip = document.createElement("em");
+    chip.className = "funding-chip";
+    cell.appendChild(chip);
+  }
+  const apr = rate * 24 * 365 * 100;
+  const oi = typeof quote.open_interest_usd === "number" ? quote.open_interest_usd : null;
+  const aprText = `${apr >= 0 ? "+" : ""}${apr.toFixed(1)}%`;
+  chip.textContent = `F ${aprText}${oi ? ` · OI $${formatCompactPrice(oi)}` : ""}`;
+  chip.classList.toggle("funding-hot", apr >= 20);
+  chip.classList.toggle("funding-negative", apr < 0);
+  chip.title =
+    `Perp funding ${(rate * 100).toFixed(4)}%/h (${aprText} APR annualized)` +
+    (oi ? ` · open interest $${formatCompactPrice(oi)}` : "");
 }
 
 function flashCell(cell, delta) {

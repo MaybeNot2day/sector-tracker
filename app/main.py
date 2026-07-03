@@ -9,8 +9,8 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
+from starlette.middleware.gzip import GZipMiddleware
 
 from app import db
 from app.config import Settings, find_group, load_watchlists, save_watchlists
@@ -25,6 +25,7 @@ from app.services.asset_profile import AssetProfileService
 from app.services.crypto_etf_flows import CryptoEtfFlowService
 from app.services.daily_board import DailyBoardService
 from app.services.history import HistoryService, bars_payload, find_asset
+from app.services.macro import MACRO_TAPE_GROUP_NAME, macro_payload, with_macro_group
 from app.services.quotes import QuoteService, grouped_quotes_payload
 
 APP_DIR = Path(__file__).parent
@@ -133,7 +134,12 @@ def ensure_runtime_database(settings: Settings) -> None:
 
 @app.get("/")
 def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+    # The HTML must always revalidate: it carries the ?v= cache-busters, so a
+    # stale cached copy pins old immutable static assets indefinitely.
+    return FileResponse(
+        STATIC_DIR / "index.html",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @app.get("/favicon.ico")
@@ -292,7 +298,7 @@ def clean_optional(value: str | None) -> str | None:
 
 @app.get("/api/quotes")
 async def quotes() -> dict[str, object]:
-    grouped = await app.state.quote_service.get_board_quotes(app.state.groups)
+    grouped = await app.state.quote_service.get_board_quotes(with_macro_group(app.state.groups))
     await _heal_stale_history()
     return board_payload(grouped)
 
@@ -316,6 +322,15 @@ async def _heal_stale_history() -> None:
 @app.get("/api/crypto-etf-flows")
 async def crypto_etf_flows() -> dict[str, object]:
     return await app.state.crypto_etf_flow_service.get_flows()
+
+
+@app.get("/api/snapshots")
+async def snapshots(days: int = Query(default=30, ge=1, le=365)) -> dict[str, object]:
+    """Persisted daily-board history: regime, breadth, and theme scores by date."""
+    rows = await asyncio.to_thread(
+        db.load_board_snapshots, app.state.settings.database_path, days
+    )
+    return {"snapshots": rows}
 
 
 @app.get("/api/history/{symbol}")
@@ -351,7 +366,9 @@ async def quotes_ws(websocket: WebSocket) -> None:
     manager: ConnectionManager = app.state.connection_manager
     await manager.connect(websocket)
     try:
-        grouped = await app.state.quote_service.get_board_quotes(app.state.groups)
+        grouped = await app.state.quote_service.get_board_quotes(
+            with_macro_group(app.state.groups)
+        )
         await websocket.send_json({"type": "quotes", "data": board_payload(grouped)})
         while True:
             await websocket.receive_text()
@@ -378,5 +395,6 @@ def board_payload(grouped: dict[str, list[Quote]]) -> dict[str, object]:
     overview, summaries = app.state.daily_board_service.build_board(app.state.groups, grouped)
     payload = grouped_quotes_payload(app.state.groups, grouped, summaries=summaries)
     payload["overview"] = overview
+    payload["macro"] = macro_payload(grouped.get(MACRO_TAPE_GROUP_NAME, []))
     _board_payload_cache = (grouped, payload)
     return payload

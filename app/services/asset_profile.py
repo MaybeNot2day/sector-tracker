@@ -7,7 +7,6 @@ from typing import Any
 # yfinance (and its pandas dependency) is imported lazily inside the two
 # call sites: importing it at module level adds ~1s+ to serverless cold
 # starts for a dependency only the profile endpoint uses.
-
 from app.models import AssetConfig
 
 USD_FX_SYMBOLS = {

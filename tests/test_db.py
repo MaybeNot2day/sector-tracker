@@ -33,6 +33,47 @@ def test_save_and_load_latest_quote(tmp_path: Path) -> None:
     assert loaded.display_currency == "USD"
 
 
+def test_quote_round_trip_persists_volume_and_derivative_fields(tmp_path: Path) -> None:
+    database = tmp_path / "board.sqlite3"
+    timestamp = datetime(2026, 7, 3, 12, 0, tzinfo=UTC)
+    quote = Quote.from_last_and_prev_close(
+        symbol="BTC",
+        asset_type="crypto_perp",
+        provider="hyperliquid",
+        last=65_000.0,
+        previous_close=64_000.0,
+        timestamp=timestamp,
+        volume=123_456.5,
+        funding_rate=1.25e-05,
+        open_interest_usd=2_500_000_000.0,
+    )
+
+    db.save_quotes(database, [quote])
+    loaded = db.load_latest_quote(database, "BTC")
+
+    assert loaded is not None
+    assert loaded.volume == 123_456.5
+    assert loaded.funding_rate == 1.25e-05
+    assert loaded.open_interest_usd == 2_500_000_000.0
+
+    # The upsert must overwrite the new columns when a refresh lacks them.
+    refreshed = Quote.from_last_and_prev_close(
+        symbol="BTC",
+        asset_type="crypto_perp",
+        provider="hyperliquid",
+        last=65_500.0,
+        previous_close=64_000.0,
+        timestamp=timestamp,
+    )
+    db.save_quotes(database, [refreshed])
+    reloaded = db.load_latest_quote(database, "BTC")
+
+    assert reloaded is not None
+    assert reloaded.volume is None
+    assert reloaded.funding_rate is None
+    assert reloaded.open_interest_usd is None
+
+
 def test_save_and_load_bars(tmp_path: Path) -> None:
     database = tmp_path / "board.sqlite3"
     timestamp = datetime(2026, 1, 1, tzinfo=UTC)

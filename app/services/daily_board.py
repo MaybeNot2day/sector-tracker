@@ -5,15 +5,20 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from statistics import fmean
+from time import monotonic
 from typing import Any
 
 from app import db
 from app.models import AssetConfig, Bar, GroupConfig, Quote
+from app.services.macro import vix_read
+
+SNAPSHOT_WRITE_INTERVAL_SECONDS = 300.0
 
 
 class DailyBoardService:
     def __init__(self, database_path: Path) -> None:
         self.database_path = database_path
+        self._last_snapshot_write = 0.0
 
     def build_board(
         self,
@@ -47,7 +52,7 @@ class DailyBoardService:
         themes = _theme_metrics(groups, metrics)
         universe = _universe_metrics(metrics)
         benchmarks = _benchmark_metrics(groups, metrics)
-        regime = _regime_metrics(themes, universe, benchmarks)
+        regime = _regime_metrics(themes, universe, benchmarks, quotes.get("^VIX"))
         rotation = _rotation_metrics(themes)
         timestamps = [quote.timestamp for quote in quotes.values()]
         overview = {
@@ -58,7 +63,30 @@ class DailyBoardService:
             "themes": themes,
             "rotation": rotation,
         }
+        self._maybe_snapshot(overview)
         return overview, summaries
+
+    def _maybe_snapshot(self, overview: dict[str, object]) -> None:
+        """Persist a condensed daily snapshot, throttled per process.
+
+        Upserts by UTC date, so intraday writes converge on the day's final
+        read; history accrues one row per day for trend and delta views.
+        """
+        universe = overview.get("universe")
+        if not isinstance(universe, dict) or not universe.get("quoted"):
+            return
+        now = monotonic()
+        if now - self._last_snapshot_write < SNAPSHOT_WRITE_INTERVAL_SECONDS:
+            return
+        self._last_snapshot_write = now
+        as_of = str(overview.get("as_of", ""))
+        snapshot_date = as_of[:10] or datetime.now(UTC).date().isoformat()
+        try:
+            db.save_board_snapshot(
+                self.database_path, snapshot_date, _snapshot_payload(overview)
+            )
+        except Exception:
+            pass
 
     def build(
         self,
@@ -161,8 +189,36 @@ def _market_summary(
             "1Y": _return_from_close(current, closes, 252),
         },
         "range_52w": _range_52w(current, bars),
+        "rvol": _relative_volume(quote, bars),
         "has_history": bool(bars),
     }
+
+
+def _relative_volume(quote: Quote | None, bars: list[Bar]) -> float | None:
+    """Today's volume as a multiple of the 20-session average.
+
+    The in-progress bar is excluded from the baseline; live quote volume is
+    preferred over the cached partial bar. Partial-day readings run low by
+    construction — the UI labels them accordingly.
+    """
+    if not bars:
+        return None
+    last_bar = bars[-1]
+    as_of = quote.timestamp if quote is not None else datetime.now(UTC)
+    last_is_today = last_bar.timestamp.astimezone(UTC).date() == as_of.astimezone(UTC).date()
+    completed = bars[:-1] if last_is_today else bars
+    baseline = [bar.volume for bar in completed[-20:] if bar.volume]
+    if len(baseline) < 10:
+        return None
+    current = quote.volume if quote is not None and quote.volume else None
+    if current is None and last_is_today:
+        current = last_bar.volume
+    if not current:
+        return None
+    average = fmean(baseline)
+    if average <= 0:
+        return None
+    return round(current / average, 2)
 
 
 def _quote_last(quote: Quote | None) -> float | None:
@@ -327,6 +383,7 @@ def _regime_metrics(
     themes: list[dict[str, object]],
     universe: dict[str, object],
     benchmarks: list[dict[str, object]],
+    vix_quote: Quote | None = None,
 ) -> dict[str, object]:
     advance_pct = _optional_number(universe.get("advance_pct"))
     above_50 = _optional_number(universe.get("above_50dma_pct"))
@@ -371,6 +428,47 @@ def _regime_metrics(
         "dominant": dominant,
         "emerging": emerging,
         "fading": fading,
+        "vix": vix_read(vix_quote),
+    }
+
+
+def _snapshot_payload(overview: dict[str, object]) -> dict[str, object]:
+    """Condensed overview for one snapshot row: regime, breadth, theme scores."""
+    regime = overview.get("regime")
+    regime = regime if isinstance(regime, dict) else {}
+    universe = overview.get("universe")
+    universe = universe if isinstance(universe, dict) else {}
+    themes = overview.get("themes")
+    themes = themes if isinstance(themes, list) else []
+    return {
+        "as_of": overview.get("as_of"),
+        "regime": {"label": regime.get("label"), "tone": regime.get("tone")},
+        "universe": {
+            key: universe.get(key)
+            for key in (
+                "total",
+                "quoted",
+                "advance_pct",
+                "above_20dma_pct",
+                "above_50dma_pct",
+                "above_200dma_pct",
+                "highs_20d",
+                "lows_20d",
+                "up_3pct",
+                "down_3pct",
+            )
+        },
+        "themes": [
+            {
+                "name": theme.get("name"),
+                "score": theme.get("score"),
+                "change_1d": theme.get("change_1d"),
+                "change_5d": theme.get("change_5d"),
+                "status": theme.get("status"),
+            }
+            for theme in themes
+            if isinstance(theme, dict)
+        ],
     }
 
 

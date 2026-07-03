@@ -415,6 +415,7 @@ def _quote_from_chart_result(asset: AssetConfig, result: dict[str, Any]) -> Quot
         previous_close=previous_close,
         timestamp=market_price[1] if market_price else datetime.now(UTC),
         currency=_currency(meta),
+        volume=_number(meta.get("regularMarketVolume")),
     )
 
 
