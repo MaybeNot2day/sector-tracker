@@ -39,7 +39,7 @@ def test_quote_round_trip_persists_volume_and_derivative_fields(tmp_path: Path) 
     quote = Quote.from_last_and_prev_close(
         symbol="BTC",
         asset_type="crypto_perp",
-        provider="hyperliquid",
+        provider="lighter",
         last=65_000.0,
         previous_close=64_000.0,
         timestamp=timestamp,
@@ -60,7 +60,7 @@ def test_quote_round_trip_persists_volume_and_derivative_fields(tmp_path: Path) 
     refreshed = Quote.from_last_and_prev_close(
         symbol="BTC",
         asset_type="crypto_perp",
-        provider="hyperliquid",
+        provider="lighter",
         last=65_500.0,
         previous_close=64_000.0,
         timestamp=timestamp,

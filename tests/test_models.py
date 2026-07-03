@@ -21,7 +21,7 @@ def test_quote_handles_missing_prev_close() -> None:
     quote = Quote.from_last_and_prev_close(
         symbol="BTC",
         asset_type="crypto_perp",
-        provider="hyperliquid",
+        provider="lighter",
         last=100_000.0,
         previous_close=None,
         timestamp=datetime.now(UTC),

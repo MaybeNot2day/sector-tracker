@@ -10,6 +10,7 @@ from typing import TypeAlias
 from app import db
 from app.models import AssetConfig, GroupConfig, ProviderName, Quote
 from app.providers.base import QuoteProvider
+from app.providers.lighter import LighterProvider
 
 GroupsCacheKey: TypeAlias = tuple[tuple[str, tuple[tuple[str, str, str], ...]], ...]
 
@@ -101,7 +102,59 @@ class QuoteService:
             for quote in await self._safe_provider_quotes("stooq", missing_fallback_assets):
                 fresh_by_symbol[quote.symbol] = quote
 
+        await self._overlay_lighter_prices(groups, fresh_by_symbol)
         return fresh_by_symbol
+
+    async def _overlay_lighter_prices(
+        self,
+        groups: list[GroupConfig],
+        fresh_by_symbol: dict[str, Quote],
+    ) -> None:
+        """Live 24/7 prices for equities/ETFs that Lighter also lists as perps.
+
+        Lighter's synthetic equity markets trade around the clock, so they
+        drive price discovery while official-session data (previous close,
+        share volume, daily bars) stays with the listing venue. The 1D
+        baseline is the last official close — the venue's previous close
+        while its quote is fresh (session live), else its last print (after
+        hours and weekends).
+        """
+        lighter = self.providers.get("lighter")
+        if not isinstance(lighter, LighterProvider):
+            return
+        candidates = {
+            asset.symbol
+            for group in groups
+            for asset in group.assets
+            if asset.type in {"equity", "etf"} and asset.source != "lighter"
+        }
+        if not candidates:
+            return
+        try:
+            live_prices = await lighter.live_prices(candidates)
+        except Exception:
+            return
+        now = datetime.now(UTC)
+        for symbol, live in live_prices.items():
+            quote = fresh_by_symbol.get(symbol)
+            if quote is None or quote.error or quote.last <= 0:
+                continue
+            if quote.currency not in (None, "USD"):
+                # Non-USD listings keep their venue pricing; the FX display
+                # pipeline is built around the listing currency.
+                continue
+            baseline = _official_close(quote, now)
+            if baseline is None or baseline <= 0:
+                continue
+            fresh_by_symbol[symbol] = replace(
+                quote,
+                provider="lighter",
+                last=live,
+                previous_close=baseline,
+                change_abs=round(live - baseline, 6),
+                change_pct=round((live - baseline) / baseline * 100, 6),
+                timestamp=now,
+            )
 
     def _prioritize_uncached_assets(self, assets: list[AssetConfig]) -> list[AssetConfig]:
         return sorted(
@@ -137,6 +190,27 @@ class QuoteService:
             is_stale=True,
             error="no_quote_available",
         )
+
+
+# A listing-venue quote older than this means the session (incl. pre/post
+# prints) is over; its last price then IS the most recent official close.
+OFFICIAL_QUOTE_FRESH_SECONDS = 3600.0
+
+
+def _official_close(quote: Quote, now: datetime) -> float | None:
+    """Most recent official session close for a listing-venue quote.
+
+    While the venue prints trades (fresh timestamp) the last completed close
+    is `previous_close`; once prints stop (overnight, weekends) the venue's
+    final `last` becomes the close to measure against.
+    """
+    timestamp = quote.timestamp
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=UTC)
+    age = (now - timestamp).total_seconds()
+    if age <= OFFICIAL_QUOTE_FRESH_SECONDS:
+        return quote.previous_close
+    return quote.last
 
 
 def grouped_quotes_payload(

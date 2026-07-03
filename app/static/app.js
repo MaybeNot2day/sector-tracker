@@ -69,7 +69,7 @@ let dataIsCached = false;
 
 const sourceLabels = {
   yahoo: "YH",
-  hyperliquid: "HL",
+  lighter: "LTR",
   stooq: "STQ",
   finnhub: "FH",
 };
@@ -1350,8 +1350,8 @@ async function mutateWatchlists(url, options) {
 }
 
 function syncSourceToType() {
-  if (assetTypeSelect.value === "crypto_perp") assetSourceSelect.value = "hyperliquid";
-  else if (assetSourceSelect.value === "hyperliquid") assetSourceSelect.value = "yahoo";
+  if (assetTypeSelect.value === "crypto_perp") assetSourceSelect.value = "lighter";
+  else if (assetSourceSelect.value === "lighter") assetSourceSelect.value = "yahoo";
 }
 
 function setEditorStatus(text) {
@@ -1489,7 +1489,7 @@ function rvolClass(value) {
   return "rvol-cell";
 }
 
-// Perp funding chip for crypto rows: hourly Hyperliquid rate annualized.
+// Perp funding chip for crypto rows: hourly Lighter rate annualized.
 // Negative funding (shorts pay) reads green; hot positive funding reads red.
 function updateFundingChip(cell, quote) {
   const rate = typeof quote.funding_rate === "number" ? quote.funding_rate : null;

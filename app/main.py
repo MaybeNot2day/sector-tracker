@@ -17,7 +17,7 @@ from app.config import Settings, find_group, load_watchlists, save_watchlists
 from app.models import AssetConfig, AssetType, GroupConfig, ProviderName, Quote
 from app.providers.base import QuoteProvider
 from app.providers.finnhub import FinnhubProvider
-from app.providers.hyperliquid import HyperliquidProvider
+from app.providers.lighter import LighterProvider
 from app.providers.stooq import StooqProvider
 from app.providers.yahoo import YahooProvider
 from app.scheduler import ConnectionManager, history_refresh_loop, quote_poll_loop, stop_task
@@ -54,7 +54,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     providers: dict[ProviderName, QuoteProvider] = {
         "yahoo": YahooProvider(),
-        "hyperliquid": HyperliquidProvider(),
+        "lighter": LighterProvider(),
         "stooq": StooqProvider(),
     }
     if settings.finnhub_api_key:

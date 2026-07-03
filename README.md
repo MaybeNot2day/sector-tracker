@@ -7,15 +7,23 @@ regime, breadth, benchmark, theme-strength, five-day rotation metrics, and BTC/E
 ETF flow reads from live quotes and cached daily history. A macro tape (VIX, DXY, US 10Y)
 rides above both views, VIX feeds a volatility read in the regime panel, and the Markets view
 keeps the full clickable watchlist grid with an RVOL (volume vs 20-day average) column and
-chart workflow. Crypto perp rows carry Hyperliquid funding and open-interest reads.
+chart workflow. Crypto perp rows carry Lighter funding and open-interest reads.
+
+Market data blends two worlds. Lighter DEX drives crypto perps end to end (quotes, candles,
+funding, OI) and overlays live 24/7 prices onto the ~34 equities/ETFs it lists as synthetic
+perps — day change is measured against the last official session close, so weekend and
+after-hours moves show up without breaking session semantics. Intraday chart candles come
+from Lighter wherever a market exists; daily bars, volume, profiles, and everything
+analytics-related (DMAs, breadth, RVOL, 52W) stay on official Yahoo session data. Assets
+not listed on Lighter run fully on Yahoo.
 
 The daily board persists a condensed snapshot per UTC day (regime, breadth, theme scores)
 to SQLite; the UI uses it for the 50DMA breadth trend sparkline and day-over-day theme
 score deltas, and `/api/snapshots?days=30` serves the raw history.
 
 Watchlists live in YAML and can also be edited in the app. Quotes and OHLC bars are cached in
-SQLite, and market data providers are isolated behind a common interface so Yahoo,
-Hyperliquid, Stooq, Finnhub, and Farside can be swapped or extended.
+SQLite, and market data providers are isolated behind a common interface so Yahoo, Lighter,
+Stooq, Finnhub, and Farside can be swapped or extended.
 
 ## Quick Start
 

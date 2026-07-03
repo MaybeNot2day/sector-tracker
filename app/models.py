@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Literal
 
 AssetType = Literal["equity", "etf", "crypto_perp", "crypto_spot", "index_proxy"]
-ProviderName = Literal["yahoo", "stooq", "finnhub", "hyperliquid"]
+ProviderName = Literal["yahoo", "stooq", "finnhub", "lighter"]
 
 
 @dataclass(frozen=True)

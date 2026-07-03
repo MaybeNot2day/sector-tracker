@@ -8,10 +8,16 @@ from time import monotonic
 from app import db
 from app.models import AssetConfig, Bar, GroupConfig, ProviderName
 from app.providers.base import QuoteProvider
+from app.providers.lighter import LighterProvider
 
 STALE_BAR_AGE = timedelta(hours=26)
 SELF_HEAL_COOLDOWN_SECONDS = 3600.0
 SELF_HEAL_BATCH = 4
+
+# Intraday candles come from Lighter when it lists the symbol: its synthetic
+# markets trade 24/7 and are not delayed. Daily/weekly history stays with the
+# configured source so DMAs and 52W metrics keep official session bars.
+INTRADAY_INTERVALS = {"1m", "5m", "15m", "30m", "1h", "4h"}
 
 
 class HistoryService:
@@ -31,13 +37,26 @@ class HistoryService:
         asset = find_asset(groups, symbol)
         if asset is None:
             return []
-        provider = self.providers.get(asset.source)
+        providers_to_try: list[QuoteProvider] = []
+        lighter = self.providers.get("lighter")
+        if (
+            interval in INTRADAY_INTERVALS
+            and asset.source != "lighter"
+            and isinstance(lighter, LighterProvider)
+            and await lighter.has_market(asset.symbol)
+        ):
+            providers_to_try.append(lighter)
+        configured = self.providers.get(asset.source)
+        if configured is not None:
+            providers_to_try.append(configured)
         bars: list[Bar] = []
-        if provider is not None:
+        for provider in providers_to_try:
             try:
                 bars = await provider.get_history(asset, interval=interval, range_=range_)
             except Exception:
                 bars = []
+            if bars:
+                break
         if not bars and asset.type in {"equity", "etf"} and asset.source != "stooq":
             stooq = self.providers.get("stooq")
             if stooq is not None:
