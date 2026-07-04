@@ -545,12 +545,60 @@ function updateFeedModeLabel() {
 }
 
 function applyQuotes(payload) {
+  rememberAndPatchFunding(payload);
   latestData = payload;
   renderBoard(payload);
   renderMacroStrip(payload.macro);
   renderDailyBoard(payload.overview, latestCryptoEtfFlows);
   updateHeader(payload.overview);
   openPendingChartFromUrl();
+}
+
+// --- Funding stickiness ----------------------------------------------------
+// On serverless deployments each poll can hit a different instance, and any
+// instance whose /funding-rates fetch got rate-limited serves nulls — so
+// funding flickered in and out. Funding moves hourly; retain the last known
+// value per symbol and patch payloads that arrive without it.
+const fundingMemory = new Map(); // symbol -> { rate, oi, at }
+const FUNDING_MEMORY_MAX_AGE_MS = 30 * 60 * 1000;
+
+function rememberAndPatchFunding(payload) {
+  const now = Date.now();
+  const patch = (target, symbol) => {
+    if (!target || !symbol) return;
+    if (typeof target.funding_rate === "number") {
+      fundingMemory.set(symbol, {
+        rate: target.funding_rate,
+        oi: typeof target.open_interest_usd === "number" ? target.open_interest_usd : null,
+        at: now,
+      });
+      return;
+    }
+    const kept = fundingMemory.get(symbol);
+    if (!kept || now - kept.at > FUNDING_MEMORY_MAX_AGE_MS) return;
+    target.funding_rate = kept.rate;
+    if (typeof target.open_interest_usd !== "number" && kept.oi !== null) {
+      target.open_interest_usd = kept.oi;
+    }
+  };
+  (payload.groups || []).forEach((group) => {
+    (group.assets || []).forEach((asset) => {
+      if (isCryptoAsset(asset.type)) patch(asset.quote, asset.symbol);
+    });
+  });
+  (payload.crypto_tape || []).forEach((row) => patch(row, row.symbol));
+  // The backend computes the breadth funding share from its own (possibly
+  // funding-less) tape; recompute it from the patched rows when missing.
+  const breadth = payload.overview?.crypto_breadth;
+  if (breadth && typeof breadth.positive_funding_pct !== "number") {
+    const rates = (payload.crypto_tape || [])
+      .map((row) => row.funding_rate)
+      .filter((value) => typeof value === "number");
+    if (rates.length) {
+      breadth.positive_funding_pct =
+        Math.round((rates.filter((value) => value > 0).length / rates.length) * 1000) / 10;
+    }
+  }
 }
 
 async function fetchCryptoEtfFlows() {
