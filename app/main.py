@@ -338,6 +338,28 @@ def lighter_status() -> dict[str, object]:
     return {"status": "ok", **lighter.status()}
 
 
+@app.get("/api/yahoo-status")
+def yahoo_status() -> dict[str, object]:
+    """Yahoo transport diagnostics from inside the running host.
+
+    Distinguishes 'curl binary missing from the image' from 'Yahoo is
+    rejecting this host's egress IP' — the two failure modes that make every
+    equity quote come back no_quote_available on fresh deployments.
+    """
+    from app.providers.yahoo import YAHOO_SPARK_URLS, _get_json
+
+    result: dict[str, object] = {"curl": shutil.which("curl")}
+    try:
+        payload = _get_json(
+            YAHOO_SPARK_URLS[0],
+            {"symbols": "SPY", "interval": "1d", "range": "1d"},
+        )
+        result["spark"] = "ok" if isinstance(payload, dict) and payload.get("spark") else "unexpected_payload"
+    except Exception as exc:
+        result["spark_error"] = str(exc)[:300] or type(exc).__name__
+    return result
+
+
 @app.get("/api/snapshots")
 async def snapshots(days: int = Query(default=30, ge=1, le=365)) -> dict[str, object]:
     """Persisted daily-board history: regime, breadth, and theme scores by date."""
