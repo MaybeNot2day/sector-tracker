@@ -62,7 +62,8 @@ let activeGroupFilter = "";
 let marketSort = { key: "configured", direction: "default" };
 let marketLayout = "grouped"; // "grouped" | "flat"
 let marketCategory = "tradfi"; // "tradfi" | "crypto"
-let tapeSort = { key: "volume", direction: "desc" };
+let tapeSorts = {}; // per-basket { key, direction }
+let tapePages = {}; // per-basket page index
 let lastTapeRenderKey = "";
 let feedMode = "poll"; // "ws" locally, "poll" on serverless deployments
 let activeView = "daily";
@@ -1130,6 +1131,14 @@ const TAPE_SORT_KEYS = {
 // Panel order mirrors Lighter's app baskets; "Other" catches untagged tails.
 const TAPE_BASKET_ORDER = ["L1", "DeFi", "AI", "L2", "Memes", "Other"];
 
+// Big baskets (DeFi ~31, L1 ~24) paginate so panels stay scannable.
+const TAPE_PAGE_SIZE = 15;
+const DEFAULT_TAPE_SORT = { key: "volume", direction: "desc" };
+
+function basketSort(basket) {
+  return tapeSorts[basket] || DEFAULT_TAPE_SORT;
+}
+
 function renderCryptoTape(tape) {
   const configured = new Set();
   (latestData?.groups || []).forEach((group) => {
@@ -1144,7 +1153,7 @@ function renderCryptoTape(tape) {
     : rows;
   const counts = { visible: visible.length, total: rows.length };
 
-  const renderKey = JSON.stringify([tape, tapeSort, query, configured.size]);
+  const renderKey = JSON.stringify([tape, tapeSorts, tapePages, query, configured.size]);
   if (renderKey === lastTapeRenderKey) return counts;
   lastTapeRenderKey = renderKey;
 
@@ -1162,19 +1171,20 @@ function renderCryptoTape(tape) {
     baskets.get(basket).push(row);
   });
   cryptoTapeElement.innerHTML = TAPE_BASKET_ORDER.filter((basket) => baskets.has(basket))
-    .map((basket) => tapeBasketMarkup(basket, sortedTapeRows(baskets.get(basket))))
+    .map((basket) => tapeBasketMarkup(basket, sortedTapeRows(baskets.get(basket), basketSort(basket))))
     .join("");
   cryptoTapeElement.querySelectorAll(".group-title button").forEach((button) => {
-    button.classList.toggle("active-sort", button.dataset.sortKey === tapeSort.key);
-    button.setAttribute(
-      "aria-sort",
-      button.dataset.sortKey === tapeSort.key
-        ? tapeSort.direction === "asc"
-          ? "ascending"
-          : "descending"
-        : "none"
-    );
-    button.addEventListener("click", () => setTapeSort(button.dataset.sortKey || "volume"));
+    button.addEventListener("click", () => {
+      const basket = button.closest(".tape-panel")?.dataset.basket || "Other";
+      setTapeSort(basket, button.dataset.sortKey || "volume");
+    });
+  });
+  cryptoTapeElement.querySelectorAll(".tape-pager button").forEach((button) => {
+    button.addEventListener("click", () => {
+      const basket = button.closest(".tape-panel")?.dataset.basket || "Other";
+      tapePages[basket] = Math.max(0, (tapePages[basket] || 0) + Number(button.dataset.step || 0));
+      renderBoard(latestData);
+    });
   });
   cryptoTapeElement.querySelectorAll(".asset-row").forEach((row) => {
     row.addEventListener("click", () => openTapeChart(row.dataset.symbol || ""));
@@ -1190,34 +1200,54 @@ function matchesTapeQuery(row, query) {
 }
 
 function tapeBasketMarkup(basket, rows) {
+  const pageCount = Math.max(1, Math.ceil(rows.length / TAPE_PAGE_SIZE));
+  const page = Math.min(tapePages[basket] || 0, pageCount - 1);
+  tapePages[basket] = page;
+  const start = page * TAPE_PAGE_SIZE;
+  const pageRows = rows.slice(start, start + TAPE_PAGE_SIZE);
+  const sort = basketSort(basket);
+  const header = (label, sortKey) => tapeHeaderButton(label, sortKey, sort);
+  const pager =
+    pageCount > 1
+      ? `<div class="tape-pager">
+          <button type="button" data-step="-1" ${page === 0 ? "disabled" : ""} aria-label="Previous page">‹</button>
+          <span>${start + 1}–${start + pageRows.length} of ${rows.length}</span>
+          <button type="button" data-step="1" ${page >= pageCount - 1 ? "disabled" : ""} aria-label="Next page">›</button>
+        </div>`
+      : "";
   return `<section class="group-panel tape-panel" data-basket="${escapeHtml(basket)}">
     <div class="group-title">
-      <span>${tapeHeaderButton(basket, "symbol")}<em class="session-chip" data-state="open" title="${rows.length} perps · Lighter basket · trades 24/7">${rows.length}</em></span>
-      <span>${tapeHeaderButton("Last", "last")}</span>
-      <span>${tapeHeaderButton("1D %", "pct")}</span>
-      <span>${tapeHeaderButton("Fund", "funding")}</span>
-      <span>${tapeHeaderButton("OI", "oi")}</span>
-      <span>${tapeHeaderButton("24h Vol", "volume")}</span>
+      <span>${header(basket, "symbol")}<em class="session-chip" data-state="open" title="${rows.length} perps · Lighter basket · trades 24/7">${rows.length}</em></span>
+      <span>${header("Last", "last")}</span>
+      <span>${header("1D %", "pct")}</span>
+      <span>${header("Fund", "funding")}</span>
+      <span>${header("OI", "oi")}</span>
+      <span>${header("24h Vol", "volume")}</span>
     </div>
-    ${rows.map(tapeRowMarkup).join("")}
+    ${pageRows.map(tapeRowMarkup).join("")}
+    ${pager}
   </section>`;
 }
 
-function tapeHeaderButton(label, sortKey) {
-  return `<button type="button" data-sort-key="${sortKey}" title="Sort by ${escapeHtml(label)}">${escapeHtml(label)}</button>`;
+function tapeHeaderButton(label, sortKey, sort) {
+  const active = sort.key === sortKey;
+  const ariaSort = active ? (sort.direction === "asc" ? "ascending" : "descending") : "none";
+  return `<button type="button" data-sort-key="${sortKey}" class="${active ? "active-sort" : ""}" aria-sort="${ariaSort}" title="Sort by ${escapeHtml(label)}">${escapeHtml(label)}</button>`;
 }
 
-function setTapeSort(sortKey) {
-  tapeSort =
-    tapeSort.key === sortKey
-      ? { key: sortKey, direction: tapeSort.direction === "asc" ? "desc" : "asc" }
+function setTapeSort(basket, sortKey) {
+  const current = basketSort(basket);
+  tapeSorts[basket] =
+    current.key === sortKey
+      ? { key: sortKey, direction: current.direction === "asc" ? "desc" : "asc" }
       : { key: sortKey, direction: sortKey === "symbol" ? "asc" : "desc" };
+  tapePages[basket] = 0;
   renderBoard(latestData);
 }
 
-function sortedTapeRows(rows) {
-  const accessor = TAPE_SORT_KEYS[tapeSort.key] || TAPE_SORT_KEYS.volume;
-  const direction = tapeSort.direction === "asc" ? 1 : -1;
+function sortedTapeRows(rows, sort) {
+  const accessor = TAPE_SORT_KEYS[sort.key] || TAPE_SORT_KEYS.volume;
+  const direction = sort.direction === "asc" ? 1 : -1;
   return [...rows].sort((a, b) => {
     const aValue = accessor(a);
     const bValue = accessor(b);
