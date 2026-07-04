@@ -78,32 +78,33 @@ curl http://127.0.0.1:8000/api/snapshots
 
 ## Deployment
 
-### Railway (recommended)
+### VPS (recommended)
 
-Railway runs the app as one long-lived process with a persistent volume, which is what
-this architecture wants: warm caches (no funding flicker), background quote/history
-loops, live WebSocket streaming, accruing daily snapshots, durable watchlist edits, and
-a dedicated rate-limit budget for Lighter/Yahoo. Deploys automatically on every push to
-`main` via `Procfile` + `railway.json`.
+A single long-lived process is what this architecture wants: warm caches (no funding
+flicker), background quote/history loops, live WebSocket streaming, accruing daily
+snapshots, durable watchlist edits, and a dedicated rate-limit budget for Lighter/Yahoo.
 
-One-time setup (~3 minutes):
+On a fresh Ubuntu 22.04/24.04 (or Debian 12) server, run one command:
 
-1. [railway.com](https://railway.com) → Login with GitHub → **New Project → Deploy from
-   GitHub repo** → pick this repo. It builds and deploys automatically.
-2. Service → **Settings → Volumes → Add volume**, mount path `/data`.
-3. Service → **Variables → Raw editor**, paste:
+```bash
+curl -fsSL https://raw.githubusercontent.com/MaybeNot2day/sector-tracker/main/deploy/setup-vps.sh | sudo bash
+```
 
-   ```bash
-   DATABASE_PATH=/data/market_board.sqlite3
-   DATABASE_SEED_PATH=./config/market_board_seed.sqlite3
-   WATCHLIST_PATH=/data/watchlists.yaml
-   WATCHLIST_SEED_PATH=./config/watchlists.yaml
-   ```
+It installs the app under `/opt/sector-tracker` with a dedicated system user, starts it
+via systemd on port 8787, and enables auto-deploy: the server polls `origin/main` every
+2 minutes and restarts itself when new commits land — pushing to GitHub is the whole
+deploy workflow. The script is idempotent; re-run it to repair an install.
 
-4. Service → **Settings → Networking → Generate Domain** for the public URL.
+```bash
+# after setup
+open http://YOUR_SERVER_IP:8787
+journalctl -u sector-tracker -f          # logs
+systemctl restart sector-tracker         # manual restart
+```
 
-The first boot copies the SQLite/watchlist seeds into `/data`; everything after that
-persists across deploys and restarts.
+The board listens on all interfaces without authentication. For a private setup, either
+install [Tailscale](https://tailscale.com) on the VPS and your devices (then firewall
+port 8787 to the tailnet), or front it with Caddy/basic-auth.
 
 ### Vercel
 
@@ -111,22 +112,9 @@ This repo includes `api/index.py`, `requirements.txt`, and `vercel.json` for Ver
 Vercel runs the FastAPI app as serverless functions, so `vercel.json` uses `/tmp` for
 runtime SQLite/watchlist files, seeds SQLite from `config/market_board_seed.sqlite3`,
 and disables background polling tasks. The browser polls `/api/quotes` directly in
-production instead of opening the local WebSocket.
+production instead of opening the local WebSocket. Watchlist edits and daily snapshots
+are runtime-only there; prefer the VPS for the full feature set.
 
 ```bash
 vercel --prod
 ```
-
-Watchlist edits on Vercel are runtime-only unless an external persistent store is added; the
-same applies to daily-board snapshots, which live in the runtime SQLite file.
-For durable always-on background quote/history polling, use the VPS deployment below.
-
-### VPS
-
-For a private VPS, run the server bound to localhost and access it through an SSH tunnel:
-
-```bash
-ssh -L 8787:127.0.0.1:8787 ds@your-vps
-```
-
-Then open http://127.0.0.1:8787.
