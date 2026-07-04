@@ -253,7 +253,7 @@ async def test_429_triggers_cooldown_that_blocks_further_requests(
     assert fake.count("/orderBookDetails") == 1
 
     # Once the cooldown lapses, fetching resumes.
-    provider._cooldown_until = 0.0
+    provider._cooldown_until = {}
     fake.routes["/orderBookDetails"] = details_payload()
     quotes = await provider.get_quotes([AAPL_EQUITY])
     assert len(quotes) == 1

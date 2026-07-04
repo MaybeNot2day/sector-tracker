@@ -153,7 +153,7 @@ def test_crypto_tape_cached_builds_sorted_rows_from_caches_only(
 
     assert tape[1] == {
         "symbol": "BTC",
-        "basket": "Other",  # categories cache is cold in this test
+        "basket": "L1",  # cold live cache falls back to the baked-in snapshot
         "last": 62000.0,
         "change_pct": 0.59,
         "funding_rate": 1.2e-05,

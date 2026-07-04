@@ -38,9 +38,14 @@ class LighterProvider(QuoteProvider):
         self._details_time = 0.0
         self._funding: dict[str, float] = {}
         self._funding_time = 0.0
-        self._categories: dict[str, list[str]] = {}
+        # Seeded with a baked-in snapshot so baskets survive environments
+        # where /tokenlist is unreachable (e.g. rate-limited shared egress
+        # IPs); a successful live fetch overrides it.
+        self._categories: dict[str, list[str]] = dict(_FALLBACK_CATEGORIES)
         self._categories_time = 0.0
-        self._cooldown_until = 0.0
+        # Cooldowns are per endpoint: a 429 on a secondary feed (funding,
+        # tokenlist) must never blackhole the orderBookDetails quote path.
+        self._cooldown_until: dict[str, float] = {}
         self._details_lock = asyncio.Lock()
 
     async def get_quotes(self, assets: list[AssetConfig]) -> list[Quote]:
@@ -189,15 +194,15 @@ class LighterProvider(QuoteProvider):
         return self._categories
 
     async def _get_json(self, path: str, params: dict[str, Any]) -> Any:
-        if monotonic() < self._cooldown_until:
+        if monotonic() < self._cooldown_until.get(path, 0.0):
             return None
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 response = await client.get(f"{BASE_URL}{path}", params=params)
                 if response.status_code == 429:
-                    # Standard accounts get 60 req/min per IP; back off so
-                    # cached quotes serve until the window resets.
-                    self._cooldown_until = monotonic() + RATE_LIMIT_COOLDOWN_SECONDS
+                    # Standard accounts get 60 req/min per IP; back off this
+                    # endpoint so cached data serves until the window resets.
+                    self._cooldown_until[path] = monotonic() + RATE_LIMIT_COOLDOWN_SECONDS
                     return None
                 response.raise_for_status()
                 return response.json()
@@ -338,6 +343,10 @@ def _quote_from_detail(
         open_interest_usd=(
             open_interest * last if is_perp and open_interest is not None else None
         ),
+        # Rolling 24h base-token volume: always fresh, unlike the cached
+        # daily bar whose volume freezes between history refreshes (there is
+        # no background refresh at all on serverless). Feeds RVOL.
+        volume=_number(detail.get("daily_base_token_volume")) if is_perp else None,
     )
 
 
@@ -402,3 +411,120 @@ def _number(value: Any) -> float | None:
     if not math.isfinite(parsed):
         return None
     return parsed
+
+
+# Snapshot of Lighter /tokenlist categories (2026-07-04). Used only until
+# the live tokenlist fetch succeeds; keeps baskets working when the endpoint
+# is unreachable. Symbols absent here fall through to _basket heuristics.
+_FALLBACK_CATEGORIES: dict[str, list[str]] = {
+    "0G": ["LAYER_1"],
+    "AAVE": ["DEFI"],
+    "ADA": ["LAYER_1"],
+    "ADI": ["NEW", "LAYER_2"],
+    "AERO": ["DEFI"],
+    "AI16Z": ["MEMES"],
+    "APEX": ["DEFI"],
+    "APT": ["DEFI"],
+    "ARB": ["LAYER_2"],
+    "ARC": ["AI"],
+    "ASTER": ["DEFI"],
+    "AVAX": ["LAYER_1"],
+    "AVNT": ["DEFI"],
+    "AZTEC": ["LAYER_2"],
+    "BCH": ["LAYER_1"],
+    "BERA": ["LAYER_1"],
+    "BIRB": ["MEMES"],
+    "BNB": ["LAYER_1"],
+    "BTC": ["MAJOR", "LAYER_1"],
+    "CAP": ["NEW", "DEFI"],
+    "CC": ["LAYER_1"],
+    "CHIP": ["AI", "DEFI"],
+    "CRO": ["LAYER_1"],
+    "CRV": ["DEFI"],
+    "CTR": ["LAYER_2"],
+    "DATA": ["LAYER_1"],
+    "DOGE": ["MEMES"],
+    "DOLO": ["DEFI"],
+    "DOT": ["LAYER_1"],
+    "DUSK": ["LAYER_1"],
+    "DYDX": ["DEFI"],
+    "EDEN": ["DEFI"],
+    "EIGEN": ["DEFI"],
+    "ENA": ["DEFI"],
+    "ETH": ["MAJOR", "LAYER_1"],
+    "ETHFI": ["DEFI"],
+    "FARTCOIN": ["MEMES"],
+    "FF": ["DEFI"],
+    "FIL": ["LAYER_1", "AI"],
+    "FOGO": ["DEFI", "LAYER_1"],
+    "GMX": ["DEFI"],
+    "GRAM": ["LAYER_1"],
+    "GRASS": ["AI"],
+    "HBAR": ["LAYER_1"],
+    "HYPE": ["DEFI", "LAYER_1"],
+    "ICP": ["LAYER_1", "AI"],
+    "IP": ["LAYER_1"],
+    "JTO": ["DEFI"],
+    "JUP": ["DEFI"],
+    "KAITO": ["DEFI", "AI"],
+    "KBONK": ["MEMES"],
+    "KFLOKI": ["MEMES"],
+    "KNOT": ["MEMES"],
+    "KPEPE": ["MEMES"],
+    "KSHIB": ["MEMES"],
+    "KTOSHI": ["MEMES"],
+    "LAUNCHCOIN": ["MEMES"],
+    "LDO": ["DEFI"],
+    "LINEA": ["LAYER_2"],
+    "LINK": ["DEFI"],
+    "LIT": ["DEFI", "LAYER_2"],
+    "LTC": ["LAYER_1"],
+    "MEGA": ["LAYER_2"],
+    "MET": ["DEFI"],
+    "MKR": ["DEFI"],
+    "MNT": ["LAYER_2"],
+    "MON": ["LAYER_1"],
+    "MORPHO": ["DEFI"],
+    "MYX": ["DEFI"],
+    "NEAR": ["LAYER_1", "AI"],
+    "NMR": ["DEFI", "AI"],
+    "ONDO": ["DEFI"],
+    "OP": ["LAYER_2"],
+    "PENDLE": ["DEFI"],
+    "PENGU": ["MEMES"],
+    "PIPPIN": ["MEMES"],
+    "POL": ["LAYER_2"],
+    "POPCAT": ["MEMES"],
+    "PUMP": ["MEMES"],
+    "PYTH": ["DEFI"],
+    "RESOLV": ["DEFI"],
+    "ROBO": ["AI"],
+    "S": ["LAYER_1"],
+    "SEI": ["DEFI"],
+    "SKY": ["DEFI"],
+    "SOL": ["MAJOR", "LAYER_1"],
+    "SPX": ["MEMES"],
+    "STABLE": ["LAYER_1"],
+    "STBL": ["DEFI"],
+    "STRK": ["LAYER_2"],
+    "SUI": ["LAYER_1"],
+    "SYRUP": ["DEFI"],
+    "TAO": ["AI"],
+    "TIA": ["LAYER_1"],
+    "TON": ["LAYER_1"],
+    "TRUMP": ["MEMES"],
+    "TRX": ["LAYER_1"],
+    "UNI": ["DEFI"],
+    "USDHKD": ["NEW"],
+    "USELESS": ["MEMES"],
+    "VIRTUAL": ["DEFI", "AI"],
+    "VVV": ["DEFI", "AI"],
+    "WIF": ["MEMES"],
+    "WLD": ["AI"],
+    "XLM": ["LAYER_1"],
+    "XMR": ["LAYER_1"],
+    "XPL": ["LAYER_1"],
+    "YZY": ["MEMES"],
+    "ZEC": ["LAYER_1"],
+    "ZK": ["LAYER_2"],
+}
