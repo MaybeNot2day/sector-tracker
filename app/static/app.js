@@ -792,7 +792,7 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
       <section class="analytics-panel">
         ${panelHeading(
           "Dominant Themes",
-          "Score / \u0394 / 1D / 5D / Status",
+          `Top ${Math.min(8, themes.length)} of ${themes.length} by score`,
           "Each watchlist sector scored 0-100: today's move and the 5-day move carry most weight, plus how many members are rising and in uptrends. \u0394 = score change vs yesterday. Labels: \u226575 DOMINANT, \u226562 STRONG, \u226552 EMERGING, \u226545 NEUTRAL, below that DETERIORATING / FADING."
         )}
         ${themeTable(themes.slice(0, 8), "score", prevScores)}
@@ -800,7 +800,7 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
       <section class="analytics-panel">
         ${panelHeading(
           "Momentum Shifts",
-          "\u0394 pace = 1D move minus 5D daily pace, pct-pts",
+          "Largest \u0394 pace today",
           "Which sectors are speeding up or slowing down right now. \u0394 pace = today's move minus the average daily move of the last five days, in %-points. Positive = accelerating beyond its recent trend; negative = losing steam even if still up on the week."
         )}
         ${themeTable(movers, "momentum")}
