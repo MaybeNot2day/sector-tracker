@@ -1477,7 +1477,7 @@ function ensureGroupPanel(groupName) {
     groupHeaderCell("Last", "last"),
     groupHeaderCell("1D Abs", "abs"),
     groupHeaderCell("1D %", "pct"),
-    groupHeaderCell("Open", "open"),
+    groupHeaderCell("\u0394Open", "open"),
     groupHeaderCell("RVOL", "rvol"),
     groupHeaderCell("Trend", "trend")
   );
