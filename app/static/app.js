@@ -1475,7 +1475,7 @@ function ensureGroupPanel(groupName) {
   header.append(
     groupHeaderCell(displayGroupName(groupName), "symbol"),
     groupHeaderCell("Last", "last"),
-    groupHeaderCell("1D Abs", "abs"),
+    groupHeaderCell("Abs", "abs"),
     groupHeaderCell("1D %", "pct"),
     groupHeaderCell("\u0394Open", "open"),
     groupHeaderCell("RVOL", "rvol"),
