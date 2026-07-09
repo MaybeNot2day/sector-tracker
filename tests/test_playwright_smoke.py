@@ -194,6 +194,52 @@ def test_markets_tabs_render_rows_and_open_canvas_chart(page: Page, base_url: st
     _expect_chart_canvas_content(page)
 
 
+def test_crypto_panels_swap_open_column_for_rolling_24h(page: Page, base_url: str) -> None:
+    _goto_board(page, base_url)
+    page.locator("#markets-tab").click()
+    expect(page.locator("#markets-view")).to_be_visible()
+
+    # TradFi keeps the original layout: pct = quote change, open = change since open.
+    page.locator('.category-tabs button[data-category="tradfi"]').click()
+    tradfi_panel = page.locator('#board .group-panel[data-group="QA_EQUITY"]')
+    expect(tradfi_panel.locator('.group-title button[data-sort-key="open"]')).to_have_text(
+        "\u0394Open"
+    )
+    spy_row = tradfi_panel.locator('.asset-row[data-symbol="SPY"]')
+    expect(spy_row.locator('[data-cell="pct"]')).to_have_text("+1.18%")
+    expect(spy_row.locator('[data-cell="open"]')).to_have_text("+0.80%")
+
+    # Crypto relabels the open column to the rolling 24h move and swaps the bindings:
+    # pct = summary.open_change_pct (UTC day), open = quote change_pct (Lighter 24h).
+    page.locator('.category-tabs button[data-category="crypto"]').click()
+    crypto_panel = page.locator('#board .group-panel[data-group="QA_CRYPTO"]')
+    open_button = crypto_panel.locator('.group-title button[data-sort-key="open"]')
+    expect(open_button).to_have_text("24h %")
+    expect(open_button).to_have_attribute("title", re.compile(r"[Rr]olling 24h"))
+    expect(crypto_panel.locator('.group-title button[data-sort-key="pct"]')).to_have_attribute(
+        "title", re.compile(r"UTC midnight")
+    )
+
+    btc_row = crypto_panel.locator('.asset-row[data-symbol="BTC"]')
+    expect(btc_row.locator('[data-cell="pct"]')).to_have_text("-1.25%")
+    expect(btc_row.locator('[data-cell="open"]')).to_have_text("+2.16%")
+    eth_row = crypto_panel.locator('.asset-row[data-symbol="ETH"]')
+    expect(eth_row.locator('[data-cell="pct"]')).to_have_text("+3.40%")
+    expect(eth_row.locator('[data-cell="open"]')).to_have_text("-1.92%")
+
+    tape_pct = page.locator('#crypto-tape .tape-panel .group-title button[data-sort-key="pct"]')
+    expect(tape_pct.first).to_have_text("24h %")
+
+    # Sorting the relabeled column follows the displayed rolling-24h values (desc on
+    # first click): BTC (+2.16%) must jump ahead of the configured-first ETH (-1.92%).
+    rows = crypto_panel.locator(".asset-row")
+    expect(rows.nth(0)).to_have_attribute("data-symbol", "ETH")
+    open_button.click()
+    expect(open_button).to_have_attribute("aria-pressed", "true")
+    expect(rows.nth(0)).to_have_attribute("data-symbol", "BTC")
+    expect(rows.nth(1)).to_have_attribute("data-symbol", "ETH")
+
+
 def test_tape_deep_link_restores_crypto_chart_when_tape_row_exists(
     page: Page,
     base_url: str,
@@ -375,11 +421,11 @@ def _quote(
     }
 
 
-def _summary(start: float) -> dict[str, Any]:
+def _summary(start: float, *, open_change_pct: float = 0.8) -> dict[str, Any]:
     return {
         "sparkline": [start + index * 0.35 for index in range(32)],
         "rvol": 1.7,
-        "open_change_pct": 0.8,
+        "open_change_pct": open_change_pct,
         "performance": {"1D": 1.2, "1W": 2.4, "1M": 5.1, "3M": 9.5, "YTD": 13.0, "1Y": 18.2},
         "range_52w": {
             "low": start * 0.72,
@@ -402,6 +448,7 @@ def _asset(
     previous_close: float,
     *,
     exchange: str = "US",
+    open_change_pct: float = 0.8,
 ) -> dict[str, Any]:
     return {
         "symbol": symbol,
@@ -411,7 +458,7 @@ def _asset(
         "name": name,
         "groupLabel": group,
         "quote": _quote(symbol, last, previous_close, provider=source),
-        "summary": _summary(previous_close),
+        "summary": _summary(previous_close, open_change_pct=open_change_pct),
     }
 
 
@@ -462,7 +509,28 @@ def _profile_payload(symbol: str) -> dict[str, Any]:
 
 TRADFI_ASSET = _asset("QA_EQUITY", "SPY", "etf", "yahoo", "S&P 500 ETF", 632.4, 625.0)
 CRYPTO_ASSET = _asset(
-    "QA_CRYPTO", "BTC", "crypto_perp", "lighter", "Bitcoin Perp", 118_500.0, 116_000.0
+    "QA_CRYPTO",
+    "BTC",
+    "crypto_perp",
+    "lighter",
+    "Bitcoin Perp",
+    118_500.0,
+    116_000.0,
+    # Rolling 24h (quote change_pct -> +2.16%) vs UTC-day move (-1.25%): kept far
+    # apart so a regression back to the old pct/open bindings fails loudly.
+    open_change_pct=-1.25,
+)
+CRYPTO_ASSET_ETH = _asset(
+    "QA_CRYPTO",
+    "ETH",
+    "crypto_perp",
+    "lighter",
+    "Ether Perp",
+    3_580.0,
+    3_650.0,
+    # Opposite ordering vs BTC on the two metrics (-1.92% rolling vs +3.40% UTC-day)
+    # so sorting the 24h column by the wrong field visibly reorders the panel.
+    open_change_pct=3.4,
 )
 COMMODITY_ASSET = _asset(
     "QA_COMMODITIES", "GC=F", "future", "yahoo", "Gold Futures", 3_350.0, 3_320.0
@@ -496,7 +564,14 @@ WATCHLIST_PAYLOAD: dict[str, Any] = {
                     "source": "lighter",
                     "exchange": None,
                     "name": "Bitcoin Perp",
-                }
+                },
+                {
+                    "symbol": "ETH",
+                    "type": "crypto_perp",
+                    "source": "lighter",
+                    "exchange": None,
+                    "name": "Ether Perp",
+                },
             ],
         },
         {
@@ -517,7 +592,7 @@ WATCHLIST_PAYLOAD: dict[str, Any] = {
 BOARD_PAYLOAD: dict[str, Any] = {
     "groups": [
         {"name": "QA_EQUITY", "assets": [TRADFI_ASSET]},
-        {"name": "QA_CRYPTO", "assets": [CRYPTO_ASSET]},
+        {"name": "QA_CRYPTO", "assets": [CRYPTO_ASSET_ETH, CRYPTO_ASSET]},
         {"name": "QA_COMMODITIES", "assets": [COMMODITY_ASSET]},
     ],
     "crypto_tape": [

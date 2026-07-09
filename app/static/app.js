@@ -1332,7 +1332,7 @@ function renderBoard(payload) {
   const nextGroups = new Set(groups.map((group) => group.name));
 
   groups.forEach((group) => {
-    const panel = ensureGroupPanel(group.name);
+    const panel = ensureGroupPanel(group.name, marketCategory === "crypto");
     updateGroupSessionChip(panel, group.assets || []);
     const assets = sortedAssets(group.assets || []);
     const nextSymbols = new Set(assets.map((asset) => asset.symbol));
@@ -1465,7 +1465,7 @@ function tapeBasketMarkup(basket, rows) {
     <div class="group-title">
       <span>${header(basket, "symbol")}<em class="session-chip" data-state="open" title="${rows.length} perps · Lighter basket · trades 24/7">${rows.length}</em></span>
       <span>${header("Last", "last")}</span>
-      <span>${header("1D %", "pct")}</span>
+      <span>${header("24h %", "pct")}</span>
       <span>${header("Fund", "funding")}</span>
       <span>${header("OI", "oi")}</span>
       <span>${header("24h Vol", "volume")}</span>
@@ -1578,27 +1578,48 @@ function flatGroups(groups) {
   return assets.length ? [{ name: "__ALL__", assets }] : [];
 }
 
-function ensureGroupPanel(groupName) {
+function ensureGroupPanel(groupName, isCrypto = false) {
   let panel = board.querySelector(`.group-panel[data-group="${cssEscape(groupName)}"]`);
-  if (panel) return panel;
+  if (!panel) {
+    panel = document.createElement("section");
+    panel.className = "group-panel";
+    panel.dataset.group = groupName;
 
-  panel = document.createElement("section");
-  panel.className = "group-panel";
-  panel.dataset.group = groupName;
-
-  const header = document.createElement("div");
-  header.className = "group-title";
-  header.append(
-    groupHeaderCell(displayGroupName(groupName), "symbol"),
-    groupHeaderCell("Last", "last"),
-    groupHeaderCell("Abs", "abs"),
-    groupHeaderCell("1D %", "pct"),
-    groupHeaderCell("\u0394Open", "open"),
-    groupHeaderCell("RVOL", "rvol"),
-    groupHeaderCell("Trend", "trend")
-  );
-  panel.appendChild(header);
+    const header = document.createElement("div");
+    header.className = "group-title";
+    header.append(
+      groupHeaderCell(displayGroupName(groupName), "symbol"),
+      groupHeaderCell("Last", "last"),
+      groupHeaderCell("Abs", "abs"),
+      groupHeaderCell("1D %", "pct"),
+      groupHeaderCell("\u0394Open", "open"),
+      groupHeaderCell("RVOL", "rvol"),
+      groupHeaderCell("Trend", "trend")
+    );
+    panel.appendChild(header);
+  }
+  syncDayChangeHeaders(panel, isCrypto);
   return panel;
+}
+
+function syncDayChangeHeaders(panel, isCrypto) {
+  // Crypto panels replace ΔOpen with the exchange's rolling 24h change and
+  // anchor "1D %" to the UTC day. Synced on every render because the flat
+  // "__ALL__" panel is reused across category tabs.
+  const variant = isCrypto ? "crypto" : "tradfi";
+  if (panel.dataset.dayVariant === variant) return;
+  panel.dataset.dayVariant = variant;
+  const pctButton = panel.querySelector('.group-title button[data-sort-key="pct"]');
+  const openButton = panel.querySelector('.group-title button[data-sort-key="open"]');
+  if (pctButton) {
+    pctButton.title = isCrypto ? "Move since UTC midnight · click to sort" : "Sort by 1D %";
+  }
+  if (openButton) {
+    openButton.textContent = isCrypto ? "24h %" : "\u0394Open";
+    openButton.title = isCrypto
+      ? "Rolling 24h change (exchange window) · click to sort"
+      : "Change since today's open · click to sort";
+  }
 }
 
 function updateGroupSessionChip(panel, assets) {
@@ -1630,10 +1651,7 @@ function groupHeaderCell(label, sortKey) {
   button.type = "button";
   button.dataset.sortKey = sortKey;
   button.textContent = label;
-  button.title =
-    sortKey === "open"
-      ? "Change since today's open (UTC day for crypto) · click to sort"
-      : `Sort by ${label}`;
+  button.title = sortKey === "open" ? "Change since today's open · click to sort" : `Sort by ${label}`;
   button.addEventListener("click", () => setMarketSort(sortKey));
   cell.appendChild(button);
   return cell;
@@ -1681,11 +1699,24 @@ function sortedAssets(assets) {
 
 function sortValue(asset, key) {
   const quote = asset.quote || {};
+  // Crypto rows swap the two day-change columns: "1D %" holds the UTC-day
+  // move and the old ΔOpen slot holds the exchange's rolling 24h change
+  // (Lighter's daily_price_change) — mirror that here so sorting follows
+  // the displayed values.
+  const crypto = isCryptoAsset(asset.type);
   if (key === "last") return numericOrNull(displayQuoteValue(quote, "last"));
   if (key === "abs") return numericOrNull(displayQuoteValue(quote, "change_abs"));
-  if (key === "pct") return numericOrNull(displayQuoteValue(quote, "change_pct"));
+  if (key === "pct") {
+    return crypto
+      ? numericOrNull(asset.summary?.open_change_pct)
+      : numericOrNull(displayQuoteValue(quote, "change_pct"));
+  }
   if (key === "rvol") return numericOrNull(asset.summary?.rvol);
-  if (key === "open") return numericOrNull(asset.summary?.open_change_pct);
+  if (key === "open") {
+    return crypto
+      ? numericOrNull(displayQuoteValue(quote, "change_pct"))
+      : numericOrNull(asset.summary?.open_change_pct);
+  }
   return null;
 }
 
@@ -2003,19 +2034,25 @@ function updateRow(row, asset, options = {}) {
     "change-abs-cell",
     !options.initial
   );
+  // Crypto rows: "1D %" anchors to the UTC day (what ΔOpen used to show)
+  // and the old ΔOpen column carries Lighter's rolling 24h change, so each
+  // number sits under a truthful label. TradFi rows are unchanged.
+  const openChange = numericOrNull(asset.summary?.open_change_pct);
+  const rowIsCrypto = isCryptoAsset(asset.type);
+  const dayPct = rowIsCrypto ? openChange : numericOrNull(display.change_pct);
+  const openCellPct = rowIsCrypto ? numericOrNull(display.change_pct) : openChange;
   updateValueCell(
     ensureRowCell(row, "pct"),
-    formatSignedPct(display.change_pct),
-    display.change_pct,
-    changeClass(display.change_pct),
+    formatSignedPct(dayPct),
+    dayPct,
+    changeClass(dayPct),
     !options.initial
   );
-  const openChange = numericOrNull(asset.summary?.open_change_pct);
   updateValueCell(
     ensureRowCell(row, "open", "open-cell"),
-    formatSignedPct(openChange),
-    openChange,
-    `open-cell ${changeClass(openChange)}`,
+    formatSignedPct(openCellPct),
+    openCellPct,
+    `open-cell ${changeClass(openCellPct)}`,
     false
   );
   const rvol = numericOrNull(asset.summary?.rvol);
