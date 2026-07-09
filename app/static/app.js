@@ -734,7 +734,13 @@ function renderNews(payload) {
   }
   const visible = items.filter((item) => !mutedNewsChannels.has(item.channel));
   if (!visible.length) {
-    newsList.innerHTML = '<div class="empty-state">All channels muted</div>';
+    // "All muted" was wrong when one firehose channel owned every cached post:
+    // muting it showed this state while three unmuted channels sat idle.
+    const channels = payload?.channels || [];
+    const allMuted = channels.length > 0 && channels.every((ch) => mutedNewsChannels.has(ch));
+    newsList.innerHTML = `<div class="empty-state">${
+      allMuted ? "All channels muted" : "No recent posts from unmuted channels"
+    }</div>`;
   } else {
     const seenBefore = knownNewsIds.size > 0;
     newsList.innerHTML = visible.map((item) => newsItemMarkup(item, seenBefore)).join("");

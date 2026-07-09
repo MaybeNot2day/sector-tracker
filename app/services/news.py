@@ -16,6 +16,8 @@ import httpx
 PREVIEW_URL = "https://t.me/s/{channel}"
 FETCH_TIMEOUT = 10.0
 MAX_FEED_ITEMS = 100
+# One full t.me preview page (~20 posts) — the floor each channel retains.
+MIN_ITEMS_PER_CHANNEL = 20
 USER_AGENT = "Mozilla/5.0"
 
 _POST_RE = re.compile(r'data-post="([^"]+)"')
@@ -86,10 +88,21 @@ class NewsService:
     def _trim(self) -> None:
         if len(self._items) <= MAX_FEED_ITEMS:
             return
-        newest = sorted(self._items.values(), key=lambda item: item["timestamp"], reverse=True)[
-            :MAX_FEED_ITEMS
-        ]
-        self._items = {item["id"]: item for item in newest}
+        # Fair retention: a firehose channel (marketfeed posts every minute or
+        # two) must not evict slower channels out of the shared window — t.me
+        # previews only serve the last ~20 posts, so once a slow channel's
+        # newest post ages past the firehose's cap it would never come back.
+        # Every channel always keeps its newest slice (at least one full
+        # preview page); the total stays near MAX_FEED_ITEMS.
+        per_channel = max(MAX_FEED_ITEMS // max(len(self.channels), 1), MIN_ITEMS_PER_CHANNEL)
+        by_channel: dict[str, list[dict[str, Any]]] = {}
+        for item in self._items.values():
+            by_channel.setdefault(item["channel"], []).append(item)
+        kept: list[dict[str, Any]] = []
+        for channel_items in by_channel.values():
+            channel_items.sort(key=lambda item: item["timestamp"], reverse=True)
+            kept.extend(channel_items[:per_channel])
+        self._items = {item["id"]: item for item in kept}
 
     async def _fetch_channel(self, channel: str) -> str:
         try:
