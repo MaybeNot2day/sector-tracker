@@ -24,14 +24,23 @@ class ConnectionManager:
         self._clients.discard(websocket)
 
     async def broadcast(self, payload: dict[str, Any]) -> None:
-        stale_clients: list[WebSocket] = []
-        for websocket in list(self._clients):
-            try:
-                await websocket.send_json(payload)
-            except Exception:
-                stale_clients.append(websocket)
-        for websocket in stale_clients:
-            self.disconnect(websocket)
+        """Fan out concurrently with a per-client deadline.
+
+        Serialized sends let ONE dead client (unplugged phone, sleeping
+        laptop) block every other client's updates for up to the WS
+        keepalive teardown (~40s). A client that can't take the frame
+        within the deadline is dropped; it reconnects on its own.
+        """
+        clients = list(self._clients)
+        if not clients:
+            return
+        results = await asyncio.gather(
+            *(asyncio.wait_for(ws.send_json(payload), timeout=5.0) for ws in clients),
+            return_exceptions=True,
+        )
+        for websocket, result in zip(clients, results, strict=True):
+            if isinstance(result, BaseException):
+                self.disconnect(websocket)
 
 
 async def quote_poll_loop(app_state: Any) -> None:
@@ -43,7 +52,7 @@ async def quote_poll_loop(app_state: Any) -> None:
             )
             payload = {
                 "type": "quotes",
-                "data": _board_payload(app_state, grouped),
+                "data": await board_payload_async(app_state, grouped),
             }
             await app_state.connection_manager.broadcast(payload)
         except asyncio.CancelledError:
@@ -103,6 +112,24 @@ async def _refresh_daily_history(app_state: Any) -> None:
             )
 
     await asyncio.gather(*(refresh(symbol) for symbol in symbols))
+
+
+# Memoized on the grouped-quotes snapshot: QuoteService returns the SAME
+# dict object for the whole cache window, so identity is a correct key and
+# the poll loop, HTTP route, and WS handshake share one build per window.
+# Holding the dict itself (not just id()) keeps the key valid across GC.
+_payload_cache: tuple[Any, dict[str, object]] | None = None
+
+
+async def board_payload_async(app_state: Any, grouped: Any) -> dict[str, object]:
+    global _payload_cache
+    if _payload_cache is not None and _payload_cache[0] is grouped:
+        return _payload_cache[1]
+    # build_board loads the full 1d bars table (~75k rows, 300-550ms):
+    # off the event loop, or every WS ping and HTTP response stalls.
+    payload = await asyncio.to_thread(_board_payload, app_state, grouped)
+    _payload_cache = (grouped, payload)
+    return payload
 
 
 def _board_payload(app_state: Any, grouped: Any) -> dict[str, object]:

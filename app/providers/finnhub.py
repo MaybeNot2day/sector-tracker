@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from app.models import AssetConfig, Bar, Quote
+from app.providers.aggregate import aggregate_bars
 from app.providers.base import QuoteProvider
 
 
@@ -51,10 +52,13 @@ class FinnhubProvider(QuoteProvider):
     async def get_history(self, asset: AssetConfig, *, interval: str, range_: str) -> list[Bar]:
         if not self.api_key:
             return []
+        # Finnhub has no native 4h resolution: fetch hourly and aggregate,
+        # mirroring the Yahoo provider.
+        fetch_interval = "1h" if interval == "4h" else interval
         start, end = _range_to_window(range_)
         params = {
             "symbol": asset.symbol,
-            "resolution": _resolution(interval),
+            "resolution": _resolution(fetch_interval),
             "from": int(start.timestamp()),
             "to": int(end.timestamp()),
             "token": self.api_key,
@@ -82,7 +86,7 @@ class FinnhubProvider(QuoteProvider):
                 Bar(
                     symbol=asset.symbol,
                     provider="finnhub",
-                    interval=interval,
+                    interval=fetch_interval,
                     timestamp=datetime.fromtimestamp(float(timestamp), tz=UTC),
                     open=parsed[0],
                     high=parsed[1],
@@ -91,11 +95,25 @@ class FinnhubProvider(QuoteProvider):
                     volume=_number(volume),
                 )
             )
+        if interval == "4h":
+            return aggregate_bars(bars, "4h")
         return bars
 
 
 def _resolution(interval: str) -> str:
-    return {"1d": "D", "1h": "60", "15m": "15", "5m": "5", "1m": "1"}.get(interval, "D")
+    # Every UI interval maps to a REAL Finnhub resolution; the old default
+    # of "D" silently served daily candles mislabeled (and cached!) as
+    # 30m/1wk/1mo.
+    return {
+        "1m": "1",
+        "5m": "5",
+        "15m": "15",
+        "30m": "30",
+        "1h": "60",
+        "1d": "D",
+        "1wk": "W",
+        "1mo": "M",
+    }.get(interval, "D")
 
 
 def _range_to_window(range_: str) -> tuple[datetime, datetime]:
@@ -113,6 +131,7 @@ def _range_to_window(range_: str) -> tuple[datetime, datetime]:
         "6mo": end - timedelta(days=186),
         "1y": end - timedelta(days=366),
         "5y": end - timedelta(days=366 * 5),
+        "10y": end - timedelta(days=366 * 10),
         "ytd": datetime(today.year, 1, 1, tzinfo=UTC),
     }.get(range_, end - timedelta(days=366))
     return start, end

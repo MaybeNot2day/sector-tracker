@@ -23,6 +23,11 @@ FUNDING_TTL_SECONDS = 300.0
 # a listing.
 CATEGORY_TTL_SECONDS = 3600.0
 RATE_LIMIT_COOLDOWN_SECONDS = 60.0
+# Non-429 failures (timeouts, 5xx, resets) back off too: without this a
+# dead secondary endpoint added its 15s timeout to EVERY quote poll (the
+# funding starvation-guard runs before prices), and TTL stamps only
+# advance on success so nothing else suppressed the retry.
+FAILURE_COOLDOWN_SECONDS = 30.0
 
 # Lighter caps candles at 500 per call.
 MAX_CANDLES = 500
@@ -241,6 +246,7 @@ class LighterProvider(QuoteProvider):
                 response.raise_for_status()
                 return response.json()
         except Exception:
+            self._cooldown_until[path] = monotonic() + FAILURE_COOLDOWN_SECONDS
             return None
 
 

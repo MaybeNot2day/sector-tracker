@@ -357,9 +357,11 @@ function init() {
   updateFeedModeLabel();
   if (feedMode === "ws") openSocket();
   // Poll only while the tab is visible; a hidden tab otherwise burns
-  // ~5.7k serverless invocations/day for nothing.
+  // ~5.7k serverless invocations/day for nothing. On WS hosts frames
+  // stream in; polling would double-fetch and risk stale overwrites
+  // (feedMode flips to "poll" if the socket dies, resuming this timer).
   window.setInterval(() => {
-    if (!document.hidden) fetchQuotes();
+    if (!document.hidden && feedMode !== "ws") fetchQuotes();
   }, 10000);
   window.setInterval(() => {
     if (!document.hidden) {
@@ -545,17 +547,27 @@ function persistBoardCache(payload) {
 }
 
 
+let quotesFetchSeq = 0;
+let quotesFetchApplied = 0;
+
 async function fetchQuotes() {
+  const seq = ++quotesFetchSeq;
   refreshButton.classList.add("loading");
   try {
     const response = await fetch("/api/quotes");
     if (!response.ok) throw new Error("quotes_failed");
     const payload = await response.json();
+    // A slower response must never overwrite a fresher one (overlapping
+    // interval poll + manual refresh + visibility refetch can all be in
+    // flight; on WS hosts frames land between them).
+    if (seq < quotesFetchApplied) return;
+    quotesFetchApplied = seq;
     dataIsCached = false;
     applyQuotes(payload);
     persistBoardCache(payload);
     setConnection("live");
   } catch (error) {
+    if (seq < quotesFetchApplied) return;
     setConnection("error");
     statusCopy.textContent = "Market data unavailable · retrying";
     if (!latestData) {
@@ -586,6 +598,9 @@ function openSocket() {
     const message = JSON.parse(event.data);
     if (message.type === "quotes") {
       dataIsCached = false;
+      // A WS frame is the freshest state; any poll still in flight
+      // (visibility refetch, manual refresh) must not overwrite it.
+      quotesFetchApplied = quotesFetchSeq;
       applyQuotes(message.data);
       persistBoardCache(message.data);
       setConnection("live");
@@ -611,7 +626,10 @@ function updateFeedModeLabel() {
 }
 
 function applyQuotes(payload) {
-  rememberAndPatchFunding(payload);
+  // A restored localStorage payload may be hours old: patch it from memory,
+  // but never let it SEED the memory as fresh — that defeats the 30-min
+  // age cap and re-persists ever-older funding across reload cycles.
+  rememberAndPatchFunding(payload, { remember: !dataIsCached });
   latestData = payload;
   renderBoard(payload);
   renderMacroStrip(payload.macro);
@@ -628,11 +646,12 @@ function applyQuotes(payload) {
 const fundingMemory = new Map(); // symbol -> { rate, oi, at }
 const FUNDING_MEMORY_MAX_AGE_MS = 30 * 60 * 1000;
 
-function rememberAndPatchFunding(payload) {
+function rememberAndPatchFunding(payload, { remember = true } = {}) {
   const now = Date.now();
   const patch = (target, symbol) => {
     if (!target || !symbol) return;
     if (typeof target.funding_rate === "number") {
+      if (!remember) return;
       fundingMemory.set(symbol, {
         rate: target.funding_rate,
         oi: typeof target.open_interest_usd === "number" ? target.open_interest_usd : null,
@@ -1894,7 +1913,10 @@ function setEditorStatus(text) {
 function renderRow(asset) {
   const row = document.createElement("button");
   row.type = "button";
-  row.addEventListener("click", () => openChart(asset));
+  // Resolve at click time: rows are created once (often from the cached
+  // payload) and reused across polls, so the closure's asset snapshot goes
+  // stale while the cells stay live. Tape rows already resolve this way.
+  row.addEventListener("click", () => openChart(findAssetConfig(asset.symbol) || asset));
   updateRow(row, asset, { initial: true });
   return row;
 }

@@ -23,7 +23,7 @@ from starlette.middleware.gzip import GZipMiddleware
 
 from app import db
 from app.config import Settings, find_group, load_watchlists, save_watchlists
-from app.models import AssetConfig, AssetType, GroupConfig, ProviderName, Quote
+from app.models import AssetConfig, AssetType, GroupConfig, ProviderName
 from app.providers.base import QuoteProvider
 from app.providers.finnhub import FinnhubProvider
 from app.providers.lighter import LighterProvider
@@ -31,6 +31,7 @@ from app.providers.stooq import StooqProvider
 from app.providers.yahoo import YahooProvider
 from app.scheduler import (
     ConnectionManager,
+    board_payload_async,
     history_refresh_loop,
     news_poll_loop,
     quote_poll_loop,
@@ -38,11 +39,11 @@ from app.scheduler import (
 )
 from app.services.asset_profile import AssetProfileService
 from app.services.crypto_etf_flows import CryptoEtfFlowService
-from app.services.daily_board import DailyBoardService, crypto_breadth_metrics
+from app.services.daily_board import DailyBoardService
 from app.services.history import HistoryService, bars_payload, find_asset
-from app.services.macro import MACRO_TAPE_GROUP_NAME, macro_payload, with_macro_group
+from app.services.macro import with_macro_group
 from app.services.news import NewsService
-from app.services.quotes import QuoteService, grouped_quotes_payload
+from app.services.quotes import QuoteService
 
 APP_DIR = Path(__file__).parent
 STATIC_DIR = APP_DIR / "static"
@@ -340,7 +341,7 @@ def clean_optional(value: str | None) -> str | None:
 async def quotes() -> dict[str, object]:
     grouped = await app.state.quote_service.get_board_quotes(with_macro_group(app.state.groups))
     await _heal_stale_history()
-    return board_payload(grouped)
+    return await board_payload_async(app.state, grouped)
 
 
 @app.get("/api/news")
@@ -448,36 +449,12 @@ async def quotes_ws(websocket: WebSocket) -> None:
     await manager.connect(websocket)
     try:
         grouped = await app.state.quote_service.get_board_quotes(with_macro_group(app.state.groups))
-        await websocket.send_json({"type": "quotes", "data": board_payload(grouped)})
+        await websocket.send_json(
+            {"type": "quotes", "data": await board_payload_async(app.state, grouped)}
+        )
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
     except Exception:
         manager.disconnect(websocket)
-
-
-_board_payload_cache: tuple[dict[str, list[Quote]], dict[str, object]] | None = None
-
-
-def board_payload(grouped: dict[str, list[Quote]]) -> dict[str, object]:
-    """Build the full board JSON, memoized on the quote snapshot.
-
-    QuoteService returns the SAME dict object for the whole cache window
-    (15s in production), so identity is a correct cache key: while quotes
-    are unchanged, polls skip reloading ~40k bars and recomputing metrics.
-    Holding the dict itself (not just id()) keeps the key valid across GC.
-    """
-    global _board_payload_cache
-    if _board_payload_cache is not None and _board_payload_cache[0] is grouped:
-        return _board_payload_cache[1]
-    overview, summaries = app.state.daily_board_service.build_board(app.state.groups, grouped)
-    payload = grouped_quotes_payload(app.state.groups, grouped, summaries=summaries)
-    lighter = app.state.providers.get("lighter")
-    tape = lighter.crypto_tape_cached() if isinstance(lighter, LighterProvider) else []
-    overview["crypto_breadth"] = crypto_breadth_metrics(tape)
-    payload["overview"] = overview
-    payload["macro"] = macro_payload(grouped.get(MACRO_TAPE_GROUP_NAME, []))
-    payload["crypto_tape"] = tape
-    _board_payload_cache = (grouped, payload)
-    return payload

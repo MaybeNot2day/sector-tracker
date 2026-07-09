@@ -248,7 +248,14 @@ async def test_failed_categories_fetch_keeps_old_cache_and_retries(
     second = await provider._get_categories()
 
     assert first == second == {"OLD": ["DEFI"]}
-    # A failed fetch must not restart the TTL, so the next call retries.
+    # The failure cooldown suppresses an immediate hammer-retry: one request
+    # serves both calls while the endpoint is down...
+    assert fake.count("/tokenlist") == 1
+    # ...but a failed fetch must not restart the FULL TTL: once the short
+    # cooldown lapses, the next call retries instead of waiting an hour.
+    provider._cooldown_until["/tokenlist"] = 0.0
+    third = await provider._get_categories()
+    assert third == {"OLD": ["DEFI"]}
     assert fake.count("/tokenlist") == 2
 
 
