@@ -2957,6 +2957,11 @@ function toChartTime(value, interval) {
   if (DATE_ONLY_INTERVALS.has(interval)) return value.slice(0, 10);
   // lightweight-charts renders epoch labels in UTC; shift by the display
   // zone's offset so the axis matches the CET times in the subtitle.
+  // The offset is the zone's CURRENT one, applied uniformly: a per-bar
+  // offset goes backward across a DST fall-back (02:30 repeats), producing
+  // non-monotonic times that silently corrupt the series. With a fixed
+  // shift, bars from the other DST regime label ±1h off instead — the
+  // standard fixed-offset display tradeoff.
   const date = new Date(value);
-  return Math.floor(date.getTime() / 1000) + displayTzOffsetSeconds(date);
+  return Math.floor(date.getTime() / 1000) + displayTzOffsetSeconds(new Date());
 }

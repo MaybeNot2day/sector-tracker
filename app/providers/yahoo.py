@@ -223,7 +223,34 @@ def _bars_from_chart_result(
                 volume=_number(volumes[index]) if index < len(volumes) else None,
             )
         )
-    return bars
+    return _drop_off_grid_tail(bars, interval)
+
+
+_INTERVAL_SECONDS = {
+    "1m": 60,
+    "5m": 300,
+    "15m": 900,
+    "30m": 1800,
+    "1h": 3600,
+    "60m": 3600,
+}
+
+
+def _drop_off_grid_tail(bars: list[Bar], interval: str) -> list[Bar]:
+    """Drop Yahoo's live-print tail row from intraday chart responses.
+
+    During a session Yahoo appends a row timestamped at the current second
+    (equal to meta.regularMarketTime) duplicating the in-progress bar. Each
+    fetch produces a different tail timestamp, so persisting them accretes
+    phantom overlapping candles in the bars cache (PK includes timestamp).
+    A genuine partial bar sits ON the interval grid — exactly one interval
+    after its predecessor — so anything closer is the live print.
+    """
+    step = _INTERVAL_SECONDS.get(interval)
+    if step is None or len(bars) < 2:
+        return bars
+    gap = (bars[-1].timestamp - bars[-2].timestamp).total_seconds()
+    return bars[:-1] if gap < step else bars
 
 
 def _bars_with_usd_display(

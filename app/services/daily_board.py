@@ -79,8 +79,15 @@ class DailyBoardService:
         if now - self._last_snapshot_write < SNAPSHOT_WRITE_INTERVAL_SECONDS:
             return
         self._last_snapshot_write = now
-        as_of = str(overview.get("as_of", ""))
-        snapshot_date = as_of[:10] or datetime.now(UTC).date().isoformat()
+        # Key strictly by today's UTC date. as_of is max(quote.timestamp),
+        # which during a full provider outage is the date of the last
+        # successful fetch — writing under that key would silently overwrite
+        # a PAST day's persisted snapshot with degraded metrics.
+        today = datetime.now(UTC).date().isoformat()
+        as_of_date = str(overview.get("as_of", ""))[:10]
+        if as_of_date and as_of_date != today:
+            return
+        snapshot_date = today
         try:
             db.save_board_snapshot(self.database_path, snapshot_date, _snapshot_payload(overview))
         except Exception:
@@ -183,7 +190,7 @@ def _market_summary(
             "1W": _return_from_close(current, closes, 6),
             "1M": _return_from_close(current, closes, 22),
             "3M": _return_from_close(current, closes, 64),
-            "YTD": _ytd_return(current, bars),
+            "YTD": _ytd_return(current, bars, quote.timestamp if quote else None),
             "1Y": _return_from_close(current, closes, 252),
         },
         "range_52w": _range_52w(current, bars),
@@ -297,11 +304,26 @@ def _display_bar(bar: Bar, divisor: float, threshold: float) -> Bar:
     )
 
 
+# Currencies whose quote units match the cached bars without FX conversion.
+# KRX-style quotes outside this set are only bar-compatible via display_last
+# (bars are stored USD-converted at fetch time); if the FX leg failed and
+# display fields are missing, the raw quote would divide e.g. KRW by USD.
+_BAR_COMPATIBLE_CURRENCIES = frozenset({"USD", "USX"})
+
+
 def _current_price(quote: Quote | None, bars: list[Bar]) -> float | None:
     quoted = _quote_last(quote)
-    if quoted is not None and quoted > 0:
+    if quoted is not None and quoted > 0 and _bar_compatible(quote):
         return quoted
     return bars[-1].close if bars else None
+
+
+def _bar_compatible(quote: Quote | None) -> bool:
+    if quote is None:
+        return False
+    if quote.display_last is not None:
+        return True
+    return quote.currency is None or quote.currency in _BAR_COMPATIBLE_CURRENCIES
 
 
 def _quote_change_pct(quote: Quote | None) -> float | None:
@@ -584,15 +606,23 @@ def _return_from_close(current: float | None, closes: list[float], offset: int) 
     return round((current - reference) / reference * 100, 4)
 
 
-def _ytd_return(current: float | None, bars: list[Bar]) -> float | None:
+def _ytd_return(
+    current: float | None, bars: list[Bar], as_of: datetime | None = None
+) -> float | None:
     if current is None or not bars:
         return None
-    end = bars[-1].timestamp
-    year_bars = [bar for bar in bars if bar.timestamp.year == end.year]
-    if not year_bars:
-        return None
-    first_year_index = bars.index(year_bars[0])
-    reference = bars[first_year_index - 1].close if first_year_index > 0 else year_bars[0].close
+    # Anchor the year to the as-of clock, not the newest cached bar: in early
+    # January the cache still ends on Dec 31 and the old anchor reported the
+    # ENTIRE previous year's return as "YTD".
+    year = (as_of or datetime.now(UTC)).year
+    year_bars = [bar for bar in bars if bar.timestamp.year == year]
+    if year_bars:
+        first_year_index = bars.index(year_bars[0])
+        reference = bars[first_year_index - 1].close if first_year_index > 0 else year_bars[0].close
+    else:
+        # No bar for the current year yet: YTD is the move off the final
+        # close of the prior year (the newest bar).
+        reference = bars[-1].close
     if reference == 0:
         return None
     return round((current - reference) / reference * 100, 4)
