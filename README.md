@@ -48,6 +48,27 @@ uvicorn app.main:app --reload
 
 Open http://127.0.0.1:8000.
 
+## Tests
+
+```bash
+python -m pytest
+```
+
+Browser smoke tests are opt-in so the default suite stays fast and does not require
+Chromium:
+
+```bash
+python -m playwright install chromium
+RUN_PLAYWRIGHT=1 python -m pytest tests/test_playwright_smoke.py -q
+```
+
+To run the same smoke suite against an already-running board instead of the test fixture
+server:
+
+```bash
+BOARD_E2E_BASE_URL=http://127.0.0.1:8000 python -m pytest tests/test_playwright_smoke.py -q
+```
+
 ## Configuration
 
 Use the settings button in the app or edit `config/watchlists.yaml` to change groups and assets.
