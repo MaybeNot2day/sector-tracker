@@ -41,7 +41,7 @@ from app.services.asset_profile import AssetProfileService
 from app.services.crypto_etf_flows import CryptoEtfFlowService
 from app.services.daily_board import DailyBoardService
 from app.services.history import HistoryService, bars_payload, find_asset
-from app.services.macro import with_macro_group
+from app.services.macro import MACRO_TAPE_GROUP_NAME, with_macro_group
 from app.services.news import NewsService
 from app.services.quotes import QuoteService
 
@@ -208,6 +208,11 @@ async def create_group(request: GroupRequest) -> dict[str, object]:
     async with app.state.watchlist_lock:
         groups_current = load_watchlists(app.state.settings.watchlist_path)
         name = clean_text(request.name)
+        if name.upper() == MACRO_TAPE_GROUP_NAME:
+            # Reserved: the virtual macro group is appended at fetch time;
+            # a user group with the same name would be zipped against the
+            # macro quotes (VIX/DXY prices on user assets).
+            raise HTTPException(status_code=422, detail="group_name_reserved")
         if find_group(groups_current, name):
             raise HTTPException(status_code=409, detail="group_already_exists")
         groups_current.append(GroupConfig(name=name.upper(), assets=[]))
@@ -339,9 +344,12 @@ def clean_optional(value: str | None) -> str | None:
 
 @app.get("/api/quotes")
 async def quotes() -> dict[str, object]:
-    grouped = await app.state.quote_service.get_board_quotes(with_macro_group(app.state.groups))
+    # One snapshot: an edit completing across the heal await must not
+    # rebuild the payload from swapped groups zipped against old quotes.
+    groups = app.state.groups
+    grouped = await app.state.quote_service.get_board_quotes(with_macro_group(groups))
     await _heal_stale_history()
-    return await board_payload_async(app.state, grouped)
+    return await board_payload_async(app.state, groups, grouped)
 
 
 @app.get("/api/news")
@@ -448,9 +456,10 @@ async def quotes_ws(websocket: WebSocket) -> None:
     manager: ConnectionManager = app.state.connection_manager
     await manager.connect(websocket)
     try:
-        grouped = await app.state.quote_service.get_board_quotes(with_macro_group(app.state.groups))
+        groups = app.state.groups
+        grouped = await app.state.quote_service.get_board_quotes(with_macro_group(groups))
         await websocket.send_json(
-            {"type": "quotes", "data": await board_payload_async(app.state, grouped)}
+            {"type": "quotes", "data": await board_payload_async(app.state, groups, grouped)}
         )
         while True:
             await websocket.receive_text()

@@ -47,12 +47,13 @@ async def quote_poll_loop(app_state: Any) -> None:
     await asyncio.sleep(1)
     while True:
         try:
-            grouped = await app_state.quote_service.get_board_quotes(
-                with_macro_group(app_state.groups)
-            )
+            # One groups snapshot per cycle: a watchlist edit completing
+            # mid-cycle must not zip NEW groups against OLD quotes.
+            groups = app_state.groups
+            grouped = await app_state.quote_service.get_board_quotes(with_macro_group(groups))
             payload = {
                 "type": "quotes",
-                "data": await board_payload_async(app_state, grouped),
+                "data": await board_payload_async(app_state, groups, grouped),
             }
             await app_state.connection_manager.broadcast(payload)
         except asyncio.CancelledError:
@@ -121,20 +122,20 @@ async def _refresh_daily_history(app_state: Any) -> None:
 _payload_cache: tuple[Any, dict[str, object]] | None = None
 
 
-async def board_payload_async(app_state: Any, grouped: Any) -> dict[str, object]:
+async def board_payload_async(app_state: Any, groups: Any, grouped: Any) -> dict[str, object]:
     global _payload_cache
     if _payload_cache is not None and _payload_cache[0] is grouped:
         return _payload_cache[1]
     # build_board loads the full 1d bars table (~75k rows, 300-550ms):
     # off the event loop, or every WS ping and HTTP response stalls.
-    payload = await asyncio.to_thread(_board_payload, app_state, grouped)
+    payload = await asyncio.to_thread(_board_payload, app_state, groups, grouped)
     _payload_cache = (grouped, payload)
     return payload
 
 
-def _board_payload(app_state: Any, grouped: Any) -> dict[str, object]:
-    overview, summaries = app_state.daily_board_service.build_board(app_state.groups, grouped)
-    payload = grouped_quotes_payload(app_state.groups, grouped, summaries=summaries)
+def _board_payload(app_state: Any, groups: Any, grouped: Any) -> dict[str, object]:
+    overview, summaries = app_state.daily_board_service.build_board(groups, grouped)
+    payload = grouped_quotes_payload(groups, grouped, summaries=summaries)
     lighter = app_state.providers.get("lighter")
     tape = lighter.crypto_tape_cached() if isinstance(lighter, LighterProvider) else []
     overview["crypto_breadth"] = crypto_breadth_metrics(tape)

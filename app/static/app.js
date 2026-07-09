@@ -88,6 +88,10 @@ try {
 }
 const BOARD_CACHE_MAX_AGE_MS = 24 * 3600 * 1000;
 let dataIsCached = false;
+// Monotonic guard: a slower /api/quotes response must never overwrite a
+// fresher one (or a WS frame). Declared here because init() runs above.
+let quotesFetchSeq = 0;
+let quotesFetchApplied = 0;
 
 const sourceLabels = {
   yahoo: "YH",
@@ -338,8 +342,21 @@ function openPendingChartFromUrl() {
   if (!pendingChartFromUrl || !latestData) return;
   const { symbol, interval } = pendingChartFromUrl;
   const asset = findAssetConfig(symbol);
-  pendingChartFromUrl = null;
-  if (asset) openChart(asset, { interval });
+  if (asset) {
+    pendingChartFromUrl = null;
+    openChart(asset, { interval });
+    return;
+  }
+  // Tape rows are exactly the perps NOT in any configured group, yet the
+  // app writes #chart= URLs for them too — resolve through the tape.
+  if ((latestData.crypto_tape || []).some((row) => row.symbol === symbol)) {
+    pendingChartFromUrl = null;
+    openTapeChart(symbol, { interval });
+    return;
+  }
+  // A cached payload may simply predate the symbol: keep the pending
+  // chart armed until the first LIVE payload rules it out.
+  if (!dataIsCached) pendingChartFromUrl = null;
 }
 
 
@@ -546,9 +563,6 @@ function persistBoardCache(payload) {
   }
 }
 
-
-let quotesFetchSeq = 0;
-let quotesFetchApplied = 0;
 
 async function fetchQuotes() {
   const seq = ++quotesFetchSeq;
@@ -1457,8 +1471,11 @@ function tapeBasketMarkup(basket, rows) {
 
 function tapeHeaderButton(label, sortKey, sort) {
   const active = sort.key === sortKey;
-  const ariaSort = active ? (sort.direction === "asc" ? "ascending" : "descending") : "none";
-  return `<button type="button" data-sort-key="${sortKey}" class="${active ? "active-sort" : ""}" aria-sort="${ariaSort}" title="Sort by ${escapeHtml(label)}">${escapeHtml(label)}</button>`;
+  // aria-sort is only valid on columnheader roles; on buttons announce the
+  // active sort via aria-pressed + a direction-aware label instead.
+  const dir = sort.direction === "asc" ? "ascending" : "descending";
+  const aria = active ? `Sorted by ${label}, ${dir} — click to flip` : `Sort by ${label}`;
+  return `<button type="button" data-sort-key="${sortKey}" class="${active ? "active-sort" : ""}" aria-pressed="${active}" aria-label="${escapeHtml(aria)}" title="Sort by ${escapeHtml(label)}">${escapeHtml(label)}</button>`;
 }
 
 function setTapeSort(basket, sortKey) {
@@ -1502,26 +1519,29 @@ function tapeRowMarkup(row) {
   </button>`;
 }
 
-function openTapeChart(symbol) {
+function openTapeChart(symbol, options = {}) {
   if (!symbol) return;
   const row = (latestData?.crypto_tape || []).find((entry) => entry.symbol === symbol);
   const last = numericOrNull(row?.last);
   const changePct = numericOrNull(row?.change_pct);
-  openChart({
-    symbol,
-    type: "crypto_perp",
-    quote: {
-      provider: "lighter",
-      last,
-      change_pct: changePct,
-      previous_close:
-        last !== null && changePct !== null && changePct > -100
-          ? last / (1 + changePct / 100)
-          : null,
-      funding_rate: row?.funding_rate ?? null,
-      open_interest_usd: row?.open_interest_usd ?? null,
+  openChart(
+    {
+      symbol,
+      type: "crypto_perp",
+      quote: {
+        provider: "lighter",
+        last,
+        change_pct: changePct,
+        previous_close:
+          last !== null && changePct !== null && changePct > -100
+            ? last / (1 + changePct / 100)
+            : null,
+        funding_rate: row?.funding_rate ?? null,
+        open_interest_usd: row?.open_interest_usd ?? null,
+      },
     },
-  });
+    options
+  );
 }
 
 function toggleMarketLayout() {
@@ -1632,7 +1652,8 @@ function updateSortHeaders() {
   board.querySelectorAll(".group-panel:not(.tape-panel) .group-title button").forEach((button) => {
     const active = button.dataset.sortKey === marketSort.key;
     button.classList.toggle("active-sort", active);
-    button.setAttribute("aria-sort", active ? (marketSort.direction === "asc" ? "ascending" : "descending") : "none");
+    button.setAttribute("aria-pressed", String(active));
+    button.removeAttribute("aria-sort");
   });
 }
 
@@ -1743,7 +1764,9 @@ async function fetchWatchlistConfig() {
     if (!response.ok) throw new Error("groups_failed");
     watchlistConfig = await response.json();
     renderEditor();
-    setEditorStatus("");
+    // Keep the session-only warning visible on serverless deployments;
+    // clearing it here made it flash for ~100ms and vanish.
+    setEditorStatus(persistenceNotice());
   } catch (error) {
     setEditorStatus("Unable to load universe");
   }
@@ -1814,15 +1837,20 @@ async function addGroup(event) {
   event.preventDefault();
   const name = groupNameInput.value.trim();
   if (!name) return;
-  await mutateWatchlists("/api/groups", { method: "POST", body: JSON.stringify({ name }) });
-  groupNameInput.value = "";
+  const saved = await mutateWatchlists("/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+  // A failed save (validation, wrong token) keeps the typed name so one
+  // character can be fixed instead of retyping the form.
+  if (saved) groupNameInput.value = "";
 }
 
 async function addAsset(event) {
   event.preventDefault();
   const groupName = assetGroupSelect.value;
   if (!groupName) return;
-  await mutateWatchlists(`/api/groups/${encodeURIComponent(groupName)}/assets`, {
+  const saved = await mutateWatchlists(`/api/groups/${encodeURIComponent(groupName)}/assets`, {
     method: "POST",
     body: JSON.stringify({
       symbol: assetSymbolInput.value,
@@ -1832,6 +1860,7 @@ async function addAsset(event) {
       name: assetNameInput.value || null,
     }),
   });
+  if (!saved) return;
   assetSymbolInput.value = "";
   assetExchangeInput.value = "";
   assetNameInput.value = "";
@@ -1859,6 +1888,7 @@ const EDITOR_ERROR_COPY = {
   group_not_found: "Group no longer exists — reload the editor",
   group_already_exists: "A group with that name already exists",
   edit_token_required: "Wrong or missing edit token — watchlists are read-only",
+  group_name_reserved: "That name is reserved for the built-in macro tape",
 };
 
 function editorErrorCopy(detail) {
@@ -1892,13 +1922,14 @@ async function mutateWatchlists(url, options) {
     if (response.status === 401) localStorage.removeItem(EDIT_TOKEN_KEY);
     const payload = await response.json().catch(() => ({}));
     setEditorStatus(editorErrorCopy(payload.detail));
-    return;
+    return false;
   }
   watchlistConfig = await response.json();
   renderEditor();
   const notice = persistenceNotice();
   setEditorStatus(notice ? `Saved (session only) — ${notice}` : "Saved");
   await fetchQuotes();
+  return true;
 }
 
 function syncSourceToType() {
@@ -2303,7 +2334,9 @@ const MA_OVERLAYS = [
 function renderChart(bars, interval) {
   if (!window.LightweightCharts) throw new Error("Chart library unavailable");
   const chartWidth = chartElement.clientWidth || 900;
-  const chartHeight = Math.max(chartElement.clientHeight, 320);
+  // 260 matches the phone CSS minimum (.chart min-height); a 320 floor
+  // inside a 260px container clipped the time axis off-screen.
+  const chartHeight = Math.max(chartElement.clientHeight, 260);
   chart = window.LightweightCharts.createChart(chartElement, {
     width: chartWidth,
     height: chartHeight,
@@ -2427,7 +2460,7 @@ function scheduleChartResize() {
 function resizeChartToContainer() {
   if (!chart) return;
   const width = Math.max(1, Math.floor(chartElement.clientWidth || 0));
-  const height = Math.max(320, Math.floor(chartElement.clientHeight || 0));
+  const height = Math.max(260, Math.floor(chartElement.clientHeight || 0));
   chart.applyOptions({ width, height });
 }
 
@@ -2813,7 +2846,9 @@ function numericOrNull(value) {
 
 function cssEscape(value) {
   if (window.CSS?.escape) return window.CSS.escape(String(value));
-  return String(value).replaceAll('"', '\\"').replaceAll("\\", "\\\\");
+  // Backslashes FIRST: the reverse order doubled the escape characters the
+  // quote pass just inserted, producing invalid selectors.
+  return String(value).replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 }
 
 function isTextInput(target) {

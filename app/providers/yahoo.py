@@ -118,6 +118,15 @@ class YahooProvider(QuoteProvider):
         if not fx_assets:
             return quotes_by_symbol
         fx_quotes = self._get_spark_quotes_sync(fx_assets)
+        # Same fallback the symbol quotes get: while spark is in a 429
+        # cooldown the chart endpoint (throttled independently) recovers
+        # the FX leg — otherwise KRX names render raw KRW on a USD board
+        # and flip currency poll-to-poll with the cooldown.
+        for fx_asset in fx_assets:
+            if fx_asset.symbol not in fx_quotes:
+                recovered = self._get_chart_quote_sync(fx_asset)
+                if recovered is not None:
+                    fx_quotes[fx_asset.symbol] = recovered
         fx_by_currency = {
             asset.name: fx_quotes[asset.symbol]
             for asset in fx_assets

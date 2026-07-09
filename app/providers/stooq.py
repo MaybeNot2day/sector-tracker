@@ -5,6 +5,7 @@ import math
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -98,14 +99,23 @@ def _stooq_currency(symbol: str) -> str | None:
     return None
 
 
+# Stooq is a Polish service; its quote CSV t2 field is Warsaw wall-clock
+# time, not UTC. Parsing it as UTC put timestamps up to 2h in the FUTURE,
+# which made the Lighter overlay's freshness heuristic treat stale quotes
+# as fresh. If the feed is ever exchange-local instead, Warsaw errs on the
+# stale side — the safe direction for that heuristic.
+_STOOQ_ZONE = ZoneInfo("Europe/Warsaw")
+
+
 def _parse_stooq_datetime(date_value: Any, time_value: Any) -> datetime:
     date_text = str(date_value or "")
     time_text = str(time_value or "00:00:00")
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
         try:
-            return datetime.strptime(f"{date_text} {time_text}", fmt).replace(tzinfo=UTC)
+            parsed = datetime.strptime(f"{date_text} {time_text}", fmt)
         except ValueError:
             continue
+        return parsed.replace(tzinfo=_STOOQ_ZONE).astimezone(UTC)
     return datetime.now(UTC)
 
 

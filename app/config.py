@@ -42,7 +42,7 @@ class Settings(BaseSettings):
 
 
 def load_watchlists(path: Path) -> list[GroupConfig]:
-    raw = yaml.safe_load(path.read_text())
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict) or "groups" not in raw:
         raise ValueError("watchlist YAML must contain top-level 'groups'")
     if not isinstance(raw["groups"], list):

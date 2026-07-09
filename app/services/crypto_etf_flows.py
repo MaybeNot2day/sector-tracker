@@ -25,42 +25,80 @@ MILLION = 1_000_000
 
 
 class CryptoEtfFlowService:
+    # A failed Farside cycle waits this long before the next attempt; every
+    # request re-running three 30s curls during an outage (with no herd
+    # guard) meant up to ~90s latency per caller, multiplied by clients.
+    FAILURE_RETRY_SECONDS = 120
+
     def __init__(self, *, cache_seconds: int = 900) -> None:
         self.cache_seconds = cache_seconds
         self._cache_payload: dict[str, object] | None = None
         self._cache_time = 0.0
+        # None (not 0.0): monotonic() is near-zero right after host boot,
+        # which would otherwise read as a live failure cooldown.
+        self._failed_time: float | None = None
+        self._lock = asyncio.Lock()
 
     async def get_flows(self) -> dict[str, object]:
         if self._cache_payload and time.monotonic() - self._cache_time < self.cache_seconds:
             return self._cache_payload
+        if (
+            self._failed_time is not None
+            and time.monotonic() - self._failed_time < self.FAILURE_RETRY_SECONDS
+        ):
+            return self._degraded("farside_fetch_failed")
+        async with self._lock:
+            # Herd guard: concurrent callers wait here; whoever lost the
+            # race returns the winner's fresh cache instead of refetching.
+            if self._cache_payload and time.monotonic() - self._cache_time < self.cache_seconds:
+                return self._cache_payload
+            if (
+                self._failed_time is not None
+                and time.monotonic() - self._failed_time < self.FAILURE_RETRY_SECONDS
+            ):
+                return self._degraded("farside_fetch_failed")
+            try:
+                assets = await asyncio.to_thread(self._fetch_assets_sync)
+            except Exception as exc:
+                self._failed_time = time.monotonic()
+                return self._degraded("farside_fetch_failed", detail=str(exc))
+            if not assets:
+                self._failed_time = time.monotonic()
+                return self._degraded("farside_no_data")
+            payload: dict[str, object] = {
+                "status": "ok",
+                "source": "farside",
+                "updated_at": datetime.now(UTC).isoformat(),
+                "is_stale": False,
+                "assets": assets,
+            }
+            self._cache_payload = payload
+            self._cache_time = time.monotonic()
+            return payload
 
-        try:
-            assets = await asyncio.to_thread(self._fetch_assets_sync)
-        except Exception as exc:
-            if self._cache_payload:
-                cached = dict(self._cache_payload)
-                cached["is_stale"] = True
-                cached["error"] = "farside_fetch_failed"
-                return cached
-            return _unavailable("farside_fetch_failed", detail=str(exc))
-
-        payload: dict[str, object] = {
-            "status": "ok",
-            "source": "farside",
-            "updated_at": datetime.now(UTC).isoformat(),
-            "is_stale": False,
-            "assets": assets,
-        }
-        self._cache_payload = payload
-        self._cache_time = time.monotonic()
-        return payload
+    def _degraded(self, error: str, detail: str | None = None) -> dict[str, object]:
+        if self._cache_payload:
+            cached = dict(self._cache_payload)
+            cached["is_stale"] = True
+            cached["error"] = error
+            return cached
+        return _unavailable(error, detail=detail)
 
     def _fetch_assets_sync(self) -> list[dict[str, object]]:
+        """Fetch every Farside page, keeping per-asset partial results.
+
+        One failing page (BTC ok, ETH curl dies) used to discard the whole
+        cycle via check=True; now the survivors still update the board.
+        """
         assets: list[dict[str, object]] = []
         for symbol, config in FARSIDE_ASSETS.items():
-            markdown = _fetch_markdown(str(config["url"]))
+            try:
+                markdown = _fetch_markdown(str(config["url"]))
+            except Exception:
+                continue
             rows = parse_farside_table(markdown)
-            assets.append(summarize_flow_asset(symbol, str(config["name"]), rows))
+            if rows:
+                assets.append(summarize_flow_asset(symbol, str(config["name"]), rows))
         return assets
 
 
