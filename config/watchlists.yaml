@@ -153,6 +153,16 @@ groups:
     type: equity
     source: yahoo
     exchange: NASDAQ
+  - symbol: HOOD
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Robinhood
+  - symbol: CRCL
+    type: equity
+    source: yahoo
+    exchange: NYSE
+    name: Circle
 - name: NEOCLOUD
   assets:
   - symbol: CRWV
