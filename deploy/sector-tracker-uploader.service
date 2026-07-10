@@ -1,0 +1,8 @@
+[Unit]
+Description=Upload new Hermes vault reports to the market board
+After=sector-tracker.service
+
+[Service]
+Type=oneshot
+User=board
+ExecStart=/usr/bin/python3 /opt/sector-tracker/scripts/vault_report_uploader.py

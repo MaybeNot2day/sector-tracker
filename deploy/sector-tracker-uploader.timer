@@ -1,0 +1,9 @@
+[Unit]
+Description=Sweep for in-place vault report edits the path unit misses
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch the synced Hermes vault for new reports
+
+[Path]
+PathModified=/opt/sector-tracker/vault
+Unit=sector-tracker-uploader.service
+
+[Install]
+WantedBy=multi-user.target

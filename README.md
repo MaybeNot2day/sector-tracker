@@ -108,6 +108,25 @@ PY
 lists metadata with previews, `GET /api/reports/{id}` returns the full body, and
 `DELETE /api/reports/{id}` (token-gated) removes one.
 
+### Automatic vault uploads
+
+`scripts/vault_report_uploader.py` makes the pipeline hands-off: it scans a vault
+directory for files named `YYYY-MM-DD <Title>.md` (the Hermes cron convention), uploads
+new or changed ones, and remembers content hashes in
+`~/.local/state/sector-tracker/vault-uploads.json` so nothing uploads twice. Config lives
+in `~/.config/sector-tracker/uploader.env` (`BOARD_URL`, `EDIT_TOKEN`, `VAULT_DIR`,
+`MAX_AGE_DAYS`). Run `--baseline` once at install to mark existing files as seen, and
+`--dry-run` to preview.
+
+The production wiring syncs the Obsidian vault to the droplet with Syncthing
+(receive-only folder at `/opt/sector-tracker/vault`; macOS TCC blocks launchd agents
+from reading `~/Desktop`, so the watcher runs server-side instead). Systemd units in
+`deploy/` drive it:
+
+- `sector-tracker-uploader.path` — fires the moment Syncthing writes a report file
+- `sector-tracker-uploader.timer` — 30-minute sweep that catches in-place edits
+- `sector-tracker-uploader.service` — one upload pass as the `board` user
+
 ## Configuration
 
 Use the settings button in the app or edit `config/watchlists.yaml` to change groups and assets.
