@@ -280,6 +280,41 @@ def test_editor_failed_save_preserves_typed_asset_fields(page: Page, base_url: s
     expect(page.locator("#editor-modal")).to_have_attribute("aria-hidden", "true")
 
 
+def test_reports_modal_lists_reports_and_renders_escaped_markdown_reader(
+    page: Page, base_url: str
+) -> None:
+    _goto_board(page, base_url)
+
+    page.locator("#reports-open").click()
+    expect(page.locator("#reports-modal")).to_have_attribute("aria-hidden", "false")
+
+    cards = page.locator("#reports-list .report-card")
+    expect(cards).to_have_count(3)
+    expect(page.locator("#reports-list .reports-date")).to_have_count(2)
+    expect(page.locator("#reports-list .reports-date").first).to_contain_text("Jul 9, 2026")
+    expect(cards.first).to_contain_text("Hermes Daily Flows")
+    expect(cards.first).to_contain_text("Position sizing check")
+
+    cards.first.click()
+    expect(page.locator("#reports-list")).to_be_hidden()
+    reader = page.locator("#report-reader")
+    expect(reader).to_be_visible()
+    body = reader.locator(".report-body")
+    expect(body.locator("h2")).to_have_text("Flow Summary")
+    expect(body.locator("table th").first).to_have_text("Asset")
+    expect(body.locator("table td").first).to_have_text("ZEC")
+    expect(body.locator("strong").first).to_have_text("oversized")
+    # YAML frontmatter never reaches the reader.
+    expect(body).not_to_contain_text("frontmatter-must-not-render")
+    # Raw HTML in a report body must be escaped: visible as text, never a live element.
+    expect(body).to_contain_text("<script>alert(1)</script>")
+    expect(body.locator("script")).to_have_count(0)
+
+    page.locator("#reports-back").click()
+    expect(page.locator("#report-reader")).to_be_hidden()
+    expect(page.locator("#reports-list .report-card")).to_have_count(3)
+
+
 def _goto_board(page: Page, base_url: str, fragment: str = "") -> None:
     page.goto(f"{base_url.rstrip('/')}/{fragment}", wait_until="domcontentloaded")
     expect(page.locator("#status-copy")).to_contain_text("QUOTED", timeout=10_000)
@@ -361,6 +396,10 @@ def _stub_board_apis(page: Page) -> None:
         elif path.startswith("/api/profile/"):
             symbol = unquote(path.rsplit("/", 1)[1]).upper()
             _fulfill_json(route, _profile_payload(symbol))
+        elif path.startswith("/api/reports/"):
+            _fulfill_json(route, REPORT_DETAIL_PAYLOAD)
+        elif path == "/api/reports":
+            _fulfill_json(route, REPORTS_LIST_PAYLOAD)
         else:
             route.continue_()
 
@@ -715,3 +754,59 @@ SNAPSHOTS_PAYLOAD: dict[str, Any] = {
 }
 
 NEWS_PAYLOAD: dict[str, Any] = {"status": "ok", "channels": [], "items": []}
+
+REPORTS_LIST_PAYLOAD: dict[str, Any] = {
+    "reports": [
+        {
+            "id": 7,
+            "slug": "hermes-daily-flows",
+            "date": "2026-07-09",
+            "title": "Hermes Daily Flows",
+            "created_at": "2026-07-09T14:00:00+00:00",
+            "preview": "Position sizing check and net flows",
+        },
+        {
+            "id": 6,
+            "slug": "levels-watch",
+            "date": "2026-07-09",
+            "title": "Levels Watch",
+            "created_at": "2026-07-09T06:00:00+00:00",
+            "preview": "Key levels for the session",
+        },
+        {
+            "id": 5,
+            "slug": "hermes-daily-flows",
+            "date": "2026-07-08",
+            "title": "Hermes Daily Flows",
+            "created_at": "2026-07-08T14:00:00+00:00",
+            "preview": "Prior session flows",
+        },
+    ]
+}
+
+REPORT_BODY_MARKDOWN = "\n".join(
+    [
+        "---",
+        "tags: [hermes]",
+        "secret: frontmatter-must-not-render",
+        "---",
+        "## Flow Summary",
+        "",
+        "Position is **oversized** relative to plan.",
+        "",
+        "| Asset | Change |",
+        "| --- | --- |",
+        "| ZEC | +4.2% |",
+        "",
+        "<script>alert(1)</script>",
+    ]
+)
+
+REPORT_DETAIL_PAYLOAD: dict[str, Any] = {
+    "id": 7,
+    "slug": "hermes-daily-flows",
+    "date": "2026-07-09",
+    "title": "Hermes Daily Flows",
+    "created_at": "2026-07-09T14:00:00+00:00",
+    "body": REPORT_BODY_MARKDOWN,
+}

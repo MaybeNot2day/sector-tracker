@@ -51,6 +51,16 @@ CREATE TABLE IF NOT EXISTS board_snapshots (
     created_at TEXT NOT NULL,
     payload TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug TEXT NOT NULL,
+    report_date TEXT NOT NULL,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (slug, report_date)
+);
 """
 
 
@@ -289,6 +299,94 @@ def load_board_snapshots(path: Path, limit: int) -> list[dict[str, object]]:
             payload["date"] = str(row["snapshot_date"])
             snapshots.append(payload)
     return snapshots
+
+
+def save_report(path: Path, *, slug: str, report_date: str, title: str, body: str) -> int:
+    """Upsert one agent report keyed by (slug, date) so cron re-runs replace."""
+    init_db(path)
+    with _connect(path) as conn:
+        row = conn.execute(
+            """
+            INSERT INTO reports (slug, report_date, title, body, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(slug, report_date) DO UPDATE SET
+                title = excluded.title,
+                body = excluded.body,
+                created_at = excluded.created_at
+            RETURNING id
+            """,
+            (slug, report_date, title, body, _to_iso(datetime.now(UTC))),
+        ).fetchone()
+    return int(row["id"])
+
+
+def load_reports(path: Path, limit: int) -> list[dict[str, object]]:
+    """Report metadata plus a short plain-text preview, newest first."""
+    init_db(path)
+    with _connect(path) as conn:
+        rows = conn.execute(
+            "SELECT id, slug, report_date, title, body, created_at FROM reports"
+            " ORDER BY report_date DESC, created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [
+        {
+            "id": int(row["id"]),
+            "slug": str(row["slug"]),
+            "date": str(row["report_date"]),
+            "title": str(row["title"]),
+            "created_at": str(row["created_at"]),
+            "preview": _report_preview(str(row["body"])),
+        }
+        for row in rows
+    ]
+
+
+def load_report(path: Path, report_id: int) -> dict[str, object] | None:
+    init_db(path)
+    with _connect(path) as conn:
+        row = conn.execute(
+            "SELECT id, slug, report_date, title, body, created_at FROM reports WHERE id = ?",
+            (report_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": int(row["id"]),
+        "slug": str(row["slug"]),
+        "date": str(row["report_date"]),
+        "title": str(row["title"]),
+        "created_at": str(row["created_at"]),
+        "body": str(row["body"]),
+    }
+
+
+def delete_report(path: Path, report_id: int) -> bool:
+    init_db(path)
+    with _connect(path) as conn:
+        cursor = conn.execute("DELETE FROM reports WHERE id = ?", (report_id,))
+    return cursor.rowcount > 0
+
+
+_MD_NOISE = str.maketrans({"#": None, "*": None, "`": None, ">": None, "|": None, "_": None})
+
+
+def _strip_frontmatter(body: str) -> str:
+    """Drop a leading Obsidian/Jekyll YAML block (--- ... ---)."""
+    lines = body.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return body
+    for index in range(1, min(len(lines), 40)):
+        if lines[index].strip() == "---":
+            return "\n".join(lines[index + 1 :])
+    return body
+
+
+def _report_preview(body: str, limit: int = 220) -> str:
+    stripped = _strip_frontmatter(body)
+    lines = [line.strip().translate(_MD_NOISE).strip() for line in stripped.splitlines()]
+    text = " ".join(line for line in lines if line)
+    return text[:limit].rstrip() + ("\u2026" if len(text) > limit else "")
 
 
 def mark_stale(quote: Quote, *, error: str | None = None) -> Quote:

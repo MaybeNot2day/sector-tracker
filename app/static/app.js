@@ -45,6 +45,13 @@ const newsStatus = document.querySelector("#news-status");
 const newsToggle = document.querySelector("#news-toggle");
 const newsClose = document.querySelector("#news-close");
 const newsChannelsBar = document.querySelector("#news-channels");
+const reportsModal = document.querySelector("#reports-modal");
+const reportsOpenButton = document.querySelector("#reports-open");
+const reportsCloseButton = document.querySelector("#reports-close");
+const reportsBackButton = document.querySelector("#reports-back");
+const reportsBadge = document.querySelector("#reports-badge");
+const reportsListElement = document.querySelector("#reports-list");
+const reportReaderElement = document.querySelector("#report-reader");
 
 let latestData = null;
 let latestCryptoEtfFlows = null;
@@ -370,6 +377,7 @@ function init() {
   fetchSnapshots();
   setNewsOpen(localStorage.getItem(NEWS_OPEN_KEY) === "1");
   fetchNews();
+  refreshReportsBadge();
   feedMode = shouldUseWebSocket() ? "ws" : "poll";
   updateFeedModeLabel();
   if (feedMode === "ws") openSocket();
@@ -445,6 +453,12 @@ function init() {
   editorModal.addEventListener("click", (event) => {
     if (event.target === editorModal) closeEditor();
   });
+  reportsOpenButton.addEventListener("click", openReports);
+  reportsCloseButton.addEventListener("click", closeReports);
+  reportsBackButton.addEventListener("click", showReportsList);
+  reportsModal.addEventListener("click", (event) => {
+    if (event.target === reportsModal) closeReports();
+  });
   document.addEventListener("keydown", (event) => {
     if (event.key === "Tab" && activeDialog) {
       trapDialogFocus(event, activeDialog);
@@ -459,6 +473,7 @@ function init() {
     if (event.key === "Escape") {
       closeModal();
       closeEditor();
+      closeReports();
       return;
     }
     if (
@@ -708,6 +723,250 @@ function setNewsOpen(open) {
   document.body.classList.toggle("news-open", open);
   newsToggle.setAttribute("aria-pressed", String(open));
   localStorage.setItem(NEWS_OPEN_KEY, open ? "1" : "0");
+}
+
+// --- Agent reports -----------------------------------------------------
+// Markdown reports pushed by external agent cron jobs (POST /api/reports).
+const REPORTS_SEEN_KEY = "reports-last-seen-v1";
+
+function openReports() {
+  openDialog(reportsModal, reportsCloseButton);
+  showReportsList();
+  fetchReports();
+}
+
+function closeReports() {
+  closeDialog(reportsModal);
+}
+
+function showReportsList() {
+  reportReaderElement.hidden = true;
+  reportsListElement.hidden = false;
+  reportsBackButton.hidden = true;
+}
+
+async function fetchReports() {
+  try {
+    const response = await fetch("/api/reports?limit=60");
+    if (!response.ok) throw new Error("reports_failed");
+    const payload = await response.json();
+    renderReportsList(payload?.reports || []);
+    markReportsSeen(payload?.reports || []);
+  } catch (error) {
+    reportsListElement.innerHTML = '<div class="empty-state">Reports unavailable</div>';
+  }
+}
+
+function renderReportsList(reports) {
+  if (!reports.length) {
+    reportsListElement.innerHTML =
+      '<div class="empty-state">No reports yet — point an agent cron job at POST /api/reports</div>';
+    return;
+  }
+  const byDate = new Map();
+  for (const item of reports) {
+    if (!byDate.has(item.date)) byDate.set(item.date, []);
+    byDate.get(item.date).push(item);
+  }
+  const sections = [];
+  for (const [date, items] of byDate) {
+    sections.push(`<h3 class="reports-date">${escapeHtml(formatReportDate(date))}</h3>`);
+    for (const item of items) {
+      sections.push(`
+        <button type="button" class="report-card" data-report-id="${Number(item.id)}">
+          <strong>${escapeHtml(item.title)}</strong>
+          <span>${escapeHtml(item.preview || "")}</span>
+        </button>`);
+    }
+  }
+  reportsListElement.innerHTML = sections.join("");
+  reportsListElement.querySelectorAll(".report-card").forEach((card) => {
+    card.addEventListener("click", () => openReport(Number(card.dataset.reportId)));
+  });
+}
+
+async function openReport(reportId) {
+  reportsListElement.hidden = true;
+  reportsBackButton.hidden = false;
+  reportReaderElement.hidden = false;
+  reportReaderElement.innerHTML = '<div class="empty-state">Loading report</div>';
+  try {
+    const response = await fetch(`/api/reports/${reportId}`);
+    if (!response.ok) throw new Error("report_failed");
+    const item = await response.json();
+    reportReaderElement.innerHTML = `
+      <header class="report-head">
+        <h2>${escapeHtml(item.title)}</h2>
+        <p>${escapeHtml(formatReportDate(item.date))} · ${escapeHtml(item.slug)}</p>
+      </header>
+      <div class="report-body">${renderMarkdown(item.body)}</div>`;
+    reportReaderElement.scrollTop = 0;
+  } catch (error) {
+    reportReaderElement.innerHTML = '<div class="empty-state">Report unavailable</div>';
+  }
+}
+
+function refreshReportsBadge() {
+  fetch("/api/reports?limit=1")
+    .then((response) => (response.ok ? response.json() : null))
+    .then((payload) => {
+      const newest = payload?.reports?.[0];
+      if (!newest) return;
+      const seen = localStorage.getItem(REPORTS_SEEN_KEY) || "";
+      reportsBadge.hidden = newest.created_at <= seen;
+    })
+    .catch(() => {});
+}
+
+function markReportsSeen(reports) {
+  const newest = reports[0]?.created_at;
+  if (newest) localStorage.setItem(REPORTS_SEEN_KEY, newest);
+  reportsBadge.hidden = true;
+}
+
+function formatReportDate(value) {
+  const parsed = new Date(`${value}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleDateString("en-US", {
+    weekday: "short",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+// Minimal escape-first markdown renderer for trusted-ish agent reports:
+// fences, headings, lists, tables, quotes, hr, bold/italic/code/links.
+function renderMarkdown(source) {
+  const lines = String(source || "").replaceAll("\r\n", "\n").split("\n");
+  const html = [];
+  let index = 0;
+  // Skip a leading Obsidian/Jekyll YAML frontmatter block (--- ... ---).
+  if (lines[0]?.trim() === "---") {
+    const closing = lines.findIndex((line, i) => i > 0 && line.trim() === "---");
+    if (closing > 0 && closing <= 40) index = closing + 1;
+  }
+  while (index < lines.length) {
+    const line = lines[index];
+    if (/^\s*```/.test(line)) {
+      const code = [];
+      index += 1;
+      while (index < lines.length && !/^\s*```/.test(lines[index])) {
+        code.push(lines[index]);
+        index += 1;
+      }
+      index += 1; // closing fence
+      html.push(`<pre><code>${escapeHtml(code.join("\n"))}</code></pre>`);
+      continue;
+    }
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      const level = Math.min(heading[1].length, 4);
+      html.push(`<h${level}>${mdInline(heading[2])}</h${level}>`);
+      index += 1;
+      continue;
+    }
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+      html.push("<hr>");
+      index += 1;
+      continue;
+    }
+    if (/^\s*>/.test(line)) {
+      const quote = [];
+      while (index < lines.length && /^\s*>/.test(lines[index])) {
+        quote.push(mdInline(lines[index].replace(/^\s*>\s?/, "")));
+        index += 1;
+      }
+      html.push(`<blockquote>${quote.join("<br>")}</blockquote>`);
+      continue;
+    }
+    if (/^\s*\|.*\|\s*$/.test(line)) {
+      const rows = [];
+      while (index < lines.length && /^\s*\|.*\|\s*$/.test(lines[index])) {
+        rows.push(lines[index]);
+        index += 1;
+      }
+      html.push(mdTable(rows));
+      continue;
+    }
+    if (/^\s*[-*+]\s+/.test(line)) {
+      const items = [];
+      while (index < lines.length && /^\s*[-*+]\s+/.test(lines[index])) {
+        items.push(`<li>${mdInline(lines[index].replace(/^\s*[-*+]\s+/, ""))}</li>`);
+        index += 1;
+      }
+      html.push(`<ul>${items.join("")}</ul>`);
+      continue;
+    }
+    if (/^\s*\d+[.)]\s+/.test(line)) {
+      const items = [];
+      while (index < lines.length && /^\s*\d+[.)]\s+/.test(lines[index])) {
+        items.push(`<li>${mdInline(lines[index].replace(/^\s*\d+[.)]\s+/, ""))}</li>`);
+        index += 1;
+      }
+      html.push(`<ol>${items.join("")}</ol>`);
+      continue;
+    }
+    const paragraph = [];
+    while (
+      index < lines.length &&
+      lines[index].trim() &&
+      !/^\s*(#{1,6}\s|```|>|\||[-*+]\s|\d+[.)]\s)/.test(lines[index])
+    ) {
+      paragraph.push(mdInline(lines[index].trim()));
+      index += 1;
+    }
+    if (paragraph.length) {
+      html.push(`<p>${paragraph.join("<br>")}</p>`);
+    } else {
+      // Line matched a block prefix but produced no paragraph content;
+      // consume it to guarantee forward progress.
+      html.push(`<p>${mdInline(lines[index].trim())}</p>`);
+      index += 1;
+    }
+  }
+  return html.join("\n");
+}
+
+function mdTable(rows) {
+  const parsed = rows.map((row) =>
+    row
+      .trim()
+      .replace(/^\|/, "")
+      .replace(/\|$/, "")
+      .split("|")
+      .map((cell) => mdInline(cell.trim()))
+  );
+  let header = null;
+  if (parsed.length >= 2 && /^[\s:|-]+$/.test(rows[1].trim())) {
+    header = parsed[0];
+    parsed.splice(0, 2);
+  }
+  const head = header
+    ? `<thead><tr>${header.map((cell) => `<th>${cell}</th>`).join("")}</tr></thead>`
+    : "";
+  const body = parsed
+    .map((cells) => `<tr>${cells.map((cell) => `<td>${cell}</td>`).join("")}</tr>`)
+    .join("");
+  return `<table>${head}<tbody>${body}</tbody></table>`;
+}
+
+function mdInline(text) {
+  let out = escapeHtml(text);
+  out = out.replace(/\[\[([^\]]+)\]\]/g, "$1"); // Obsidian wiki-links -> plain text
+  out = out.replace(/`([^`]+)`/g, "<code>$1</code>");
+  out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  out = out.replace(/(^|[^*\w])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>");
+  out = out.replace(
+    /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+    '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>'
+  );
+  return out;
 }
 
 async function fetchNews() {

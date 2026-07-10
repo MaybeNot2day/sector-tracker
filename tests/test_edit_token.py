@@ -151,4 +151,6 @@ def test_gate_is_wired_to_exactly_the_mutation_routes() -> None:
         ("DELETE", "/api/groups/{group_name}"),
         ("POST", "/api/groups/{group_name}/assets"),
         ("DELETE", "/api/groups/{group_name}/assets/{symbol}"),
+        ("POST", "/api/reports"),
+        ("DELETE", "/api/reports/{report_id}"),
     }

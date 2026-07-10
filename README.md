@@ -69,6 +69,45 @@ server:
 BOARD_E2E_BASE_URL=http://127.0.0.1:8000 python -m pytest tests/test_playwright_smoke.py -q
 ```
 
+## Agent Reports
+
+The Reports button in the top bar opens a modal that renders markdown reports pushed by
+external agents (e.g. Hermes cron jobs). Reports are stored in SQLite, keyed by
+`(slug, date)` so a re-run of the same job on the same day replaces its report instead of
+stacking duplicates. Obsidian-style YAML frontmatter is stripped from previews and the
+rendered view; the renderer escapes all HTML.
+
+Push a report (the write routes honor `EDIT_TOKEN` via `X-Edit-Token`, same as watchlist
+edits):
+
+```bash
+curl -X POST https://your-board/api/reports \
+  -H "Content-Type: application/json" \
+  -H "X-Edit-Token: $EDIT_TOKEN" \
+  --data @- <<'JSON'
+{"title": "Biotech Pharma Brief", "body": "## Overnight\n- item one", "date": "2026-07-10"}
+JSON
+```
+
+Or from a file with Python:
+
+```bash
+python - <<'PY'
+import json, os, pathlib, urllib.request
+body = pathlib.Path("report.md").read_text(encoding="utf-8")
+req = urllib.request.Request(
+    "https://your-board/api/reports",
+    data=json.dumps({"title": "Biotech Pharma Brief", "body": body}).encode(),
+    headers={"Content-Type": "application/json", "X-Edit-Token": os.environ["EDIT_TOKEN"]},
+)
+print(urllib.request.urlopen(req).read().decode())
+PY
+```
+
+`date` defaults to today (UTC); `slug` defaults to the slugified title. `GET /api/reports`
+lists metadata with previews, `GET /api/reports/{id}` returns the full body, and
+`DELETE /api/reports/{id}` (token-gated) removes one.
+
 ## Configuration
 
 Use the settings button in the app or edit `config/watchlists.yaml` to change groups and assets.

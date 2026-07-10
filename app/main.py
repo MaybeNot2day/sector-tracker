@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import secrets
 import shutil
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import (
@@ -59,6 +61,13 @@ class AssetRequest(BaseModel):
     source: ProviderName = "yahoo"
     exchange: str | None = Field(default=None, max_length=32)
     name: str | None = Field(default=None, max_length=96)
+
+
+class ReportRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    body: str = Field(min_length=1, max_length=500_000)
+    date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    slug: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 @asynccontextmanager
@@ -377,6 +386,55 @@ async def _heal_stale_history() -> None:
 @app.get("/api/crypto-etf-flows")
 async def crypto_etf_flows() -> dict[str, object]:
     return await app.state.crypto_etf_flow_service.get_flows()
+
+
+@app.post("/api/reports", dependencies=[Depends(require_edit_token)])
+async def create_report(request: ReportRequest) -> dict[str, object]:
+    """Ingest one agent-written markdown report (e.g. a Hermes cron job).
+
+    Keyed by (slug, date): a re-run of the same job on the same day
+    replaces its report instead of stacking duplicates.
+    """
+    report_date = request.date or datetime.now(UTC).date().isoformat()
+    slug = _report_slug(request.slug or request.title)
+    if not slug:
+        raise HTTPException(status_code=422, detail="report_slug_invalid")
+    report_id = await asyncio.to_thread(
+        db.save_report,
+        app.state.settings.database_path,
+        slug=slug,
+        report_date=report_date,
+        title=clean_text(request.title),
+        body=request.body,
+    )
+    return {"id": report_id, "slug": slug, "date": report_date}
+
+
+@app.get("/api/reports")
+async def reports(limit: int = Query(default=30, ge=1, le=200)) -> dict[str, object]:
+    items = await asyncio.to_thread(db.load_reports, app.state.settings.database_path, limit)
+    return {"reports": items}
+
+
+@app.get("/api/reports/{report_id}")
+async def report(report_id: int) -> dict[str, object]:
+    item = await asyncio.to_thread(db.load_report, app.state.settings.database_path, report_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="report_not_found")
+    return item
+
+
+@app.delete("/api/reports/{report_id}", dependencies=[Depends(require_edit_token)])
+async def delete_report(report_id: int) -> dict[str, object]:
+    removed = await asyncio.to_thread(db.delete_report, app.state.settings.database_path, report_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="report_not_found")
+    return {"status": "deleted"}
+
+
+def _report_slug(value: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return cleaned[:64]
 
 
 @app.get("/api/lighter-status")
