@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from threading import Lock
+from typing import SupportsFloat, SupportsIndex, cast
 
 from app.models import AssetType, Bar, ProviderName, Quote
 
@@ -46,6 +48,9 @@ CREATE TABLE IF NOT EXISTS bars (
     PRIMARY KEY (symbol, provider, interval, timestamp)
 );
 
+CREATE INDEX IF NOT EXISTS idx_bars_interval_symbol_provider_timestamp
+ON bars (interval, symbol, provider, timestamp DESC);
+
 CREATE TABLE IF NOT EXISTS board_snapshots (
     snapshot_date TEXT PRIMARY KEY,
     created_at TEXT NOT NULL,
@@ -62,21 +67,33 @@ CREATE TABLE IF NOT EXISTS reports (
     UNIQUE (slug, report_date)
 );
 """
+_initialized_paths: set[Path] = set()
+_init_lock = Lock()
+
 
 
 def init_db(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with _connect(path) as conn:
-        conn.executescript(SCHEMA)
-        _ensure_column(conn, "latest_quotes", "currency", "TEXT")
-        _ensure_column(conn, "latest_quotes", "display_last", "REAL")
-        _ensure_column(conn, "latest_quotes", "display_previous_close", "REAL")
-        _ensure_column(conn, "latest_quotes", "display_change_abs", "REAL")
-        _ensure_column(conn, "latest_quotes", "display_change_pct", "REAL")
-        _ensure_column(conn, "latest_quotes", "display_currency", "TEXT")
-        _ensure_column(conn, "latest_quotes", "volume", "REAL")
-        _ensure_column(conn, "latest_quotes", "funding_rate", "REAL")
-        _ensure_column(conn, "latest_quotes", "open_interest_usd", "REAL")
+    resolved = path.expanduser().resolve()
+    if resolved in _initialized_paths and resolved.exists():
+        return
+
+    with _init_lock:
+        if resolved in _initialized_paths and resolved.exists():
+            return
+        _initialized_paths.discard(resolved)
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        with _connect(resolved) as conn:
+            conn.executescript(SCHEMA)
+            _ensure_column(conn, "latest_quotes", "currency", "TEXT")
+            _ensure_column(conn, "latest_quotes", "display_last", "REAL")
+            _ensure_column(conn, "latest_quotes", "display_previous_close", "REAL")
+            _ensure_column(conn, "latest_quotes", "display_change_abs", "REAL")
+            _ensure_column(conn, "latest_quotes", "display_change_pct", "REAL")
+            _ensure_column(conn, "latest_quotes", "display_currency", "TEXT")
+            _ensure_column(conn, "latest_quotes", "volume", "REAL")
+            _ensure_column(conn, "latest_quotes", "funding_rate", "REAL")
+            _ensure_column(conn, "latest_quotes", "open_interest_usd", "REAL")
+        _initialized_paths.add(resolved)
 
 
 def save_quotes(path: Path, quotes: Sequence[Quote]) -> None:
@@ -159,6 +176,35 @@ def load_latest_quote(path: Path, symbol: str) -> Quote | None:
     return _quote_from_row(row)
 
 
+def load_latest_quotes(path: Path, symbols: Sequence[str]) -> dict[str, Quote]:
+    """Load cached quotes for normalized symbols in bounded batch queries."""
+    normalized = sorted({symbol.upper() for symbol in symbols})
+    if not normalized:
+        return {}
+
+    init_db(path)
+    quotes: dict[str, Quote] = {}
+    with _connect(path) as conn:
+        for offset in range(0, len(normalized), 500):
+            chunk = normalized[offset : offset + 500]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""
+                SELECT symbol, asset_type, provider, last, previous_close, change_abs,
+                       change_pct, timestamp, is_stale, error, currency, display_last,
+                       display_previous_close, display_change_abs, display_change_pct,
+                       display_currency, volume, funding_rate, open_interest_usd
+                FROM latest_quotes
+                WHERE UPPER(symbol) IN ({placeholders})
+                """,
+                chunk,
+            ).fetchall()
+            for row in rows:
+                quote = _quote_from_row(row)
+                quotes[quote.symbol.upper()] = quote
+    return quotes
+
+
 def save_bars(path: Path, bars: Sequence[Bar]) -> None:
     if not bars:
         return
@@ -233,24 +279,36 @@ def load_bars_by_symbol(
     *,
     limit_per_series: int = 260,
 ) -> dict[tuple[str, ProviderName], list[Bar]]:
-    """Load cached history in one query, grouped by symbol and provider."""
+    """Load the newest bars per symbol/provider, with each series ascending."""
+    if limit_per_series <= 0:
+        raise ValueError("limit_per_series must be positive")
+
     init_db(path)
     with _connect(path) as conn:
         rows = conn.execute(
             """
+            WITH ranked AS (
+                SELECT symbol, provider, interval, timestamp, open, high, low, close, volume,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY symbol, provider
+                           ORDER BY timestamp DESC
+                       ) AS series_row
+                FROM bars
+                WHERE interval = ?
+            )
             SELECT symbol, provider, interval, timestamp, open, high, low, close, volume
-            FROM bars
-            WHERE interval = ?
+            FROM ranked
+            WHERE series_row <= ?
             ORDER BY symbol, provider, timestamp
             """,
-            (interval,),
+            (interval, limit_per_series),
         ).fetchall()
 
     grouped: dict[tuple[str, ProviderName], list[Bar]] = {}
     for row in rows:
         bar = _bar_from_row(row)
         grouped.setdefault((bar.symbol, bar.provider), []).append(bar)
-    return {key: bars[-limit_per_series:] for key, bars in grouped.items()}
+    return grouped
 
 
 def newest_bar_timestamps(path: Path, interval: str) -> dict[str, datetime]:
@@ -325,8 +383,8 @@ def load_reports(path: Path, limit: int) -> list[dict[str, object]]:
     init_db(path)
     with _connect(path) as conn:
         rows = conn.execute(
-            "SELECT id, slug, report_date, title, body, created_at FROM reports"
-            " ORDER BY report_date DESC, created_at DESC LIMIT ?",
+            "SELECT id, slug, report_date, title, substr(body, 1, 16384) AS body, created_at"
+            " FROM reports ORDER BY report_date DESC, created_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
     return [
@@ -365,7 +423,7 @@ def delete_report(path: Path, report_id: int) -> bool:
     init_db(path)
     with _connect(path) as conn:
         cursor = conn.execute("DELETE FROM reports WHERE id = ?", (report_id,))
-    return cursor.rowcount > 0
+        return cursor.rowcount > 0
 
 
 _MD_NOISE = str.maketrans({"#": None, "*": None, "`": None, ">": None, "|": None, "_": None})
@@ -393,10 +451,24 @@ def mark_stale(quote: Quote, *, error: str | None = None) -> Quote:
     return replace(quote, is_stale=True, error=error or quote.error)
 
 
-def _connect(path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(path)
+@contextmanager
+def _connect(path: Path) -> Iterator[sqlite3.Connection]:
+    # timeout=30: quote persistence, the bar heal, and report POSTs write
+    # from separate to_thread workers; the 5s default surfaced contention
+    # as "database is locked" and the write was lost.
+    conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
-    return conn
+    # WAL lets readers proceed alongside the single writer. The mode
+    # persists in the file, so re-running the pragma here is a cheap no-op.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    try:
+        # sqlite3's own context manager commits/rolls back but never
+        # closes; every call-site's `with` was leaking a connection.
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def _ensure_column(
@@ -464,4 +536,4 @@ def _bar_from_row(row: sqlite3.Row) -> Bar:
 def _optional_float(value: object) -> float | None:
     if value is None:
         return None
-    return float(value)
+    return float(cast(str | bytes | SupportsFloat | SupportsIndex, value))

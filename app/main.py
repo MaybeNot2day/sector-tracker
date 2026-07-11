@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import re
 import secrets
 import shutil
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from fastapi import (
@@ -20,8 +22,10 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from starlette.middleware.gzip import GZipMiddleware
+from starlette.responses import Response
+from starlette.types import Scope
 
 from app import db
 from app.config import Settings, find_group, load_watchlists, save_watchlists
@@ -50,13 +54,18 @@ from app.services.quotes import QuoteService
 APP_DIR = Path(__file__).parent
 STATIC_DIR = APP_DIR / "static"
 
+logger = logging.getLogger(__name__)
+
 
 class GroupRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=64)
+    # No `/` or `\`: uvicorn decodes %2F before routing, so a name with a
+    # slash could never match the DELETE path param — undeletable forever.
+    name: str = Field(min_length=1, max_length=64, pattern=r"^[^/\\]+$")
 
 
 class AssetRequest(BaseModel):
-    symbol: str = Field(min_length=1, max_length=24)
+    # Same slash ban as GroupRequest.name, for the same DELETE-path reason.
+    symbol: str = Field(min_length=1, max_length=24, pattern=r"^[^/\\]+$")
     type: AssetType = "equity"
     source: ProviderName = "yahoo"
     exchange: str | None = Field(default=None, max_length=32)
@@ -68,6 +77,18 @@ class ReportRequest(BaseModel):
     body: str = Field(min_length=1, max_length=500_000)
     date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     slug: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @field_validator("date")
+    @classmethod
+    def _date_is_calendar(cls, value: str | None) -> str | None:
+        # The regex admits non-calendar dates like 2025-02-31; reject them
+        # here so a bad cron payload fails loudly instead of persisting.
+        if value is not None:
+            try:
+                date.fromisoformat(value)
+            except ValueError as exc:
+                raise ValueError(f"not a real calendar date: {value}") from exc
+        return value
 
 
 @asynccontextmanager
@@ -123,6 +144,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await stop_task(app.state.history_task)
         if app.state.news_task is not None:
             await stop_task(app.state.news_task)
+        await asyncio.gather(
+            *(provider.aclose() for provider in providers.values()),
+            app.state.news_service.aclose(),
+            return_exceptions=True,
+        )
 
 
 app = FastAPI(title="Cross-Asset Board", lifespan=lifespan)
@@ -137,8 +163,14 @@ class CachedStaticFiles(StaticFiles):
     cached for a year; version bumps change the URL.
     """
 
-    def file_response(self, *args: object, **kwargs: object):  # type: ignore[override]
-        response = super().file_response(*args, **kwargs)
+    def file_response(
+        self,
+        full_path: str | os.PathLike[str],
+        stat_result: os.stat_result,
+        scope: Scope,
+        status_code: int = 200,
+    ) -> Response:
+        response = super().file_response(full_path, stat_result, scope, status_code)
         response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         return response
 
@@ -364,7 +396,8 @@ async def quotes() -> dict[str, object]:
 @app.get("/api/news")
 async def news() -> dict[str, object]:
     """Merged Telegram channel feed; also pushed over the WS as it updates."""
-    return await app.state.news_service.get_feed()
+    service: NewsService = app.state.news_service
+    return await service.get_feed()
 
 
 async def _heal_stale_history() -> None:
@@ -380,12 +413,15 @@ async def _heal_stale_history() -> None:
             timeout=8.0,
         )
     except Exception:
-        pass
+        # Heal failures were previously silent: writes vanished with zero
+        # diagnostics. Log and serve the cached bars.
+        logger.exception("stale daily-bar heal failed")
 
 
 @app.get("/api/crypto-etf-flows")
 async def crypto_etf_flows() -> dict[str, object]:
-    return await app.state.crypto_etf_flow_service.get_flows()
+    service: CryptoEtfFlowService = app.state.crypto_etf_flow_service
+    return await service.get_flows()
 
 
 @app.post("/api/reports", dependencies=[Depends(require_edit_token)])
@@ -506,7 +542,8 @@ async def profile(symbol: str) -> dict[str, object]:
     asset = find_asset(app.state.groups, clean_symbol(symbol))
     if asset is None:
         raise HTTPException(status_code=404, detail="asset_not_found")
-    return await asyncio.to_thread(app.state.asset_profile_service.get_profile, asset)
+    service: AssetProfileService = app.state.asset_profile_service
+    return await asyncio.to_thread(service.get_profile, asset)
 
 
 @app.websocket("/ws/quotes")
@@ -519,6 +556,9 @@ async def quotes_ws(websocket: WebSocket) -> None:
         await websocket.send_json(
             {"type": "quotes", "data": await board_payload_async(app.state, groups, grouped)}
         )
+        # Register only after the snapshot send: a concurrent broadcast
+        # could otherwise interleave ahead of the initial frame.
+        manager.register(websocket)
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:

@@ -13,7 +13,9 @@ TestClient is not entered as a context manager and settings are stubbed
 directly on app.state with a tmp database path (mirrors test_edit_token).
 """
 
+import sqlite3
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -193,6 +195,9 @@ def test_create_report_rejects_unslugifiable_input(
         pytest.param({"title": "Flows", "body": ""}, id="empty-body"),
         pytest.param({"title": "Flows", "body": "x" * 500_001}, id="body-too-long"),
         pytest.param({"title": "Flows", "body": "text", "date": "07/09/2026"}, id="bad-date"),
+        pytest.param(
+            {"title": "Flows", "body": "text", "date": "2025-02-31"}, id="non-calendar-date"
+        ),
         pytest.param({"title": "Flows", "body": "text", "slug": ""}, id="empty-slug"),
         pytest.param({"title": "Flows", "body": "text", "slug": "s" * 65}, id="slug-too-long"),
     ],
@@ -342,6 +347,48 @@ def test_list_preview_truncates_to_220_chars_with_ellipsis(
 
     assert previews["long"] == "x" * 220 + "…"
     assert previews["exact"] == "y" * 220
+
+
+def test_list_bounds_large_report_body_while_detail_remains_verbatim(
+    configure_app: Callable[[str], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure_app("")
+    client = TestClient(app)
+    prefix = (
+        "---\n"
+        "kind: large-report\n"
+        "---\n"
+        "# Meaningful **preview**\n"
+    )
+    body = prefix + "x" * (500_000 - len(prefix))
+    created = client.post(
+        "/api/reports",
+        json={"title": "Large", "body": body, "date": "2026-07-09"},
+    )
+    report_id = int(created.json()["id"])
+    statements: list[str] = []
+    original_connect = db._connect
+
+    @contextmanager
+    def traced_connect(path: Path) -> Iterator[sqlite3.Connection]:
+        with original_connect(path) as conn:
+            conn.set_trace_callback(statements.append)
+            yield conn
+
+    monkeypatch.setattr(db, "_connect", traced_connect)
+
+    [item] = client.get("/api/reports").json()["reports"]
+    list_statements = list(statements)
+    detail = client.get(f"/api/reports/{report_id}").json()
+
+    expected_text = "Meaningful preview " + "x" * 500_000
+    assert item["preview"] == expected_text[:220] + "…"
+    assert any(
+        "SUBSTR(BODY, 1, 16384) AS BODY" in statement.upper()
+        for statement in list_statements
+    )
+    assert detail["body"] == body
 
 
 # --- GET /api/reports/{id} and DELETE /api/reports/{id} ---

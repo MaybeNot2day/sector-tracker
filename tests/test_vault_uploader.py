@@ -72,7 +72,8 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         "BOARD_URL=http://board.test:8787\n"
         "EDIT_TOKEN=sekrit\n"
         f"VAULT_DIR={vault}\n"
-        "MAX_AGE_DAYS=30\n",
+        "MAX_AGE_DAYS=30\n"
+        "REPORT_TITLES=Morning Brief, Empty Shell, Wrap\n",
         encoding="utf-8",
     )
     state_path = tmp_path / "state" / "vault-uploads.json"
@@ -157,11 +158,41 @@ def test_scan_vault_filters_and_sorts(tmp_path: Path) -> None:
     nested.mkdir()
     _write_report(nested, f"{_TODAY_TEXT} Buried.md", "not in vault root")
 
-    assert uploader.scan_vault(vault, max_age_days=30) == [
+    assert uploader.scan_vault(vault, max_age_days=30, allowed_titles=None) == [
         (earlier, _YESTERDAY_TEXT, "Wrap"),
         (alpha, _TODAY_TEXT, "Alpha"),
         (zulu, _TODAY_TEXT, "Zulu"),
     ]
+
+
+def test_scan_vault_title_allowlist_is_case_insensitive(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    brief = _write_report(vault, f"{_TODAY_TEXT} Biotech Pharma Brief.md", "cron output")
+    _write_report(vault, f"{_TODAY_TEXT} SEC Counterparty Relationship Map.md", "manual note")
+
+    allowed = uploader.parse_title_allowlist("biotech pharma brief")
+    assert uploader.scan_vault(vault, max_age_days=30, allowed_titles=allowed) == [
+        (brief, _TODAY_TEXT, "Biotech Pharma Brief"),
+    ]
+
+
+# --- parse_title_allowlist ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("Biotech Pharma Brief", {"biotech pharma brief"}),
+        ("A, B ,c", {"a", "b", "c"}),
+        ("", set()),
+        (" , ", set()),
+        ("*", None),
+        ("A, *", None),
+    ],
+)
+def test_parse_title_allowlist(value: str, expected: set[str] | None) -> None:
+    assert uploader.parse_title_allowlist(value) == expected
 
 
 # --- content_hash -------------------------------------------------------------
@@ -220,6 +251,23 @@ def test_load_state_tolerates_bad_files(tmp_path: Path, content: str, expected: 
 
 def test_load_state_missing_file_returns_empty(tmp_path: Path) -> None:
     assert uploader.load_state(tmp_path / "absent.json") == {}
+
+def test_prune_state_drops_only_expired_dated_reports() -> None:
+    today = date(2026, 7, 10)
+    state = {
+        "2026-06-09 Old Brief.md": "old",
+        "2026-06-10 Boundary Brief.md": "boundary",
+        "2026-07-10 Current Brief.md": "current",
+        "2026-07-12 Future Brief.md": "future",
+        "manual-note.md": "unknown",
+    }
+
+    assert uploader.prune_state(state, 30, today=today) == {
+        "2026-06-10 Boundary Brief.md": "boundary",
+        "2026-07-10 Current Brief.md": "current",
+        "2026-07-12 Future Brief.md": "future",
+        "manual-note.md": "unknown",
+    }
 
 
 # --- load_config ---------------------------------------------------------------
@@ -306,6 +354,56 @@ def test_baseline_records_hashes_without_uploading(env: SimpleNamespace) -> None
     }
 
 
+def test_burst_of_fresh_reports_settles_once(
+    env: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env.config.write_text(
+        env.config.read_text(encoding="utf-8").replace(
+            "REPORT_TITLES=Morning Brief, Empty Shell, Wrap",
+            "REPORT_TITLES=*",
+        ),
+        encoding="utf-8",
+    )
+    clock = [time.time()]
+    paths = [
+        env.vault / f"{_TODAY_TEXT} Brief {index}.md"
+        for index in range(4)
+    ]
+    for path in paths:
+        path.write_text(f"body {path.stem}", encoding="utf-8")
+        os.utime(path, (clock[0], clock[0]))
+
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(uploader.time, "time", lambda: clock[0])
+    monkeypatch.setattr(uploader.time, "sleep", fake_sleep)
+
+    assert uploader.run([]) == 0
+    assert sleeps == [uploader.SETTLE_SECONDS]
+    assert len(env.post.calls) == 4
+
+
+def test_partially_aged_report_sleeps_only_remaining_delta(
+    env: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = time.time()
+    path = env.vault / f"{_TODAY_TEXT} Morning Brief.md"
+    path.write_text("fresh body", encoding="utf-8")
+    os.utime(path, (clock - 1.0, clock - 1.0))
+    sleeps: list[float] = []
+    monkeypatch.setattr(uploader.time, "time", lambda: clock)
+    monkeypatch.setattr(uploader.time, "sleep", sleeps.append)
+
+    assert uploader.run([]) == 0
+    assert sleeps == [uploader.SETTLE_SECONDS - 1.0]
+
+
 def test_new_file_uploads_once_then_skips(env: SimpleNamespace) -> None:
     body = "# Morning\n\nRotation continues.\n"
     name = f"{_TODAY_TEXT} Morning Brief.md"
@@ -364,3 +462,56 @@ def test_dry_run_changes_nothing_on_disk(env: SimpleNamespace) -> None:
     assert uploader.run(["--dry-run"]) == 0
     assert env.post.calls == []
     assert env.state.read_text(encoding="utf-8") == seeded
+
+
+def test_run_skips_titles_outside_allowlist(env: SimpleNamespace) -> None:
+    _write_report(env.vault, f"{_TODAY_TEXT} Morning Brief.md", "cron output")
+    _write_report(env.vault, f"{_TODAY_TEXT} World Models.md", "manual research note")
+
+    assert uploader.run([]) == 0
+    assert [(call[2], call[4]) for call in env.post.calls] == [("Morning Brief", "cron output")]
+    # No hash recorded for the skipped note: allowlisting it later uploads it.
+    assert set(_read_state(env)) == {f"{_TODAY_TEXT} Morning Brief.md"}
+
+
+def test_run_defaults_allowlist_to_known_cron_titles(env: SimpleNamespace) -> None:
+    kept = [
+        ln
+        for ln in env.config.read_text(encoding="utf-8").splitlines()
+        if not ln.startswith("REPORT_TITLES")
+    ]
+    env.config.write_text("".join(line + "\n" for line in kept), encoding="utf-8")
+    _write_report(env.vault, f"{_TODAY_TEXT} Biotech Pharma Brief.md", "cron output")
+    _write_report(env.vault, f"{_TODAY_TEXT} Morning Brief.md", "not a known cron title")
+
+    assert uploader.run([]) == 0
+    assert [call[2] for call in env.post.calls] == ["Biotech Pharma Brief"]
+
+
+def test_run_star_allowlist_uploads_everything(env: SimpleNamespace) -> None:
+    env.config.write_text(
+        env.config.read_text(encoding="utf-8").replace(
+            "REPORT_TITLES=Morning Brief, Empty Shell", "REPORT_TITLES=*"
+        ),
+        encoding="utf-8",
+    )
+    _write_report(env.vault, f"{_TODAY_TEXT} Anything Goes.md", "body")
+
+    assert uploader.run([]) == 0
+    assert [call[2] for call in env.post.calls] == ["Anything Goes"]
+
+
+def test_run_malformed_max_age_days_falls_back_to_30(env: SimpleNamespace) -> None:
+    env.config.write_text(
+        env.config.read_text(encoding="utf-8").replace(
+            "MAX_AGE_DAYS=30", "MAX_AGE_DAYS=30 days"
+        ),
+        encoding="utf-8",
+    )
+    _write_report(env.vault, f"{_TODAY_TEXT} Morning Brief.md", "fresh body")
+    _write_report(env.vault, f"{_STALE_TEXT} Morning Brief.md", "stale body")
+
+    # Malformed value must not crash the run; the 30-day default still filters.
+    assert uploader.run([]) == 0
+    assert [call[2] for call in env.post.calls] == ["Morning Brief"]
+    assert set(_read_state(env)) == {f"{_TODAY_TEXT} Morning Brief.md"}

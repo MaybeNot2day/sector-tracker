@@ -154,3 +154,18 @@ def test_gate_is_wired_to_exactly_the_mutation_routes() -> None:
         ("POST", "/api/reports"),
         ("DELETE", "/api/reports/{report_id}"),
     }
+
+
+# --- payload validation: '/' in a symbol or group name is rejected up front;
+# uvicorn decodes %2F before routing, so such an asset could never be deleted ---
+
+
+def test_create_asset_rejects_symbol_containing_slash(
+    configure_edit_token: Callable[[str], None],
+) -> None:
+    configure_edit_token("")
+    client = TestClient(app)
+
+    response = client.post("/api/groups/TEST/assets", json={"symbol": "BRK/A"})
+
+    assert response.status_code == 422

@@ -1,8 +1,14 @@
+# Installed as a systemd *user* unit (systemctl --user, lingering enabled) per
+# the README. User= and network-online are ignored in user scope; they exist so
+# an accidental system-scope install still runs as ds (root's Path.home() is
+# /root and the uploader config would never be found) and waits for the network.
 [Unit]
 Description=Upload new Hermes vault reports to the market board
-After=sector-tracker.service
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=board
-ExecStart=/usr/bin/python3 /opt/sector-tracker/scripts/vault_report_uploader.py
+# Without User=, root's Path.home() is /root and the config is never found.
+User=ds
+ExecStart=/usr/bin/python3 /home/ds/.local/bin/vault_report_uploader.py

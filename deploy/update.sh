@@ -5,16 +5,20 @@ set -euo pipefail
 
 APP_DIR="/opt/sector-tracker"
 APP_USER="board"
+# Written only after pip + restart succeed; comparing against HEAD would wedge
+# forever if a deploy died after `git reset` had already advanced HEAD.
+MARKER="$APP_DIR/.deployed-rev"
 
 run() { sudo -u "$APP_USER" "$@"; }
 
 cd "$APP_DIR"
 run git fetch --quiet origin main
-LOCAL="$(run git rev-parse HEAD)"
+DEPLOYED="$(cat "$MARKER" 2>/dev/null || true)"
 REMOTE="$(run git rev-parse origin/main)"
-[ "$LOCAL" = "$REMOTE" ] && exit 0
+[ "$DEPLOYED" = "$REMOTE" ] && exit 0
 
-echo "Deploying $REMOTE (was $LOCAL)"
+echo "Deploying $REMOTE (was ${DEPLOYED:-unknown})"
 run git reset --hard --quiet origin/main
 run "$APP_DIR/.venv/bin/pip" install --quiet -r requirements.txt
 systemctl restart sector-tracker.service
+printf '%s\n' "$REMOTE" | run tee "$MARKER" >/dev/null  # marker stays $APP_USER-owned

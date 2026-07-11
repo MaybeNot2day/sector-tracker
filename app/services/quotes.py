@@ -42,8 +42,18 @@ class QuoteService:
             if cached is not None:
                 return cached
 
-            fresh_by_symbol = await self._fetch_fresh_quotes(groups)
-            db.save_quotes(self.database_path, list(fresh_by_symbol.values()))
+            requested_symbols = sorted(
+                {asset.symbol for group in groups for asset in group.assets}
+            )
+            cached_by_symbol = await asyncio.to_thread(
+                db.load_latest_quotes, self.database_path, requested_symbols
+            )
+            fresh_by_symbol = await self._fetch_fresh_quotes(
+                groups, set(cached_by_symbol)
+            )
+            await asyncio.to_thread(
+                db.save_quotes, self.database_path, list(fresh_by_symbol.values())
+            )
 
             result: dict[str, list[Quote]] = {}
             for group in groups:
@@ -51,7 +61,7 @@ class QuoteService:
                 for asset in group.assets:
                     quote = fresh_by_symbol.get(asset.symbol)
                     if quote is None:
-                        quote = self._stale_or_error(asset)
+                        quote = self._stale_or_error(asset, cached_by_symbol)
                     quotes.append(quote)
                 result[group.name] = quotes
 
@@ -69,13 +79,18 @@ class QuoteService:
             return None
         return self._cached_grouped
 
-    async def _fetch_fresh_quotes(self, groups: list[GroupConfig]) -> dict[str, Quote]:
+    async def _fetch_fresh_quotes(
+        self,
+        groups: list[GroupConfig],
+        cached_symbols: set[str] | None = None,
+    ) -> dict[str, Quote]:
+        cached_symbols = cached_symbols or set()
         by_provider: dict[ProviderName, list[AssetConfig]] = {}
         for group in groups:
             for asset in group.assets:
                 by_provider.setdefault(asset.source, []).append(asset)
         by_provider = {
-            source: self._prioritize_uncached_assets(assets)
+            source: self._prioritize_uncached_assets(assets, cached_symbols)
             for source, assets in by_provider.items()
         }
 
@@ -156,11 +171,13 @@ class QuoteService:
                 timestamp=now,
             )
 
-    def _prioritize_uncached_assets(self, assets: list[AssetConfig]) -> list[AssetConfig]:
+    def _prioritize_uncached_assets(
+        self, assets: list[AssetConfig], cached_symbols: set[str]
+    ) -> list[AssetConfig]:
         return sorted(
             assets,
             key=lambda asset: (
-                db.load_latest_quote(self.database_path, asset.symbol) is not None,
+                asset.symbol.upper() in cached_symbols,
                 asset.symbol,
             ),
         )
@@ -174,8 +191,10 @@ class QuoteService:
         except Exception:
             return []
 
-    def _stale_or_error(self, asset: AssetConfig) -> Quote:
-        cached = db.load_latest_quote(self.database_path, asset.symbol)
+    def _stale_or_error(
+        self, asset: AssetConfig, cached_by_symbol: dict[str, Quote]
+    ) -> Quote:
+        cached = cached_by_symbol.get(asset.symbol.upper())
         if cached:
             return db.mark_stale(cached)
         return Quote(

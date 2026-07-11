@@ -16,6 +16,11 @@ Config lives in ~/.config/sector-tracker/uploader.env (KEY=VALUE lines):
     EDIT_TOKEN=...
     VAULT_DIR=/Users/you/Desktop/Main/HERMES RESEARCH   # optional
     MAX_AGE_DAYS=30                                     # optional
+    REPORT_TITLES=Biotech Pharma Brief                  # optional, comma-separated
+
+Only files whose <Title> is in REPORT_TITLES upload (case-insensitive); this
+keeps ad-hoc research notes in the vault off the board. Unset, it defaults to
+the known cron job titles. Set REPORT_TITLES=* to upload every dated file.
 
 Modes:
     (default)   one pass: upload new/changed dated files, update state
@@ -28,17 +33,24 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any, cast
 
 CONFIG_PATH = Path.home() / ".config/sector-tracker/uploader.env"
 STATE_PATH = Path.home() / ".local/state/sector-tracker/vault-uploads.json"
 DATED_NAME = re.compile(r"^(\d{4}-\d{2}-\d{2}) (.+)\.md$")
+# Vault-writing cron jobs; extend via REPORT_TITLES instead of editing this.
+DEFAULT_REPORT_TITLES = (
+    "Biotech Pharma Brief, AI Semis Morning Brief, Macro Tape Brief, US Asia Close"
+)
 # A file whose mtime is this fresh may still be mid-write; settle briefly.
 SETTLE_SECONDS = 3.0
 REQUEST_TIMEOUT = 20
@@ -85,8 +97,21 @@ def within_age(date_text: str, max_age_days: int, today: date | None = None) -> 
     return reference - parsed <= timedelta(days=max_age_days)
 
 
-def scan_vault(vault: Path, max_age_days: int) -> list[tuple[Path, str, str]]:
-    """Dated report files in the vault root -> [(path, date, title)], name-sorted."""
+def parse_title_allowlist(value: str) -> set[str] | None:
+    """`"A, B"` -> {"a", "b"} casefolded; `"*"` disables filtering (None)."""
+    titles = {part.strip().casefold() for part in value.split(",")}
+    titles.discard("")
+    return None if "*" in titles else titles
+
+
+def scan_vault(
+    vault: Path, max_age_days: int, allowed_titles: set[str] | None = None
+) -> list[tuple[Path, str, str]]:
+    """Dated report files in the vault root -> [(path, date, title)], name-sorted.
+
+    `allowed_titles` (casefolded) limits results to known cron report titles;
+    None means no title filter.
+    """
     found: list[tuple[Path, str, str]] = []
     for entry in sorted(vault.iterdir()):
         if not entry.is_file():
@@ -96,6 +121,8 @@ def scan_vault(vault: Path, max_age_days: int) -> list[tuple[Path, str, str]]:
             continue
         date_text, title = parsed
         if not within_age(date_text, max_age_days):
+            continue
+        if allowed_titles is not None and title.casefold() not in allowed_titles:
             continue
         found.append((entry, date_text, title))
     return found
@@ -112,15 +139,39 @@ def load_state(path: Path = STATE_PATH) -> dict[str, str]:
         return {}
     return {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
 
+def prune_state(
+    state: dict[str, str],
+    max_age_days: int,
+    today: date | None = None,
+) -> dict[str, str]:
+    """Drop hashes for dated reports outside the active upload window."""
+    reference = today or date.today()
+    kept: dict[str, str] = {}
+    for filename, digest in state.items():
+        parsed = parse_report_name(filename)
+        if parsed is not None:
+            report_date = datetime.strptime(parsed[0], "%Y-%m-%d").date()
+            if reference - report_date > timedelta(days=max_age_days):
+                continue
+        kept[filename] = digest
+    return kept
+
 
 def save_state(state: dict[str, str], path: Path = STATE_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=1, sort_keys=True), encoding="utf-8")
-    tmp.replace(path)
+    # Unique tmp name: concurrent manual + scheduled runs must not interleave
+    # writes into one shared .tmp file. (A full flock pass is deliberately out
+    # of scope; systemd/launchd already serialize the scheduled runs.)
+    with tempfile.NamedTemporaryFile(
+        "w", dir=path.parent, encoding="utf-8", delete=False
+    ) as tmp:
+        tmp.write(json.dumps(state, indent=1, sort_keys=True))
+    os.replace(tmp.name, path)
 
 
-def post_report(base_url: str, token: str, title: str, date_text: str, body: str) -> dict:
+def post_report(
+    base_url: str, token: str, title: str, date_text: str, body: str
+) -> dict[str, Any]:
     payload = json.dumps({"title": title, "date": date_text, "body": body}).encode("utf-8")
     request = urllib.request.Request(
         base_url.rstrip("/") + "/api/reports",
@@ -129,7 +180,7 @@ def post_report(base_url: str, token: str, title: str, date_text: str, body: str
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
-        return json.loads(response.read().decode("utf-8"))
+        return cast(dict[str, Any], json.loads(response.read().decode("utf-8")))
 
 
 def run(argv: list[str] | None = None) -> int:
@@ -142,7 +193,12 @@ def run(argv: list[str] | None = None) -> int:
     base_url = config.get("BOARD_URL", "")
     token = config.get("EDIT_TOKEN", "")
     vault = Path(config.get("VAULT_DIR") or Path.home() / "Desktop/Main/HERMES RESEARCH")
-    max_age_days = int(config.get("MAX_AGE_DAYS", "30"))
+    try:
+        max_age_days = int(config.get("MAX_AGE_DAYS", "30"))
+    except ValueError:
+        log(f"invalid MAX_AGE_DAYS in {CONFIG_PATH}; falling back to 30")
+        max_age_days = 30
+    allowed_titles = parse_title_allowlist(config.get("REPORT_TITLES", DEFAULT_REPORT_TITLES))
 
     if not base_url or not token:
         log(f"missing BOARD_URL/EDIT_TOKEN in {CONFIG_PATH}; nothing to do")
@@ -152,13 +208,18 @@ def run(argv: list[str] | None = None) -> int:
         return 2
 
     state = load_state()
-    reports = scan_vault(vault, max_age_days)
+    state = prune_state(state, max_age_days)
+    reports = scan_vault(vault, max_age_days, allowed_titles)
     uploaded = failed = 0
 
     for path, date_text, title in reports:
         try:
-            if time.time() - path.stat().st_mtime < SETTLE_SECONDS:
-                time.sleep(SETTLE_SECONDS)  # writer may still be flushing
+            age = max(0.0, time.time() - path.stat().st_mtime)
+            settle_remaining = max(0.0, SETTLE_SECONDS - age)
+            if settle_remaining:
+                # A burst ages while the first file settles; later files
+                # normally need no additional sleep.
+                time.sleep(settle_remaining)
             body = path.read_text(encoding="utf-8")
         except OSError as exc:
             log(f"skip {path.name}: unreadable ({exc})")

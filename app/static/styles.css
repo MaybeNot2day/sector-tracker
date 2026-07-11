@@ -2465,6 +2465,13 @@ h1 {
     padding: 0;
   }
 
+  /* Text-only button: the 32px icon squeeze would wrap its label. */
+  #reports-back {
+    width: auto;
+    padding: 0 11px;
+    white-space: nowrap;
+  }
+
   .view-tabs button {
     min-width: 0;
     flex: 1;
@@ -2710,7 +2717,8 @@ h1 {
 }
 
 .reports-list[hidden],
-.report-reader[hidden] {
+.report-reader[hidden],
+.toolbar-button[hidden] {
   /* display: flex/block above would defeat the hidden attribute */
   display: none;
 }
@@ -2833,6 +2841,16 @@ h1 {
   gap: 4px;
 }
 
+.report-body li > ul,
+.report-body li > ol {
+  margin: 4px 0 0 16px;
+}
+
+.report-body del {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
 .report-body blockquote {
   margin: 10px 0;
   padding: 6px 12px;
@@ -2869,8 +2887,12 @@ h1 {
   white-space: pre;
 }
 
-.report-body table {
+.report-body .table-scroll {
   margin: 12px 0;
+  overflow-x: auto;
+}
+
+.report-body table {
   border-collapse: collapse;
   width: 100%;
   font-size: 12px;

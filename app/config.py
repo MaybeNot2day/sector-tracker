@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, cast, get_args
 
-import yaml
+import yaml  # type: ignore[import-untyped]  # PyYAML does not ship typing metadata.
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -55,7 +56,8 @@ def load_watchlists(path: Path) -> list[GroupConfig]:
         assets_raw = group_raw.get("assets", [])
         if not isinstance(assets_raw, list):
             raise ValueError(f"group {group_raw.get('name', '<unknown>')} assets must be a list")
-        assets = [_parse_asset(asset_raw) for asset_raw in assets_raw]
+        group_name = str(group_raw.get("name", "<unknown>"))
+        assets = [_parse_asset(asset_raw, group_name) for asset_raw in assets_raw]
         groups.append(GroupConfig(name=str(group_raw["name"]), assets=assets))
     return groups
 
@@ -84,7 +86,11 @@ def save_watchlists(path: Path, groups: list[GroupConfig]) -> None:
             for group in groups
         ]
     }
-    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    # Write-then-rename: a crash mid-write must never leave a truncated
+    # watchlist YAML behind (os.replace is atomic on the same filesystem).
+    tmp_path = path.with_name(path.name + ".tmp")
+    tmp_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    os.replace(tmp_path, path)
 
 
 def find_group(groups: list[GroupConfig], name: str) -> GroupConfig | None:
@@ -95,13 +101,24 @@ def find_group(groups: list[GroupConfig], name: str) -> GroupConfig | None:
     return None
 
 
-def _parse_asset(raw: dict[str, Any]) -> AssetConfig:
+def _parse_asset(raw: dict[str, Any], group: str) -> AssetConfig:
     if not isinstance(raw, dict):
         raise ValueError("asset entries must be mappings")
+    symbol = str(raw["symbol"]).upper()
+    # cast() was a no-op here: a hand-edited YAML with e.g. source: binance
+    # parsed fine and then silently never quoted. Check the Literal values.
+    asset_type_raw = raw.get("type")
+    if asset_type_raw not in get_args(AssetType):
+        raise ValueError(f"group {group} asset {symbol}: unknown type {asset_type_raw!r}")
+    asset_type = cast(AssetType, asset_type_raw)
+    source_raw = raw.get("source")
+    if source_raw not in get_args(ProviderName):
+        raise ValueError(f"group {group} asset {symbol}: unknown source {source_raw!r}")
+    source = cast(ProviderName, source_raw)
     return AssetConfig(
-        symbol=str(raw["symbol"]).upper(),
-        type=cast(AssetType, raw["type"]),
-        source=cast(ProviderName, raw["source"]),
+        symbol=symbol,
+        type=asset_type,
+        source=source,
         exchange=str(raw["exchange"]) if raw.get("exchange") else None,
         name=str(raw["name"]) if raw.get("name") else None,
     )

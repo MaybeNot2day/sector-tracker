@@ -140,6 +140,55 @@ async def test_quote_service_returns_error_quote_without_cache(tmp_path: Path) -
     assert grouped["TEST"][0].error == "no_quote_available"
 
 
+@pytest.mark.asyncio
+async def test_quote_service_loads_cache_once_for_prioritization_and_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "board.sqlite3"
+    cached = Quote.from_last_and_prev_close(
+        symbol="AAPL",
+        asset_type="equity",
+        provider="yahoo",
+        last=110.0,
+        previous_close=100.0,
+        timestamp=datetime.now(UTC),
+    )
+    db.save_quotes(database, [cached])
+    groups = [
+        GroupConfig(
+            name="ONE",
+            assets=[
+                AssetConfig(symbol="AAPL", type="equity", source="yahoo"),
+                AssetConfig(symbol="XME", type="etf", source="yahoo"),
+            ],
+        ),
+        GroupConfig(
+            name="TWO",
+            assets=[AssetConfig(symbol="AAPL", type="equity", source="yahoo")],
+        ),
+    ]
+    original_batch_load = db.load_latest_quotes
+    batch_calls: list[set[str]] = []
+
+    def counted_batch_load(path: Path, symbols: set[str]) -> dict[str, Quote]:
+        batch_calls.append(set(symbols))
+        return original_batch_load(path, symbols)
+
+    def forbidden_single_load(path: Path, symbol: str) -> Quote | None:
+        raise AssertionError(f"unexpected per-symbol cache query for {symbol} at {path}")
+
+    monkeypatch.setattr(db, "load_latest_quotes", counted_batch_load)
+    monkeypatch.setattr(db, "load_latest_quote", forbidden_single_load)
+    service = QuoteService(database, {"yahoo": EmptyProvider()})
+
+    grouped = await service.get_board_quotes(groups)
+
+    assert batch_calls == [{"AAPL", "XME"}]
+    assert grouped["ONE"][0] == db.mark_stale(cached)
+    assert grouped["ONE"][1].error == "no_quote_available"
+    assert grouped["TWO"][0] == db.mark_stale(cached)
+
+
 def test_quote_payload_exposes_display_fields() -> None:
     quote = Quote.from_last_and_prev_close(
         symbol="005930.KS",

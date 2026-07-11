@@ -14,6 +14,7 @@ set -euo pipefail
 REPO_URL="${REPO_URL:-https://github.com/MaybeNot2day/sector-tracker.git}"
 APP_DIR="/opt/sector-tracker"
 APP_USER="board"
+UPDATE_SCRIPT="/usr/local/sbin/sector-tracker-update"
 PORT="${PORT:-8787}"
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -32,6 +33,9 @@ id -u "$APP_USER" >/dev/null 2>&1 || useradd --system --create-home --shell /usr
 echo "==> Fetching the app"
 if [ ! -d "$APP_DIR/.git" ]; then
   git clone --quiet "$REPO_URL" "$APP_DIR"
+else
+  # Re-runs may pass a different REPO_URL; keep origin pointed at it.
+  git -C "$APP_DIR" remote set-url origin "$REPO_URL"
 fi
 chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 
@@ -41,8 +45,25 @@ sudo -u "$APP_USER" bash -ec "
   [ -d .venv ] || python3 -m venv .venv
   .venv/bin/pip install --quiet --upgrade pip
   .venv/bin/pip install --quiet -r requirements.txt
-  [ -f .env ] || cp .env.example .env
 "
+
+# First setup only: ship .env with a random EDIT_TOKEN — an empty token turns
+# edit auth off entirely while the port below is opened to the world.
+if [ ! -f "$APP_DIR/.env" ]; then
+  if command -v openssl >/dev/null 2>&1; then
+    EDIT_TOKEN="$(openssl rand -hex 24)"
+  else
+    EDIT_TOKEN="$(od -vAn -N24 -tx1 /dev/urandom | tr -d ' \n')"
+  fi
+  sudo -u "$APP_USER" cp "$APP_DIR/.env.example" "$APP_DIR/.env"
+  sudo -u "$APP_USER" sed -i "s/^EDIT_TOKEN=.*/EDIT_TOKEN=$EDIT_TOKEN/" "$APP_DIR/.env"
+  echo "==> Generated EDIT_TOKEN=$EDIT_TOKEN"
+  echo "    Store it safely; it guards report edits on the board."
+fi
+
+# The timer runs as root so it can restart the app service. Never execute the
+# app-user-owned repo copy directly: an app compromise could rewrite it.
+install -o root -g root -m 0755 "$APP_DIR/deploy/update.sh" "$UPDATE_SCRIPT"
 
 echo "==> Installing systemd units"
 cat > /etc/systemd/system/sector-tracker.service <<EOF
@@ -70,7 +91,7 @@ Description=Cross-Asset Market Board auto-deploy (pull + restart on change)
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/env bash $APP_DIR/deploy/update.sh
+ExecStart=$UPDATE_SCRIPT
 EOF
 
 cat > /etc/systemd/system/sector-tracker-update.timer <<EOF

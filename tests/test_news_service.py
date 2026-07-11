@@ -48,19 +48,24 @@ class FakeHTTP:
     def __init__(self, routes: dict[str, Any]) -> None:
         self.routes = routes
         self.requests: list[str] = []
+        self.constructions = 0
+        self.closes = 0
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake = self
 
         class _Client:
             def __init__(self, *args: Any, **kwargs: Any) -> None:
-                pass
+                fake.constructions += 1
 
             async def __aenter__(self) -> "_Client":
                 return self
 
             async def __aexit__(self, *exc: Any) -> bool:
                 return False
+
+            async def aclose(self) -> None:
+                fake.closes += 1
 
             async def get(self, url: str, headers: dict[str, str] | None = None) -> FakeResponse:
                 channel = url.removeprefix(PREVIEW_PREFIX)
@@ -213,6 +218,24 @@ async def test_refresh_counts_only_previously_unseen_posts(
 
 
 @pytest.mark.asyncio
+async def test_refresh_reuses_and_closes_http_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeHTTP(
+        {"alpha": page(post_block("alpha/1", "A1", "2026-07-07T08:00:00+00:00"))}
+    )
+    fake.install(monkeypatch)
+    service = NewsService(["alpha"], cache_seconds=0)
+
+    await service.refresh()
+    await service.refresh()
+
+    assert fake.requests == ["alpha", "alpha"]
+    assert fake.constructions == 1
+    await service.aclose()
+    assert fake.closes == 1
+
+
+
+@pytest.mark.asyncio
 async def test_refresh_skips_failing_channel_but_keeps_others(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -242,6 +265,7 @@ async def test_refresh_with_no_channels_returns_zero_without_http(
 
     assert await service.refresh() == 0
     assert fake.requests == []
+    assert fake.constructions == 0
 
 
 # ---------------------------------------------------------------------------

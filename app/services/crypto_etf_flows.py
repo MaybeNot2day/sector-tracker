@@ -4,6 +4,7 @@ import asyncio
 import re
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
 FARSIDE_READER_URL = "https://r.jina.ai/http://{url}"
@@ -65,12 +66,34 @@ class CryptoEtfFlowService:
             if not assets:
                 self._failed_time = time.monotonic()
                 return self._degraded("farside_no_data")
+            # A partial cycle (BTC ok, ETH/SOL curls die) must not overwrite
+            # cached survivors with an "ok" payload missing them: carry the
+            # previous entries forward for pages that failed this round and
+            # mark the payload stale. Only a fully fresh fetch is is_stale
+            # False.
+            fetched = {str(entry["asset"]): entry for entry in assets}
+            cached_assets = self._cache_payload.get("assets") if self._cache_payload else None
+            cached_by_symbol = (
+                {str(entry.get("asset")): entry for entry in cached_assets}
+                if isinstance(cached_assets, list)
+                else {}
+            )
+            carried = False
+            merged: list[dict[str, object]] = []
+            for symbol in FARSIDE_ASSETS:
+                entry = fetched.get(symbol)
+                if entry is None:
+                    entry = cached_by_symbol.get(symbol)
+                    if entry is None:
+                        continue
+                    carried = True
+                merged.append(entry)
             payload: dict[str, object] = {
                 "status": "ok",
                 "source": "farside",
                 "updated_at": datetime.now(UTC).isoformat(),
-                "is_stale": False,
-                "assets": assets,
+                "is_stale": carried,
+                "assets": merged,
             }
             self._cache_payload = payload
             self._cache_time = time.monotonic()
@@ -85,21 +108,37 @@ class CryptoEtfFlowService:
         return _unavailable(error, detail=detail)
 
     def _fetch_assets_sync(self) -> list[dict[str, object]]:
-        """Fetch every Farside page, keeping per-asset partial results.
+        """Fetch every Farside page concurrently, keeping partial results."""
+        configured_assets = [
+            (index, symbol, str(config["name"]), str(config["url"]))
+            for index, (symbol, config) in enumerate(FARSIDE_ASSETS.items())
+        ]
+        if not configured_assets:
+            return []
 
-        One failing page (BTC ok, ETH curl dies) used to discard the whole
-        cycle via check=True; now the survivors still update the board.
-        """
-        assets: list[dict[str, object]] = []
-        for symbol, config in FARSIDE_ASSETS.items():
+        def fetch_one(
+            index: int, symbol: str, name: str, url: str
+        ) -> tuple[int, dict[str, object] | None]:
             try:
-                markdown = _fetch_markdown(str(config["url"]))
+                markdown = _fetch_markdown(url)
+                rows = parse_farside_table(markdown)
+                payload = summarize_flow_asset(symbol, name, rows) if rows else None
             except Exception:
-                continue
-            rows = parse_farside_table(markdown)
-            if rows:
-                assets.append(summarize_flow_asset(symbol, str(config["name"]), rows))
-        return assets
+                payload = None
+            return index, payload
+
+        with ThreadPoolExecutor(max_workers=len(configured_assets)) as executor:
+            futures = [
+                executor.submit(fetch_one, index, symbol, name, url)
+                for index, symbol, name, url in configured_assets
+            ]
+            completed = [future.result() for future in futures]
+
+        return [
+            payload
+            for _, payload in sorted(completed)
+            if payload is not None
+        ]
 
 
 def parse_farside_table(markdown: str) -> list[dict[str, object]]:
@@ -321,9 +360,35 @@ def _parse_token_date_rows(
     return rows
 
 
+# strptime's %b matches LC_TIME month names, so under a non-English locale
+# every Farside "11 Jan 2024" date failed to parse and the service reported
+# no data. Map the English abbreviations explicitly instead.
+_ENGLISH_MONTHS = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
+
+
 def _parse_date(value: str) -> datetime | None:
+    parts = value.strip().split()
+    if len(parts) != 3:
+        return None
+    day_text, month_text, year_text = parts
+    month = _ENGLISH_MONTHS.get(month_text.lower())
+    if month is None or not day_text.isdigit() or not year_text.isdigit():
+        return None
     try:
-        return datetime.strptime(value.strip(), "%d %b %Y").replace(tzinfo=UTC)
+        return datetime(int(year_text), month, int(day_text), tzinfo=UTC)
     except ValueError:
         return None
 
@@ -376,11 +441,11 @@ def _is_populated_flow_row(row: dict[str, object]) -> bool:
 
 
 def _sum_recent(rows: list[dict[str, object]], count: int) -> float | None:
-    flows = [
-        float(row["flow_usd"])
-        for row in rows[-count:]
-        if isinstance(row.get("flow_usd"), int | float)
-    ]
+    flows: list[float] = []
+    for row in rows[-count:]:
+        value = row.get("flow_usd")
+        if isinstance(value, int | float):
+            flows.append(float(value))
     return sum(flows) if flows else None
 
 

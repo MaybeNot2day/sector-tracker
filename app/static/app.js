@@ -76,13 +76,20 @@ let marketLayout = "grouped"; // "grouped" | "flat"
 let marketCategory = "tradfi"; // "tradfi" | "crypto"
 let tapeSorts = {}; // per-basket { key, direction }
 let tapePages = {}; // per-basket page index
-let lastTapeRenderKey = "";
+let marketSearchTimer = null;
 let feedMode = "poll"; // "ws" locally, "poll" on serverless deployments
+let activeSocket = null; // live WS reference so wake-up checks can close a zombie
+let lastWsFrameAt = 0; // Date.now() of the last WS frame, for zombie detection
 let activeView = "daily";
 let pendingChartFromUrl = null;
 let restoringUrlState = false;
 const BOARD_CACHE_KEY = "board-cache-v1";
+const BOARD_CACHE_WRITE_INTERVAL_MS = 30000;
+let lastBoardCacheWriteAt = 0;
+let pendingBoardCachePayload = null;
+let boardCacheWriteTimer = null;
 let latestNews = null;
+let lastNewsRenderKey = "";
 let knownNewsIds = new Set();
 const NEWS_OPEN_KEY = "news-open";
 // Muted news channels, persisted per browser.
@@ -99,6 +106,7 @@ let dataIsCached = false;
 // fresher one (or a WS frame). Declared here because init() runs above.
 let quotesFetchSeq = 0;
 let quotesFetchApplied = 0;
+let snapshotRevision = 0;
 
 const sourceLabels = {
   yahoo: "YH",
@@ -399,11 +407,25 @@ function init() {
     if (!document.hidden && feedMode !== "ws") fetchNews();
   }, 20000);
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) {
-      fetchQuotes();
-      fetchCryptoEtfFlows();
+    if (document.hidden) {
+      flushBoardCache();
+      return;
     }
+    if (feedMode !== "ws") {
+      fetchQuotes();
+    } else if (Date.now() - lastWsFrameAt > 30000) {
+      // Laptop sleep can leave a zombie socket that never errors: fetch
+      // once for freshness and close it so the reconnect logic takes over.
+      fetchQuotes();
+      try {
+        if (activeSocket && activeSocket.readyState === WebSocket.OPEN) activeSocket.close();
+      } catch (error) {
+        // Socket already dying; the close handler's reconnect covers it.
+      }
+    }
+    fetchCryptoEtfFlows();
   });
+  window.addEventListener("pagehide", flushBoardCache);
   newsToggle.addEventListener("click", () => setNewsOpen(!document.body.classList.contains("news-open")));
   newsClose.addEventListener("click", () => setNewsOpen(false));
   newsChannelsBar.addEventListener("click", (event) => {
@@ -418,6 +440,7 @@ function init() {
     localStorage.setItem(NEWS_MUTED_KEY, JSON.stringify([...mutedNewsChannels]));
     if (latestNews) renderNews(latestNews);
   });
+  cryptoTapeElement.addEventListener("click", handleCryptoTapeClick);
   refreshButton.addEventListener("click", () => {
     fetchQuotes();
     fetchCryptoEtfFlows();
@@ -427,14 +450,11 @@ function init() {
     button.addEventListener("click", () => selectView(button.dataset.view || "daily"));
     button.addEventListener("keydown", handleViewTabKeydown);
   });
-  marketSearch.addEventListener("input", () => {
-    marketSearchQuery = marketSearch.value.trim();
-    renderBoard(latestData);
-    syncUrlState();
-  });
+  marketSearch.addEventListener("input", scheduleMarketSearch);
   marketSearch.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
+      flushPendingMarketSearch();
       focusFirstMarketRow();
     }
   });
@@ -571,8 +591,32 @@ function restoreCachedBoard() {
 }
 
 function persistBoardCache(payload) {
+  pendingBoardCachePayload = payload;
+  const elapsed = Date.now() - lastBoardCacheWriteAt;
+  if (!lastBoardCacheWriteAt || elapsed >= BOARD_CACHE_WRITE_INTERVAL_MS) {
+    flushBoardCache();
+    return;
+  }
+  if (boardCacheWriteTimer === null) {
+    boardCacheWriteTimer = window.setTimeout(
+      flushBoardCache,
+      BOARD_CACHE_WRITE_INTERVAL_MS - elapsed
+    );
+  }
+}
+
+function flushBoardCache() {
+  if (boardCacheWriteTimer !== null) {
+    window.clearTimeout(boardCacheWriteTimer);
+    boardCacheWriteTimer = null;
+  }
+  if (!pendingBoardCachePayload) return;
+  const payload = pendingBoardCachePayload;
+  pendingBoardCachePayload = null;
   try {
-    localStorage.setItem(BOARD_CACHE_KEY, JSON.stringify({ at: Date.now(), payload }));
+    const now = Date.now();
+    localStorage.setItem(BOARD_CACHE_KEY, JSON.stringify({ at: now, payload }));
+    lastBoardCacheWriteAt = now;
   } catch (error) {
     /* quota exceeded / private mode — cache is best-effort */
   }
@@ -589,14 +633,14 @@ async function fetchQuotes() {
     // A slower response must never overwrite a fresher one (overlapping
     // interval poll + manual refresh + visibility refetch can all be in
     // flight; on WS hosts frames land between them).
-    if (seq < quotesFetchApplied) return;
+    if (seq <= quotesFetchApplied) return;
     quotesFetchApplied = seq;
     dataIsCached = false;
     applyQuotes(payload);
     persistBoardCache(payload);
     setConnection("live");
   } catch (error) {
-    if (seq < quotesFetchApplied) return;
+    if (seq <= quotesFetchApplied) return;
     setConnection("error");
     statusCopy.textContent = "Market data unavailable · retrying";
     if (!latestData) {
@@ -617,14 +661,17 @@ function shouldUseWebSocket() {
 function openSocket() {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   const socket = new WebSocket(`${protocol}://${window.location.host}/ws/quotes`);
+  activeSocket = socket;
 
   socket.addEventListener("open", () => {
+    lastWsFrameAt = Date.now(); // a fresh socket is not a zombie yet
     feedMode = "ws";
     updateFeedModeLabel();
     setConnection("live");
   });
   socket.addEventListener("message", (event) => {
     const message = JSON.parse(event.data);
+    lastWsFrameAt = Date.now();
     if (message.type === "quotes") {
       dataIsCached = false;
       // A WS frame is the freshest state; any poll still in flight
@@ -894,22 +941,10 @@ function renderMarkdown(source) {
       html.push(mdTable(rows));
       continue;
     }
-    if (/^\s*[-*+]\s+/.test(line)) {
-      const items = [];
-      while (index < lines.length && /^\s*[-*+]\s+/.test(lines[index])) {
-        items.push(`<li>${mdInline(lines[index].replace(/^\s*[-*+]\s+/, ""))}</li>`);
-        index += 1;
-      }
-      html.push(`<ul>${items.join("")}</ul>`);
-      continue;
-    }
-    if (/^\s*\d+[.)]\s+/.test(line)) {
-      const items = [];
-      while (index < lines.length && /^\s*\d+[.)]\s+/.test(lines[index])) {
-        items.push(`<li>${mdInline(lines[index].replace(/^\s*\d+[.)]\s+/, ""))}</li>`);
-        index += 1;
-      }
-      html.push(`<ol>${items.join("")}</ol>`);
+    if (/^\s*(?:[-*+]|\d+[.)])\s+/.test(line)) {
+      const list = mdListBlock(lines, index);
+      html.push(list.html);
+      index = list.next;
       continue;
     }
     const paragraph = [];
@@ -918,11 +953,15 @@ function renderMarkdown(source) {
       lines[index].trim() &&
       !/^\s*(#{1,6}\s|```|>|\||[-*+]\s|\d+[.)]\s)/.test(lines[index])
     ) {
-      paragraph.push(mdInline(lines[index].trim()));
+      // Hard-wrapped source lines are soft breaks (join with a space);
+      // a trailing double space is a Markdown hard break.
+      const raw = lines[index];
+      const text = mdInline(raw.trim());
+      paragraph.push(/\S {2,}$/.test(raw) ? `${text}<br>` : text);
       index += 1;
     }
     if (paragraph.length) {
-      html.push(`<p>${paragraph.join("<br>")}</p>`);
+      html.push(`<p>${paragraph.join(" ")}</p>`);
     } else {
       // Line matched a block prefix but produced no paragraph content;
       // consume it to guarantee forward progress.
@@ -931,6 +970,56 @@ function renderMarkdown(source) {
     }
   }
   return html.join("\n");
+}
+
+// Consume a run of list lines starting at `start`, honoring indentation-based
+// nesting (Obsidian: 2 spaces or a tab per level) and hard-wrapped item
+// continuations. Returns rendered HTML plus the index after the run.
+function mdListBlock(lines, start) {
+  const bullet = /^(\s*)(?:([-*+])|\d+[.)])\s+(.*)$/;
+  const items = []; // { indent, ordered, parts }
+  let index = start;
+  while (index < lines.length) {
+    const match = lines[index].match(bullet);
+    if (match) {
+      const indent = match[1].replaceAll("\t", "  ").length;
+      items.push({ indent, ordered: match[2] === undefined, parts: [match[3]] });
+      index += 1;
+      continue;
+    }
+    // Indented continuation lines belong to the item above (hard-wrapped bullets).
+    if (/^\s+\S/.test(lines[index]) && !/^\s*(#{1,6}\s|```|>|\|)/.test(lines[index])) {
+      items[items.length - 1].parts.push(lines[index].trim());
+      index += 1;
+      continue;
+    }
+    break;
+  }
+  let pos = 0;
+  function level(indent) {
+    const tag = items[pos].ordered ? "ol" : "ul";
+    const rendered = [];
+    while (pos < items.length && items[pos].indent >= indent) {
+      if (items[pos].indent > indent) {
+        // Deeper item: nest a sublist inside the previous <li>.
+        const nested = level(items[pos].indent);
+        if (rendered.length) {
+          rendered[rendered.length - 1] = rendered[rendered.length - 1].replace(/<\/li>$/, `${nested}</li>`);
+        } else {
+          rendered.push(`<li>${nested}</li>`);
+        }
+        continue;
+      }
+      rendered.push(`<li>${mdInline(items[pos].parts.join(" "))}</li>`);
+      pos += 1;
+    }
+    return `<${tag}>${rendered.join("")}</${tag}>`;
+  }
+  // Items dedented below the run's first bullet end its level() walk; start
+  // a fresh list for each remaining run so no consumed bullet is dropped.
+  const blocks = [];
+  while (pos < items.length) blocks.push(level(items[pos].indent));
+  return { html: blocks.join(""), next: index };
 }
 
 function mdTable(rows) {
@@ -953,14 +1042,18 @@ function mdTable(rows) {
   const body = parsed
     .map((cells) => `<tr>${cells.map((cell) => `<td>${cell}</td>`).join("")}</tr>`)
     .join("");
-  return `<table>${head}<tbody>${body}</tbody></table>`;
+  // Wide tables scroll inside the reader instead of stretching the modal.
+  return `<div class="table-scroll"><table>${head}<tbody>${body}</tbody></table></div>`;
 }
 
 function mdInline(text) {
   let out = escapeHtml(text);
-  out = out.replace(/\[\[([^\]]+)\]\]/g, "$1"); // Obsidian wiki-links -> plain text
+  // Obsidian wiki-links/embeds -> plain text; [[Target|Alias]] keeps the alias.
+  out = out.replace(/!?\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2");
+  out = out.replace(/!?\[\[([^\]]+)\]\]/g, "$1");
   out = out.replace(/`([^`]+)`/g, "<code>$1</code>");
   out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  out = out.replace(/~~([^~]+)~~/g, "<del>$1</del>");
   out = out.replace(/(^|[^*\w])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>");
   out = out.replace(
     /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
@@ -986,9 +1079,18 @@ function renderNews(payload) {
   latestNews = payload;
   const updated = new Date(payload?.updated_at || Date.now());
   newsStatus.textContent = Number.isNaN(updated.getTime()) ? "" : formatClock(updated);
+  const renderKey = newsRenderKey(payload);
+  if (renderKey === lastNewsRenderKey) {
+    updateNewsAges();
+    // Track ALL ids (muted included) so unmuting never fakes a "new" flash.
+    knownNewsIds = new Set(items.map((item) => item.id));
+    return;
+  }
+  lastNewsRenderKey = renderKey;
   renderNewsChannels(payload);
   if (!items.length) {
     newsList.innerHTML = '<div class="empty-state">No posts yet</div>';
+    knownNewsIds = new Set();
     return;
   }
   const visible = items.filter((item) => !mutedNewsChannels.has(item.channel));
@@ -1002,10 +1104,67 @@ function renderNews(payload) {
     }</div>`;
   } else {
     const seenBefore = knownNewsIds.size > 0;
+    // New posts prepend above the reading position; a bare innerHTML swap
+    // keeps the scroll OFFSET but swaps the content under it, yanking the
+    // reader. Anchor on the topmost visible item and restore its position.
+    const anchor = newsScrollAnchor();
     newsList.innerHTML = visible.map((item) => newsItemMarkup(item, seenBefore)).join("");
+    restoreNewsScrollAnchor(anchor);
   }
   // Track ALL ids (muted included) so unmuting never fakes a "new" flash.
   knownNewsIds = new Set(items.map((item) => item.id));
+}
+
+function newsRenderKey(payload) {
+  const items = payload?.items || [];
+  const channels = payload?.channels || [];
+  let hash = 2166136261;
+  const include = (value) => {
+    const text = String(value ?? "");
+    hash = Math.imul(hash ^ text.length, 16777619);
+    for (let index = 0; index < text.length; index += 1) {
+      hash = Math.imul(hash ^ text.charCodeAt(index), 16777619);
+    }
+  };
+  include(items.length);
+  items.forEach((item) => {
+    include(item.id);
+    include(item.channel);
+    include(item.channel_title);
+    include(item.timestamp);
+    include(item.link);
+    include(item.text);
+  });
+  include(channels.length);
+  channels.forEach(include);
+  [...mutedNewsChannels].sort().forEach(include);
+  return String(hash >>> 0);
+}
+
+function updateNewsAges() {
+  newsList.querySelectorAll("time[data-news-timestamp]").forEach((element) => {
+    element.textContent = newsAge(element.dataset.newsTimestamp || "");
+  });
+}
+
+function newsScrollAnchor() {
+  if (newsList.scrollTop <= 0) return null; // pinned to top: stay on newest
+  const listTop = newsList.getBoundingClientRect().top;
+  for (const item of newsList.querySelectorAll(".news-item[data-news-id]")) {
+    const offset = item.getBoundingClientRect().top - listTop;
+    if (offset + item.getBoundingClientRect().height > 0) {
+      return { id: item.dataset.newsId, offset };
+    }
+  }
+  return null;
+}
+
+function restoreNewsScrollAnchor(anchor) {
+  if (!anchor) return;
+  const item = newsList.querySelector(`.news-item[data-news-id="${cssEscape(anchor.id)}"]`);
+  if (!item) return; // item evicted from the feed window; keep raw offset
+  const listTop = newsList.getBoundingClientRect().top;
+  newsList.scrollTop += item.getBoundingClientRect().top - listTop - anchor.offset;
 }
 
 function renderNewsChannels(payload) {
@@ -1028,10 +1187,13 @@ function renderNewsChannels(payload) {
 
 function newsItemMarkup(item, seenBefore) {
   const fresh = seenBefore && !knownNewsIds.has(item.id);
-  return `<a class="news-item${fresh ? " news-new" : ""}" href="${escapeHtml(item.link)}" target="_blank" rel="noopener">
+  // Scraped links are untrusted: only http(s) may reach an href (blocks
+  // javascript: and friends).
+  const safeLink = /^https?:\/\//i.test(item.link || "") ? item.link : "#";
+  return `<a class="news-item${fresh ? " news-new" : ""}" data-news-id="${escapeHtml(item.id)}" href="${escapeHtml(safeLink)}" target="_blank" rel="noopener">
     <div class="news-meta">
       <strong>${escapeHtml(item.channel_title || item.channel)}</strong>
-      <time title="${escapeHtml(item.timestamp)}">${escapeHtml(newsAge(item.timestamp))}</time>
+      <time data-news-timestamp="${escapeHtml(item.timestamp)}" title="${escapeHtml(item.timestamp)}">${escapeHtml(newsAge(item.timestamp))}</time>
     </div>
     <p>${escapeHtml(item.text)}</p>
   </a>`;
@@ -1053,12 +1215,16 @@ async function fetchCryptoEtfFlows() {
     if (!response.ok) throw new Error("crypto_etf_flows_failed");
     latestCryptoEtfFlows = await response.json();
   } catch (error) {
-    latestCryptoEtfFlows = {
-      status: "unavailable",
-      source: "farside",
-      error: "crypto_etf_flows_failed",
-      assets: [],
-    };
+    // Keep the last good payload: a transient fetch error must not blank
+    // panels that already show flows.
+    if (!latestCryptoEtfFlows || latestCryptoEtfFlows.status !== "ok") {
+      latestCryptoEtfFlows = {
+        status: "unavailable",
+        source: "farside",
+        error: "crypto_etf_flows_failed",
+        assets: [],
+      };
+    }
   }
   if (latestData?.overview) {
     renderDailyBoard(latestData.overview, latestCryptoEtfFlows);
@@ -1072,6 +1238,7 @@ async function fetchSnapshots() {
     if (!response.ok) throw new Error("snapshots_failed");
     const payload = await response.json();
     latestSnapshots = Array.isArray(payload.snapshots) ? payload.snapshots : [];
+    snapshotRevision += 1;
   } catch (error) {
     latestSnapshots = latestSnapshots || [];
   }
@@ -1145,9 +1312,14 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
     lastDailyRenderKey = "";
     return;
   }
-  // Rebuilding ~6 panels of innerHTML every poll costs parse + layout and
-  // drops hover state; skip when the data is byte-identical.
-  const renderKey = JSON.stringify([overview, cryptoEtfFlows?.status, cryptoEtfFlows?.updated_at, latestSnapshots]);
+  // The overview timestamp and flow revision are supplied by their producers;
+  // snapshotRevision also invalidates same-date snapshot corrections.
+  const renderKey = [
+    overview.as_of || "",
+    cryptoEtfFlows?.status || "",
+    cryptoEtfFlows?.updated_at || "",
+    snapshotRevision,
+  ].join("|");
   if (renderKey === lastDailyRenderKey) return;
   lastDailyRenderKey = renderKey;
 
@@ -1165,6 +1337,10 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
   const asOf = new Date(overview.as_of);
   const asOfLabel = Number.isNaN(asOf.getTime()) ? "" : `As of ${formatLocalDate(asOf)}`;
 
+  // Engines without scroll anchoring (Safari) can clamp the page scroll
+  // while a large container is swapped; pin it across the rebuild.
+  const scroller = document.scrollingElement || document.documentElement;
+  const pageScroll = scroller.scrollTop;
   dailyBoard.innerHTML = `
     <section class="analytics-panel">
       ${panelHeading(
@@ -1177,7 +1353,7 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
           "Regime",
           regime.label || "--",
           `${formatPlainPct(universe.above_50dma_pct)} > 50DMA · ${formatPlainPct(universe.above_200dma_pct)} > 200DMA`,
-          `tone-${regime.tone || "neutral"}`
+          `tone-${classToken(regime.tone)}`
         )}
         ${vixRegimeCell(regime.vix)}
         ${themeRegimeCell("Dominant", regime.dominant)}
@@ -1272,6 +1448,7 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
       </div>
     </section>
   `;
+  if (scroller.scrollTop !== pageScroll) scroller.scrollTop = pageScroll;
 
   dailyBoard.querySelectorAll(".benchmark-card").forEach((card) => {
     card.addEventListener("click", () => {
@@ -1333,7 +1510,7 @@ function vixRegimeCell(vix) {
     "Volatility",
     `VIX ${level}`,
     `${vix.state || ""} · 1D ${formatSignedPct(vix.change_pct)}`,
-    `tone-${vix.tone || "neutral"}`
+    `tone-${classToken(vix.tone)}`
   );
 }
 
@@ -1438,7 +1615,7 @@ function themeRow(theme, momentum = false, prevScores = null) {
     ${deltaCell}
     <td class="${changeClass(theme.change_1d)}">${formatSignedPct(theme.change_1d)}</td>
     <td class="${changeClass(theme.change_5d)}">${formatSignedPct(theme.change_5d)}</td>
-    <td><span class="status-tag status-${String(theme.status || "neutral").toLowerCase()}">${escapeHtml(theme.status || "NEUTRAL")}</span></td>
+    <td><span class="status-tag status-${classToken(theme.status)}">${escapeHtml(theme.status || "NEUTRAL")}</span></td>
   </tr>`;
 }
 
@@ -1577,11 +1754,23 @@ function renderBoard(payload) {
   if (!groups.length) {
     const totalAssets = countAssets(categoryGroups) + tapeCounts.total;
     const hasFilter = activeGroupFilter || marketSearchQuery;
-    board.innerHTML =
-      tapeCounts.visible > 0
-        ? ""
-        : `<div class="empty-state">${hasFilter ? "No matching markets" : "No groups configured"}</div>`;
-    if (showTape && tapeCounts.visible > 0) board.appendChild(cryptoTapeElement);
+    board
+      .querySelectorAll(":scope > .group-panel:not(.tape-panel)")
+      .forEach((panel) => panel.remove());
+    if (showTape && tapeCounts.visible > 0) {
+      board.querySelector(":scope > .empty-state")?.remove();
+      if (cryptoTapeElement.parentElement !== board) board.appendChild(cryptoTapeElement);
+    } else {
+      if (cryptoTapeElement.parentElement === board) cryptoTapeElement.remove();
+      const copy = hasFilter ? "No matching markets" : "No groups configured";
+      let empty = board.querySelector(":scope > .empty-state");
+      if (!empty) {
+        empty = document.createElement("div");
+        empty.className = "empty-state";
+        board.appendChild(empty);
+      }
+      empty.textContent = copy;
+    }
     updateMarketFilterStatus(tapeCounts.visible, totalAssets);
     return;
   }
@@ -1589,33 +1778,54 @@ function renderBoard(payload) {
   const totalAssets = countAssets(categoryGroups) + tapeCounts.total;
   const visibleAssets = countAssets(groups) + tapeCounts.visible;
   const nextGroups = new Set(groups.map((group) => group.name));
+  board.querySelector(":scope > .empty-state")?.remove();
+  const existingGroupPanels = Array.from(
+    board.querySelectorAll(":scope > .group-panel:not(.tape-panel)")
+  );
+  let previousGroupPanel = null;
 
   groups.forEach((group) => {
     const panel = ensureGroupPanel(group.name, marketCategory === "crypto");
     updateGroupSessionChip(panel, group.assets || []);
     const assets = sortedAssets(group.assets || []);
     const nextSymbols = new Set(assets.map((asset) => asset.symbol));
+    const existingRows = Array.from(panel.querySelectorAll(".asset-row"));
+    const rowsBySymbol = new Map(existingRows.map((row) => [row.dataset.symbol, row]));
 
+    let previousRow = null;
     assets.forEach((asset) => {
-      let row = panel.querySelector(`.asset-row[data-symbol="${cssEscape(asset.symbol)}"]`);
+      let row = rowsBySymbol.get(asset.symbol);
       if (!row) {
         row = renderRow(asset);
       } else {
         updateRow(row, asset);
       }
-      panel.appendChild(row);
+      // Re-appending an already-placed row blurs any focused row on every
+      // quote tick; only (re)insert rows whose position actually changed.
+      const anchor = previousRow ? previousRow.nextElementSibling : existingRows[0] || null;
+      if (row !== anchor) panel.insertBefore(row, anchor);
+      previousRow = row;
     });
 
-    panel.querySelectorAll(".asset-row").forEach((row) => {
+    existingRows.forEach((row) => {
       if (!nextSymbols.has(row.dataset.symbol)) row.remove();
     });
-    board.appendChild(panel);
+    const panelAnchor = previousGroupPanel
+      ? previousGroupPanel.nextElementSibling
+      : existingGroupPanels[0] || board.firstElementChild;
+    if (panel !== panelAnchor) board.insertBefore(panel, panelAnchor);
+    previousGroupPanel = panel;
   });
 
   board.querySelectorAll(".group-panel:not(.tape-panel)").forEach((panel) => {
     if (!nextGroups.has(panel.dataset.group)) panel.remove();
   });
-  if (showTape) board.appendChild(cryptoTapeElement);
+  if (showTape) {
+    const tapeAnchor = previousGroupPanel
+      ? previousGroupPanel.nextElementSibling
+      : board.firstElementChild;
+    if (cryptoTapeElement !== tapeAnchor) board.insertBefore(cryptoTapeElement, tapeAnchor);
+  }
   updateSortHeaders();
   updateMarketFilterStatus(visibleAssets, totalAssets);
 }
@@ -1658,43 +1868,188 @@ function renderCryptoTape(tape) {
     : rows;
   const counts = { visible: visible.length, total: rows.length };
 
-  const renderKey = JSON.stringify([tape, tapeSorts, tapePages, query, configured.size]);
-  if (renderKey === lastTapeRenderKey) return counts;
-  lastTapeRenderKey = renderKey;
-
   if (!visible.length) {
-    cryptoTapeElement.innerHTML = rows.length
-      ? '<div class="empty-state">No matching perps</div>'
-      : "";
+    const copy = rows.length ? "No matching perps" : "";
+    const currentEmpty = cryptoTapeElement.querySelector(":scope > .empty-state");
+    if (!copy) {
+      if (cryptoTapeElement.childElementCount) cryptoTapeElement.replaceChildren();
+    } else if (
+      cryptoTapeElement.childElementCount !== 1 ||
+      !currentEmpty ||
+      currentEmpty.textContent !== copy
+    ) {
+      const empty = document.createElement("div");
+      empty.className = "empty-state";
+      empty.textContent = copy;
+      cryptoTapeElement.replaceChildren(empty);
+    }
     return counts;
   }
 
+  cryptoTapeElement.querySelector(":scope > .empty-state")?.remove();
   const baskets = new Map();
   visible.forEach((row) => {
     const basket = TAPE_BASKET_ORDER.includes(row.basket) ? row.basket : "Other";
     if (!baskets.has(basket)) baskets.set(basket, []);
     baskets.get(basket).push(row);
   });
-  cryptoTapeElement.innerHTML = TAPE_BASKET_ORDER.filter((basket) => baskets.has(basket))
-    .map((basket) => tapeBasketMarkup(basket, sortedTapeRows(baskets.get(basket), basketSort(basket))))
-    .join("");
-  cryptoTapeElement.querySelectorAll(".group-title button").forEach((button) => {
-    button.addEventListener("click", () => {
-      const basket = button.closest(".tape-panel")?.dataset.basket || "Other";
-      setTapeSort(basket, button.dataset.sortKey || "volume");
-    });
+  const existingPanels = new Map(
+    Array.from(cryptoTapeElement.querySelectorAll(":scope > .tape-panel")).map((panel) => [
+      panel.dataset.basket,
+      panel,
+    ])
+  );
+  let previousPanel = null;
+  TAPE_BASKET_ORDER.filter((basket) => baskets.has(basket)).forEach((basket) => {
+    const sortedRows = sortedTapeRows(baskets.get(basket), basketSort(basket));
+    const panel = existingPanels.get(basket) || createTapePanel(basket, sortedRows);
+    existingPanels.delete(basket);
+    reconcileTapePanel(panel, basket, sortedRows);
+    const anchor = previousPanel
+      ? previousPanel.nextElementSibling
+      : cryptoTapeElement.firstElementChild;
+    if (panel !== anchor) cryptoTapeElement.insertBefore(panel, anchor);
+    previousPanel = panel;
   });
-  cryptoTapeElement.querySelectorAll(".tape-pager button").forEach((button) => {
-    button.addEventListener("click", () => {
-      const basket = button.closest(".tape-panel")?.dataset.basket || "Other";
-      tapePages[basket] = Math.max(0, (tapePages[basket] || 0) + Number(button.dataset.step || 0));
-      renderBoard(latestData);
-    });
-  });
-  cryptoTapeElement.querySelectorAll(".asset-row").forEach((row) => {
-    row.addEventListener("click", () => openTapeChart(row.dataset.symbol || ""));
-  });
+  existingPanels.forEach((panel) => panel.remove());
   return counts;
+}
+
+function handleCryptoTapeClick(event) {
+  const button = event.target instanceof Element ? event.target.closest("button") : null;
+  if (!button || !cryptoTapeElement.contains(button)) return;
+  const panel = button.closest(".tape-panel");
+  if (!panel) return;
+  const basket = panel.dataset.basket || "Other";
+  if (button.matches(".group-title button[data-sort-key]")) {
+    setTapeSort(basket, button.dataset.sortKey || "volume");
+    return;
+  }
+  if (button.matches(".tape-pager button[data-step]")) {
+    tapePages[basket] = Math.max(
+      0,
+      (tapePages[basket] || 0) + Number(button.dataset.step || 0)
+    );
+    renderBoard(latestData);
+    return;
+  }
+  if (button.classList.contains("asset-row")) {
+    openTapeChart(button.dataset.symbol || "");
+  }
+}
+
+function createTapePanel(basket, rows) {
+  const template = document.createElement("template");
+  template.innerHTML = tapeBasketMarkup(basket, rows).trim();
+  return template.content.firstElementChild;
+}
+
+function reconcileTapePanel(panel, basket, rows) {
+  const pageCount = Math.max(1, Math.ceil(rows.length / TAPE_PAGE_SIZE));
+  const page = Math.min(tapePages[basket] || 0, pageCount - 1);
+  tapePages[basket] = page;
+  const start = page * TAPE_PAGE_SIZE;
+  const pageRows = rows.slice(start, start + TAPE_PAGE_SIZE);
+  const sort = basketSort(basket);
+  const headerDefinitions = [
+    [basket, "symbol"],
+    ["Last", "last"],
+    ["24h %", "pct"],
+    ["Fund", "funding"],
+    ["OI", "oi"],
+    ["24h Vol", "volume"],
+  ];
+  const header = panel.querySelector(":scope > .group-title");
+  header.querySelectorAll("button[data-sort-key]").forEach((button, index) => {
+    const [label, sortKey] = headerDefinitions[index];
+    const active = sort.key === sortKey;
+    const direction = sort.direction === "asc" ? "ascending" : "descending";
+    button.dataset.sortKey = sortKey;
+    button.classList.toggle("active-sort", active);
+    button.setAttribute("aria-pressed", String(active));
+    button.setAttribute(
+      "aria-label",
+      active ? `Sorted by ${label}, ${direction} — click to flip` : `Sort by ${label}`
+    );
+    button.title = `Sort by ${label}`;
+    button.textContent = label;
+  });
+  const sessionChip = header.querySelector(".session-chip");
+  sessionChip.textContent = String(rows.length);
+  sessionChip.title = `${rows.length} perps · Lighter basket · trades 24/7`;
+
+  const existingRows = Array.from(panel.querySelectorAll(":scope > .asset-row"));
+  const rowsBySymbol = new Map(existingRows.map((row) => [row.dataset.symbol, row]));
+  const nextSymbols = new Set(pageRows.map((row) => row.symbol));
+  let previousRow = header;
+  pageRows.forEach((data) => {
+    const row = rowsBySymbol.get(data.symbol) || createTapeRow(data);
+    updateTapeRow(row, data);
+    const anchor = previousRow.nextElementSibling;
+    if (row !== anchor) panel.insertBefore(row, anchor);
+    previousRow = row;
+  });
+  existingRows.forEach((row) => {
+    if (!nextSymbols.has(row.dataset.symbol)) row.remove();
+  });
+
+  let pager = panel.querySelector(":scope > .tape-pager");
+  if (pageCount === 1) {
+    pager?.remove();
+    return;
+  }
+  if (!pager) {
+    pager = document.createElement("div");
+    pager.className = "tape-pager";
+    pager.innerHTML =
+      '<button type="button" data-step="-1" aria-label="Previous page">‹</button>' +
+      "<span></span>" +
+      '<button type="button" data-step="1" aria-label="Next page">›</button>';
+  }
+  const pagerButtons = pager.querySelectorAll("button");
+  pagerButtons[0].disabled = page === 0;
+  pager.querySelector("span").textContent =
+    `${start + 1}–${start + pageRows.length} of ${rows.length}`;
+  pagerButtons[1].disabled = page >= pageCount - 1;
+  if (pager !== panel.lastElementChild) panel.appendChild(pager);
+}
+
+function createTapeRow(data) {
+  const template = document.createElement("template");
+  template.innerHTML = tapeRowMarkup(data).trim();
+  return template.content.firstElementChild;
+}
+
+function updateTapeRow(row, data) {
+  const apr =
+    typeof data.funding_rate === "number" ? data.funding_rate * 24 * 365 * 100 : null;
+  const aprText = apr === null ? "--" : `${apr >= 0 ? "+" : ""}${apr.toFixed(1)}%`;
+  const aprClass =
+    apr === null ? "" : apr >= 20 ? "tone-negative" : apr < 0 ? "tone-positive" : "";
+  const cells = row.children;
+  row.className = "asset-row";
+  row.dataset.symbol = data.symbol;
+  row.setAttribute("aria-label", `${data.symbol} chart`);
+  cells[0].className = "symbol-cell";
+  cells[0].querySelector("strong").textContent = data.symbol;
+  cells[1].className = "last-cell";
+  cells[1].title = "Last trade";
+  cells[1].textContent = formatPrice(data.last);
+  cells[2].className = changeClass(data.change_pct);
+  cells[2].textContent = formatSignedPct(data.change_pct);
+  cells[3].className = `tape-funding ${aprClass}`;
+  cells[3].title = "Funding, annualized";
+  cells[3].textContent = aprText;
+  cells[4].className = "tape-oi";
+  cells[4].title = "Open interest";
+  cells[4].textContent = data.open_interest_usd
+    ? `$${formatCompactPrice(data.open_interest_usd)}`
+    : "--";
+  cells[5].className = "tape-volume";
+  cells[5].title = "24h notional volume";
+  cells[5].textContent = data.day_volume_usd
+    ? `$${formatCompactPrice(data.day_volume_usd)}`
+    : "--";
 }
 
 function matchesTapeQuery(row, query) {
@@ -2015,7 +2370,31 @@ function updateMarketFilterStatus(visibleCount, totalCount) {
   marketFilterClear.hidden = !filters.length;
 }
 
+function scheduleMarketSearch() {
+  if (marketSearchTimer !== null) window.clearTimeout(marketSearchTimer);
+  marketSearchTimer = window.setTimeout(flushPendingMarketSearch, 120);
+}
+
+function flushPendingMarketSearch() {
+  if (marketSearchTimer !== null) {
+    window.clearTimeout(marketSearchTimer);
+    marketSearchTimer = null;
+  }
+  const query = marketSearch.value.trim();
+  if (query === marketSearchQuery) return;
+  marketSearchQuery = query;
+  renderBoard(latestData);
+  syncUrlState();
+}
+
+function cancelPendingMarketSearch() {
+  if (marketSearchTimer === null) return;
+  window.clearTimeout(marketSearchTimer);
+  marketSearchTimer = null;
+}
+
 function clearMarketFilters() {
+  cancelPendingMarketSearch();
   activeGroupFilter = "";
   marketSearchQuery = "";
   marketSearch.value = "";
@@ -2438,6 +2817,7 @@ function sparklineSvg(values) {
 
 function filterMarketsByGroup(groupName) {
   if (!groupName) return;
+  cancelPendingMarketSearch();
   activeGroupFilter = groupName;
   marketSearchQuery = "";
   marketSearch.value = "";
@@ -2556,14 +2936,18 @@ async function loadChart(symbol, range, interval) {
     const payload = await response.json();
     if (activeSymbol !== symbol || requestId !== chartLoadToken) return;
     const rawBars = payload.bars || [];
-    const bars = rawBars.map((bar) => ({
-      time: toChartTime(bar.timestamp, interval),
-      open: Number(bar.open),
-      high: Number(bar.high),
-      low: Number(bar.low),
-      close: Number(bar.close),
-      volume: numericOrNull(bar.volume),
-    }));
+    const bars = rawBars
+      .map((bar) => ({
+        time: toChartTime(bar.timestamp, interval),
+        open: numericOrNull(bar.open),
+        high: numericOrNull(bar.high),
+        low: numericOrNull(bar.low),
+        close: numericOrNull(bar.close),
+        volume: numericOrNull(bar.volume),
+      }))
+      // Number(null) is 0 and would drag the price scale to zero, so OHLC
+      // goes through numericOrNull and incomplete bars drop before setData.
+      .filter((bar) => Number.isFinite(bar.open) && Number.isFinite(bar.high) && Number.isFinite(bar.low) && Number.isFinite(bar.close));
     if (!bars.length) throw new Error("No history available");
     chartElement.replaceChildren();
     renderChart(bars, interval);
@@ -3125,6 +3509,9 @@ function focusableElements(container) {
     '[tabindex]:not([tabindex="-1"])',
   ].join(",");
   return Array.from(container.querySelectorAll(selector)).filter((element) => {
+    // closest() also rejects focusables nested inside [hidden] subtrees,
+    // which computed style alone misses when the ancestor is display:none.
+    if (element.closest("[hidden]")) return false;
     const style = window.getComputedStyle(element);
     return style.display !== "none" && style.visibility !== "hidden";
   });
@@ -3172,10 +3559,22 @@ function changeClass(value) {
   return "change-flat";
 }
 
+// Server-provided strings become CSS class tokens; escapeHtml cannot help in
+// class context, so anything beyond a plain lowercase word falls back safe.
+function classToken(value, fallback = "neutral") {
+  const token = String(value || fallback).toLowerCase();
+  return /^[a-z][a-z0-9-]*$/.test(token) ? token : fallback;
+}
+
 function formatPrice(value, error) {
   if (error || typeof value !== "number" || value === 0) return "--";
   if (Math.abs(value) >= 1000) return value.toLocaleString(undefined, { maximumFractionDigits: 1 });
   if (Math.abs(value) >= 1) return value.toFixed(2);
+  // toPrecision flips to scientific notation for micro prices ("4.200e-7");
+  // expand them to fixed decimals with 4 significant digits instead.
+  if (Math.abs(value) < 1e-4) {
+    return value.toLocaleString(undefined, { maximumSignificantDigits: 4, useGrouping: false });
+  }
   return value.toPrecision(4);
 }
 
@@ -3184,32 +3583,41 @@ function formatBoardPrice(value, error, currency) {
   if (error || typeof value !== "number" || value === 0) return "--";
   // USX = US cents (CBOT/ICE): full precision, bare, like USD.
   if (!currency || currency === "USD" || currency === "USX") return formatPrice(value);
-  return `${currencyPrefix(currency)}${formatCompactPrice(value)}`;
+  // formatCompactPrice is abs-based, so restore the sign for negatives.
+  return `${value < 0 ? "-" : ""}${currencyPrefix(currency)}${formatCompactPrice(value)}`;
 }
 
 function formatCurrencyPrice(value, currency = "USD") {
   if (typeof value !== "number" || value === 0) return "--";
   const prefix = currencyPrefix(currency);
-  if (currency && currency !== "USD") return `${prefix}${formatCompactPrice(value)}`;
+  // formatCompactPrice is abs-based, so restore the sign for negatives.
+  if (currency && currency !== "USD") return `${value < 0 ? "-" : ""}${prefix}${formatCompactPrice(value)}`;
   return `${prefix}${formatPrice(value)}`;
 }
 
 function formatSigned(value) {
   if (typeof value !== "number") return "--";
-  const abs = Math.abs(value);
-  const formatted = abs >= 100 ? abs.toFixed(1) : abs.toFixed(2);
-  return `${value >= 0 ? "+" : "-"}${formatted}`;
+  // Round FIRST, then take the sign from the rounded value: -0.0004 must
+  // read +0.00, not -0.00 (the +0 normalizes -0 away).
+  const digits = Math.abs(value) >= 100 ? 1 : 2;
+  const rounded = Number(value.toFixed(digits)) + 0;
+  return `${rounded >= 0 ? "+" : "-"}${Math.abs(rounded).toFixed(digits)}`;
 }
 
 function formatBoardSignedChange(value, currency) {
   if (typeof value !== "number") return "--";
+  // Zero is flat and unsigned; the non-USD path would otherwise render
+  // "+₩--" because formatCompactPrice(0) falls through to "--".
+  if (value === 0) return "0.00";
   if (!currency || currency === "USD" || currency === "USX") return formatSigned(value);
   return `${value >= 0 ? "+" : "-"}${currencyPrefix(currency)}${formatCompactPrice(Math.abs(value))}`;
 }
 
 function formatSignedPct(value) {
   if (typeof value !== "number") return "--";
-  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
+  // Round FIRST, then take the sign from the rounded value (see formatSigned).
+  const rounded = Number(value.toFixed(2)) + 0;
+  return `${rounded >= 0 ? "+" : ""}${rounded.toFixed(2)}%`;
 }
 
 function formatPlainPct(value) {

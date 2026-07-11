@@ -1,9 +1,9 @@
 [Unit]
-Description=Watch the synced Hermes vault for new reports
+Description=Watch the Hermes vault for new cron reports
 
 [Path]
-PathModified=/opt/sector-tracker/vault
+PathModified=/home/ds/hermes-research
 Unit=sector-tracker-uploader.service
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

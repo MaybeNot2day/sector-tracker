@@ -113,19 +113,23 @@ lists metadata with previews, `GET /api/reports/{id}` returns the full body, and
 `scripts/vault_report_uploader.py` makes the pipeline hands-off: it scans a vault
 directory for files named `YYYY-MM-DD <Title>.md` (the Hermes cron convention), uploads
 new or changed ones, and remembers content hashes in
-`~/.local/state/sector-tracker/vault-uploads.json` so nothing uploads twice. Config lives
-in `~/.config/sector-tracker/uploader.env` (`BOARD_URL`, `EDIT_TOKEN`, `VAULT_DIR`,
-`MAX_AGE_DAYS`). Run `--baseline` once at install to mark existing files as seen, and
-`--dry-run` to preview.
+`~/.local/state/sector-tracker/vault-uploads.json` so nothing uploads twice. Only titles
+on the cron-report allowlist upload — ad-hoc dated research notes in the vault stay off
+the board. Config lives in `~/.config/sector-tracker/uploader.env` (`BOARD_URL`,
+`EDIT_TOKEN`, `VAULT_DIR`, `MAX_AGE_DAYS`, `REPORT_TITLES` — comma-separated cron report
+titles, case-insensitive; defaults to the known cron jobs, `*` disables the filter).
+Run `--baseline` once at install to mark existing files as seen, and `--dry-run` to
+preview.
 
-The production wiring syncs the Obsidian vault to the droplet with Syncthing
-(receive-only folder at `/opt/sector-tracker/vault`; macOS TCC blocks launchd agents
-from reading `~/Desktop`, so the watcher runs server-side instead). Systemd units in
-`deploy/` drive it:
+The production wiring runs on the Hermes box (`hermes-ts`), which already receives the
+Obsidian vault at `/home/ds/hermes-research` via Syncthing (macOS TCC blocks launchd
+agents from reading `~/Desktop`, so the watcher runs there instead). The script is
+installed at `~/.local/bin/vault_report_uploader.py` and driven by the systemd *user*
+units in `deploy/` (lingering is enabled, so they run unattended):
 
 - `sector-tracker-uploader.path` — fires the moment Syncthing writes a report file
 - `sector-tracker-uploader.timer` — 30-minute sweep that catches in-place edits
-- `sector-tracker-uploader.service` — one upload pass as the `board` user
+- `sector-tracker-uploader.service` — one upload pass posting to the droplet board
 
 ## Configuration
 

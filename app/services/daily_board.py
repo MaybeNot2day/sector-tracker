@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from statistics import fmean, median
@@ -9,10 +9,16 @@ from time import monotonic
 from typing import Any
 
 from app import db
-from app.models import AssetConfig, Bar, GroupConfig, Quote
+from app.models import AssetConfig, Bar, GroupConfig, ProviderName, Quote
 from app.services.macro import vix_read
 
 SNAPSHOT_WRITE_INTERVAL_SECONDS = 300.0
+
+@dataclass(frozen=True, slots=True)
+class _PreparedBars:
+    bars: list[Bar]
+    closes: list[float]
+    current: float | None
 
 
 class DailyBoardService:
@@ -31,22 +37,22 @@ class DailyBoardService:
         doing it once per poll instead of twice halves the hot path.
         """
         cached = db.load_bars_by_symbol(self.database_path, "1d")
+        fallback_bars = _fallback_bars_by_symbol(cached)
         assets = _unique_assets(groups)
         quotes = _quotes_by_symbol(grouped_quotes)
-        metrics = {
-            symbol: _asset_metrics(
-                asset,
+        prepared = {
+            symbol: _prepare_bars(
                 quotes.get(symbol),
-                _preferred_bars(asset, cached),
+                cached.get((symbol, asset.source)) or fallback_bars.get(symbol, []),
             )
             for symbol, asset in assets.items()
         }
-        summaries = {
-            symbol: _market_summary(
-                asset,
-                quotes.get(symbol),
-                _preferred_bars(asset, cached),
-            )
+        metrics: dict[str, dict[str, Any]] = {
+            symbol: _asset_metrics_prepared(asset, quotes.get(symbol), prepared[symbol])
+            for symbol, asset in assets.items()
+        }
+        summaries: dict[str, dict[str, object]] = {
+            symbol: _market_summary_prepared(asset, quotes.get(symbol), prepared[symbol])
             for symbol, asset in assets.items()
         }
         themes = _theme_metrics(groups, metrics)
@@ -55,7 +61,7 @@ class DailyBoardService:
         regime = _regime_metrics(themes, universe, benchmarks, quotes.get("^VIX"))
         rotation = _rotation_metrics(themes)
         timestamps = [quote.timestamp for quote in quotes.values()]
-        overview = {
+        overview: dict[str, object] = {
             "as_of": max(timestamps).isoformat() if timestamps else datetime.now(UTC).isoformat(),
             "regime": regime,
             "universe": universe,
@@ -78,7 +84,6 @@ class DailyBoardService:
         now = monotonic()
         if now - self._last_snapshot_write < SNAPSHOT_WRITE_INTERVAL_SECONDS:
             return
-        self._last_snapshot_write = now
         # Key strictly by today's UTC date. as_of is max(quote.timestamp),
         # which during a full provider outage is the date of the last
         # successful fetch — writing under that key would silently overwrite
@@ -91,7 +96,12 @@ class DailyBoardService:
         try:
             db.save_board_snapshot(self.database_path, snapshot_date, _snapshot_payload(overview))
         except Exception:
+            # Swallowed on purpose (a snapshot miss must not break the board),
+            # but the throttle timestamp only advances on success — a failed
+            # save otherwise burned the whole 300s window.
             pass
+        else:
+            self._last_snapshot_write = now
 
     def build(
         self,
@@ -126,17 +136,24 @@ def _quotes_by_symbol(grouped_quotes: dict[str, list[Quote]]) -> dict[str, Quote
     return result
 
 
-def _preferred_bars(
-    asset: AssetConfig,
-    cached: dict[tuple[str, str], list[Bar]],
-) -> list[Bar]:
-    preferred = cached.get((asset.symbol, asset.source))
-    if preferred:
-        return preferred
+def _fallback_bars_by_symbol(
+    cached: dict[tuple[str, ProviderName], list[Bar]],
+) -> dict[str, list[Bar]]:
+    """First non-empty provider series per symbol, preserving query order."""
+    fallback: dict[str, list[Bar]] = {}
     for (symbol, _provider), bars in cached.items():
-        if symbol == asset.symbol and bars:
-            return bars
-    return []
+        if bars:
+            fallback.setdefault(symbol, bars)
+    return fallback
+
+
+def _prepare_bars(quote: Quote | None, bars: list[Bar]) -> _PreparedBars:
+    display_bars = _display_bars(quote, bars)
+    return _PreparedBars(
+        bars=display_bars,
+        closes=[bar.close for bar in display_bars],
+        current=_current_price(quote, display_bars),
+    )
 
 
 def _asset_metrics(
@@ -144,9 +161,17 @@ def _asset_metrics(
     quote: Quote | None,
     bars: list[Bar],
 ) -> dict[str, Any]:
-    bars = _display_bars(quote, bars)
-    current = _current_price(quote, bars)
-    closes = [bar.close for bar in bars]
+    return _asset_metrics_prepared(asset, quote, _prepare_bars(quote, bars))
+
+
+def _asset_metrics_prepared(
+    asset: AssetConfig,
+    quote: Quote | None,
+    prepared: _PreparedBars,
+) -> dict[str, Any]:
+    bars = prepared.bars
+    closes = prepared.closes
+    current = prepared.current
     one_day = _quote_change_pct(quote)
     five_day = _return_from_close(current, closes, 6)
     dma20 = _mean_tail(closes, 20)
@@ -180,9 +205,17 @@ def _market_summary(
     quote: Quote | None,
     bars: list[Bar],
 ) -> dict[str, object]:
-    bars = _display_bars(quote, bars)
-    current = _current_price(quote, bars)
-    closes = [bar.close for bar in bars]
+    return _market_summary_prepared(asset, quote, _prepare_bars(quote, bars))
+
+
+def _market_summary_prepared(
+    asset: AssetConfig,
+    quote: Quote | None,
+    prepared: _PreparedBars,
+) -> dict[str, object]:
+    bars = prepared.bars
+    closes = prepared.closes
+    current = prepared.current
     return {
         "sparkline": _sparkline_values(current, closes),
         "performance": {
@@ -254,7 +287,14 @@ def _relative_volume(quote: Quote | None, bars: list[Bar]) -> float | None:
         return None
     last_bar = bars[-1]
     as_of = quote.timestamp if quote is not None else datetime.now(UTC)
-    last_is_today = last_bar.timestamp.astimezone(UTC).date() == as_of.astimezone(UTC).date()
+    # Same naive-tzinfo hardening as _today_bar_open: cached bars can
+    # come back naive, and .astimezone on a naive datetime guesses local.
+    if as_of.tzinfo is None:
+        as_of = as_of.replace(tzinfo=UTC)
+    bar_time = last_bar.timestamp
+    if bar_time.tzinfo is None:
+        bar_time = bar_time.replace(tzinfo=UTC)
+    last_is_today = bar_time.astimezone(UTC).date() == as_of.astimezone(UTC).date()
     completed = bars[:-1] if last_is_today else bars
     baseline = [bar.volume for bar in completed[-20:] if bar.volume]
     if len(baseline) < 10:
@@ -334,10 +374,12 @@ def _quote_change_pct(quote: Quote | None) -> float | None:
 
 def _sparkline_values(current: float | None, closes: list[float], count: int = 32) -> list[float]:
     values = closes[-count:]
-    if current is not None and current > 0:
-        values = values[-(count - 1) :] if len(values) >= count else values
-        if not values or values[-1] != current:
-            values = [*values, current]
+    if current is not None and current > 0 and (not values or values[-1] != current):
+        # Trim to count-1 only when the append actually happens; trimming
+        # eagerly returned count-1 points when current equalled the close.
+        if len(values) >= count:
+            values = values[-(count - 1) :]
+        values = [*values, current]
     return [round(value, 4) for value in values if value > 0]
 
 
@@ -366,7 +408,7 @@ def _theme_metrics(
     groups: list[GroupConfig],
     asset_metrics: dict[str, dict[str, Any]],
 ) -> list[dict[str, object]]:
-    themes: list[dict[str, object]] = []
+    themes: list[dict[str, Any]] = []
     for group in groups:
         members = [
             asset_metrics[asset.symbol] for asset in group.assets if asset.symbol in asset_metrics
@@ -382,19 +424,18 @@ def _theme_metrics(
         )
         above_50_pct = _percent(sum(above_50), len(above_50))
         score = _theme_score(avg_1d, avg_5d, advance_pct, above_50_pct)
-        themes.append(
-            {
-                "name": group.name,
-                "count": len(group.assets),
-                "score": score,
-                "change_1d": avg_1d,
-                "change_5d": avg_5d,
-                "advance_pct": advance_pct,
-                "above_50dma_pct": above_50_pct,
-                "acceleration": _acceleration(avg_1d, avg_5d),
-                "status": _theme_status(score),
-            }
-        )
+        theme: dict[str, Any] = {
+            "name": group.name,
+            "count": len(group.assets),
+            "score": score,
+            "change_1d": avg_1d,
+            "change_5d": avg_5d,
+            "advance_pct": advance_pct,
+            "above_50dma_pct": above_50_pct,
+            "acceleration": _acceleration(avg_1d, avg_5d),
+            "status": _theme_status(score),
+        }
+        themes.append(theme)
 
     themes.sort(key=lambda item: int(item["score"]), reverse=True)
     for rank, theme in enumerate(themes, start=1):
@@ -657,7 +698,7 @@ def _above(current: float | None, average: float | None) -> bool | None:
 
 
 def _percent_distance(current: float | None, average: float | None) -> float | None:
-    if current is None or average in (None, 0):
+    if current is None or average is None or average == 0:
         return None
     return round((current - average) / average * 100, 4)
 
@@ -667,7 +708,7 @@ def _ratio_distance(
     average: float | None,
     divisor: float | None,
 ) -> float | None:
-    if current is None or average is None or divisor in (None, 0):
+    if current is None or average is None or divisor is None or divisor == 0:
         return None
     return round((current - average) / divisor, 4)
 

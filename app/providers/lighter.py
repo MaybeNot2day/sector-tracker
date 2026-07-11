@@ -4,7 +4,7 @@ import asyncio
 import math
 from datetime import UTC, datetime, timedelta
 from time import monotonic
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -29,8 +29,11 @@ RATE_LIMIT_COOLDOWN_SECONDS = 60.0
 # advance on success so nothing else suppressed the retry.
 FAILURE_COOLDOWN_SECONDS = 30.0
 
-# Lighter caps candles at 500 per call.
+# Lighter caps candles at 500 per call, so wide windows (1m/1d needs 1440,
+# 1h/3mo needs 2160) must page; cap the walk so a misbehaving server can't
+# spin us into the rate limit.
 MAX_CANDLES = 500
+MAX_HISTORY_PAGES = 8
 
 _RESOLUTIONS = {"1m", "5m", "15m", "30m", "1h", "4h", "12h", "1d"}
 
@@ -52,6 +55,7 @@ class LighterProvider(QuoteProvider):
         # tokenlist) must never blackhole the orderBookDetails quote path.
         self._cooldown_until: dict[str, float] = {}
         self._details_lock = asyncio.Lock()
+        self._client: httpx.AsyncClient | None = None
 
     async def get_quotes(self, assets: list[AssetConfig]) -> list[Quote]:
         if not assets:
@@ -109,26 +113,48 @@ class LighterProvider(QuoteProvider):
         if market_id is None:
             return []
         start, end = _range_to_window(range_)
-        params = {
-            "market_id": market_id,
-            "resolution": _normalize_interval(interval),
-            "start_timestamp": int(start.timestamp() * 1000),
-            "end_timestamp": int(end.timestamp() * 1000),
-            "count_back": MAX_CANDLES,
-        }
-        payload = await self._get_json("/candles", params)
-        candles = payload.get("c") if isinstance(payload, dict) else None
-        if not isinstance(candles, list):
-            return []
-        bars: list[Bar] = []
-        for raw in candles:
-            bar = _bar_from_candle(asset, raw, interval)
-            if bar is not None:
-                bars.append(bar)
+        end_ms = int(end.timestamp() * 1000)
+        # One call returns at most MAX_CANDLES, so page backwards: while a
+        # full page's oldest candle is still newer than the window start,
+        # re-request with end_timestamp just before it and merge. A failed
+        # later page (cooldown/error) keeps whatever already arrived.
+        bars_by_ts: dict[datetime, Bar] = {}
+        for _ in range(MAX_HISTORY_PAGES):
+            params = {
+                "market_id": market_id,
+                "resolution": _normalize_interval(interval),
+                "start_timestamp": int(start.timestamp() * 1000),
+                "end_timestamp": end_ms,
+                "count_back": MAX_CANDLES,
+            }
+            payload = await self._get_json("/candles", params)
+            candles = payload.get("c") if isinstance(payload, dict) else None
+            if not isinstance(candles, list):
+                break
+            added = 0
+            page_oldest: datetime | None = None
+            for raw in candles:
+                bar = _bar_from_candle(asset, raw, interval)
+                if bar is None:
+                    continue
+                if page_oldest is None or bar.timestamp < page_oldest:
+                    page_oldest = bar.timestamp
+                if bar.timestamp not in bars_by_ts:
+                    bars_by_ts[bar.timestamp] = bar
+                    added += 1
+            if len(candles) < MAX_CANDLES or page_oldest is None:
+                break  # short/empty page: history exhausted
+            if page_oldest <= start:
+                break  # window covered
+            if added == 0:
+                # Only repeats: the server pinned the page to the window start
+                # (oldest-N semantics), so paging backwards can't find more.
+                break
+            end_ms = int(page_oldest.timestamp() * 1000) - 1
+        bars = sorted(bars_by_ts.values(), key=lambda bar: bar.timestamp)
         if interval in {"1wk", "1mo"}:
-            # Lighter has no weekly/monthly resolution; the daily fetch above
-            # (via _normalize_interval) covers its whole history within the
-            # 500-candle cap, so aggregate locally.
+            # Lighter has no weekly/monthly resolution; aggregate the daily
+            # pages (via _normalize_interval) locally.
             return aggregate_bars(bars, interval)
         return bars
 
@@ -196,7 +222,10 @@ class LighterProvider(QuoteProvider):
                     "day_volume_usd": _number(detail.get("daily_quote_token_volume")),
                 }
             )
-        tape.sort(key=lambda row: row.get("day_volume_usd") or 0.0, reverse=True)
+        tape.sort(
+            key=lambda row: cast(float | None, row.get("day_volume_usd")) or 0.0,
+            reverse=True,
+        )
         return tape
 
     async def _get_details(self) -> dict[str, dict[str, Any]]:
@@ -232,19 +261,28 @@ class LighterProvider(QuoteProvider):
             self._categories_time = monotonic()
         return self._categories
 
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+    def _http_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=15.0)
+        return self._client
+
     async def _get_json(self, path: str, params: dict[str, Any]) -> Any:
         if monotonic() < self._cooldown_until.get(path, 0.0):
             return None
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.get(f"{BASE_URL}{path}", params=params)
-                if response.status_code == 429:
-                    # Standard accounts get 60 req/min per IP; back off this
-                    # endpoint so cached data serves until the window resets.
-                    self._cooldown_until[path] = monotonic() + RATE_LIMIT_COOLDOWN_SECONDS
-                    return None
-                response.raise_for_status()
-                return response.json()
+            response = await self._http_client().get(f"{BASE_URL}{path}", params=params)
+            if response.status_code == 429:
+                # Standard accounts get 60 req/min per IP; back off this
+                # endpoint so cached data serves until the window resets.
+                self._cooldown_until[path] = monotonic() + RATE_LIMIT_COOLDOWN_SECONDS
+                return None
+            response.raise_for_status()
+            return response.json()
         except Exception:
             self._cooldown_until[path] = monotonic() + FAILURE_COOLDOWN_SECONDS
             return None
@@ -396,7 +434,13 @@ def _bar_from_candle(asset: AssetConfig, raw: Any, interval: str) -> Bar | None:
     high = _number(raw.get("h"))
     low = _number(raw.get("l"))
     close = _number(raw.get("c"))
-    if None in (timestamp_ms, open_, high, low, close):
+    if (
+        timestamp_ms is None
+        or open_ is None
+        or high is None
+        or low is None
+        or close is None
+    ):
         return None
     return Bar(
         symbol=asset.symbol,

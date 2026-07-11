@@ -1,5 +1,9 @@
-from datetime import UTC, datetime
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Lock
+
+import pytest
 
 from app import db
 from app.models import Bar, Quote
@@ -93,3 +97,111 @@ def test_save_and_load_bars(tmp_path: Path) -> None:
     loaded = db.load_bars(database, "NVDA", "1d", "yahoo")
 
     assert loaded == [bar]
+
+
+def test_init_db_runs_schema_once_per_path_and_reinitializes_deleted_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "board.sqlite3"
+    original_ensure_column = db._ensure_column
+    probe_count = 0
+    count_lock = Lock()
+
+    def counted_ensure_column(*args: object, **kwargs: object) -> None:
+        nonlocal probe_count
+        with count_lock:
+            probe_count += 1
+        original_ensure_column(*args, **kwargs)
+
+    monkeypatch.setattr(db, "_ensure_column", counted_ensure_column)
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(db.init_db, [database] * 16))
+
+    assert probe_count == 9
+    assert db.load_latest_quote(database, "MISSING") is None
+    assert probe_count == 9
+
+    database.unlink()
+    db.init_db(database)
+
+    assert database.exists()
+    assert probe_count == 18
+
+
+def test_load_latest_quotes_batches_normalizes_and_deduplicates(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "board.sqlite3"
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    quotes = [
+        Quote.from_last_and_prev_close(
+            symbol=symbol,
+            asset_type="equity",
+            provider="yahoo",
+            last=last,
+            previous_close=last - 1,
+            timestamp=timestamp,
+        )
+        for symbol, last in (("AAPL", 200.0), ("XME", 70.0))
+    ]
+    db.save_quotes(database, quotes)
+
+    loaded = db.load_latest_quotes(database, ["xme", "AAPL", "aapl", "missing"])
+
+    assert list(loaded) == ["AAPL", "XME"]
+    assert loaded["AAPL"] == quotes[0]
+    assert loaded["XME"] == quotes[1]
+    assert db.load_latest_quotes(database, []) == {}
+
+
+def test_load_bars_by_symbol_limits_each_partition_in_sql(tmp_path: Path) -> None:
+    database = tmp_path / "board.sqlite3"
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    bars = [
+        Bar(
+            symbol=symbol,
+            provider=provider,
+            interval="1d",
+            timestamp=start + timedelta(days=day),
+            open=float(day),
+            high=float(day + 2),
+            low=float(day),
+            close=float(day + 1),
+            volume=None,
+        )
+        for symbol, provider, count in (
+            ("AAPL", "yahoo", 7),
+            ("AAPL", "stooq", 5),
+            ("BTC", "lighter", 6),
+        )
+        for day in range(count)
+    ]
+    db.save_bars(database, bars)
+    with db._connect(database) as conn:
+        index_columns = [
+            str(row["name"])
+            for row in conn.execute(
+                "PRAGMA index_info(idx_bars_interval_symbol_provider_timestamp)"
+            )
+        ]
+    assert index_columns == ["interval", "symbol", "provider", "timestamp"]
+
+
+    loaded = db.load_bars_by_symbol(database, "1d", limit_per_series=3)
+
+    assert set(loaded) == {
+        ("AAPL", "yahoo"),
+        ("AAPL", "stooq"),
+        ("BTC", "lighter"),
+    }
+    assert {
+        key: [bar.timestamp for bar in series] for key, series in loaded.items()
+    } == {
+        ("AAPL", "yahoo"): [start + timedelta(days=day) for day in (4, 5, 6)],
+        ("AAPL", "stooq"): [start + timedelta(days=day) for day in (2, 3, 4)],
+        ("BTC", "lighter"): [start + timedelta(days=day) for day in (3, 4, 5)],
+    }
+    assert all(len(series) == 3 for series in loaded.values())
+
+    with pytest.raises(ValueError, match="must be positive"):
+        db.load_bars_by_symbol(database, "1d", limit_per_series=0)

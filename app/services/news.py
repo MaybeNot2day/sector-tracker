@@ -19,6 +19,7 @@ MAX_FEED_ITEMS = 100
 # One full t.me preview page (~20 posts) — the floor each channel retains.
 MIN_ITEMS_PER_CHANNEL = 20
 USER_AGENT = "Mozilla/5.0"
+MAX_FETCH_CONCURRENCY = 6
 
 _POST_RE = re.compile(r'data-post="([^"]+)"')
 _TEXT_RE = re.compile(r'class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>', re.S)
@@ -43,6 +44,8 @@ class NewsService:
         self._titles: dict[str, str] = {}
         self._fetched = 0.0
         self._lock = asyncio.Lock()
+        self._client: httpx.AsyncClient | None = None
+        self._fetch_semaphore = asyncio.Semaphore(MAX_FETCH_CONCURRENCY)
 
     async def get_feed(self) -> dict[str, object]:
         await self.refresh()
@@ -104,17 +107,27 @@ class NewsService:
             kept.extend(channel_items[:per_channel])
         self._items = {item["id"]: item for item in kept}
 
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+    def _http_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=FETCH_TIMEOUT, follow_redirects=True)
+        return self._client
+
     async def _fetch_channel(self, channel: str) -> str:
-        try:
-            async with httpx.AsyncClient(timeout=FETCH_TIMEOUT, follow_redirects=True) as client:
-                response = await client.get(
+        async with self._fetch_semaphore:
+            try:
+                response = await self._http_client().get(
                     PREVIEW_URL.format(channel=channel),
                     headers={"User-Agent": USER_AGENT},
                 )
                 response.raise_for_status()
                 return response.text
-        except Exception:
-            return ""
+            except Exception:
+                return ""
 
 
 def parse_channel_page(channel: str, page: str) -> list[dict[str, Any]]:

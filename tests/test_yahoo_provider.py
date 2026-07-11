@@ -1,6 +1,10 @@
+from collections.abc import Iterator
 from datetime import UTC, datetime
 
+import pytest
+
 from app.models import AssetConfig, Bar, Quote
+from app.providers import yahoo as yahoo_module
 from app.providers.yahoo import (
     _bar_to_usd,
     _quote_from_chart_result,
@@ -128,3 +132,89 @@ def test_bar_to_usd_converts_ohlc_and_keeps_volume() -> None:
     assert converted.low == 1580.645161
     assert converted.close == 1651.612903
     assert converted.volume == 5_100_000
+
+
+@pytest.fixture(autouse=True)
+def reset_yahoo_cooldowns() -> Iterator[None]:
+    yahoo_module._rate_limited_until.clear()
+    yahoo_module._failure_until.clear()
+    yield
+    yahoo_module._rate_limited_until.clear()
+    yahoo_module._failure_until.clear()
+
+
+def test_successful_alternate_host_does_not_arm_failure_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_get_json(url: str, params: dict[str, str]) -> dict[str, object]:
+        calls.append(url)
+        if "query1" in url:
+            raise RuntimeError("query1 unavailable")
+        return {"host": "query2"}
+
+    monkeypatch.setattr(yahoo_module, "_get_json", fake_get_json)
+    monkeypatch.setattr(yahoo_module, "sleep", lambda seconds: None)
+
+    payload = yahoo_module._get_json_with_retry(
+        tuple(url.format(symbol="SPY") for url in yahoo_module.YAHOO_CHART_URLS),
+        params={"range": "1d"},
+    )
+
+    assert payload == {"host": "query2"}
+    assert len(calls) == 2
+    assert "chart" not in yahoo_module._failure_until
+
+
+def test_exhausted_failure_arms_family_cooldown_then_retries_after_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = 1_000.0
+    outage = True
+    calls: list[str] = []
+    sleeps: list[float] = []
+
+    def fake_get_json(url: str, params: dict[str, str]) -> dict[str, object]:
+        calls.append(url)
+        if yahoo_module._endpoint_family(url) == "spark":
+            return {"family": "spark"}
+        if outage:
+            raise RuntimeError("chart outage")
+        return {"family": "chart"}
+
+    monkeypatch.setattr(yahoo_module, "monotonic", lambda: clock)
+    monkeypatch.setattr(yahoo_module, "_get_json", fake_get_json)
+    monkeypatch.setattr(yahoo_module, "sleep", sleeps.append)
+    chart_urls = tuple(
+        url.format(symbol="SPY") for url in yahoo_module.YAHOO_CHART_URLS
+    )
+
+    with pytest.raises(RuntimeError, match="chart outage"):
+        yahoo_module._get_json_with_retry(chart_urls, params={"range": "1d"})
+
+    assert calls == list(chart_urls) * 3
+    assert sleeps == [1.5, 3.0]
+    assert yahoo_module._failure_until == {"chart": 1_030.0}
+
+    first_call_count = len(calls)
+    with pytest.raises(
+        yahoo_module.YahooFailureCooldown,
+        match="chart cooling down after request failures",
+    ):
+        yahoo_module._get_json_with_retry(chart_urls, params={"range": "1d"})
+    assert len(calls) == first_call_count
+
+    # Spark is an independent endpoint family and remains callable.
+    assert yahoo_module._get_json_with_retry(
+        yahoo_module.YAHOO_SPARK_URLS,
+        params={"symbols": "SPY"},
+    ) == {"family": "spark"}
+
+    outage = False
+    clock = 1_031.0
+    assert yahoo_module._get_json_with_retry(
+        chart_urls,
+        params={"range": "1d"},
+    ) == {"family": "chart"}
+    assert calls[-1] == chart_urls[0]

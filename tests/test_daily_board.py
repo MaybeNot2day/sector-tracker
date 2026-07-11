@@ -3,7 +3,8 @@ from pathlib import Path
 
 from app import db
 from app.models import AssetConfig, Bar, GroupConfig, Quote
-from app.services.daily_board import DailyBoardService
+from app.services import daily_board
+from app.services.daily_board import DailyBoardService, _sparkline_values
 
 
 def test_daily_board_builds_regime_breadth_and_theme_ranking(tmp_path: Path) -> None:
@@ -105,6 +106,57 @@ def test_market_summaries_convert_cached_foreign_bars_to_display_currency(
     assert summary["performance"]["1D"] == -5.882353  # type: ignore[index]
     assert summary["range_52w"]["current"] == 1600.0  # type: ignore[index]
     assert 1000 < summary["range_52w"]["high"] < 2000  # type: ignore[index]
+
+
+def test_build_board_prepares_each_symbol_once_and_reuses_fallback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database = tmp_path / "board.sqlite3"
+    groups = [
+        GroupConfig(
+            name="MIXED",
+            assets=[
+                AssetConfig(symbol="SPY", type="etf", source="yahoo"),
+                # No Stooq series exists; reuse the first cached provider
+                # without rescanning/converting it for each output builder.
+                AssetConfig(symbol="NVDA", type="equity", source="stooq"),
+            ],
+        )
+    ]
+    db.save_bars(database, _rising_bars("SPY") + _rising_bars("NVDA"))
+    grouped_quotes = {
+        "MIXED": [
+            _quote("SPY", "etf", 126.0, 124.0),
+            _quote("NVDA", "equity", 128.0, 124.0),
+        ]
+    }
+    calls: list[str] = []
+    original = daily_board._display_bars
+
+    def counted(quote: Quote | None, bars: list[Bar]) -> list[Bar]:
+        calls.append(quote.symbol if quote else "")
+        return original(quote, bars)
+
+    monkeypatch.setattr(daily_board, "_display_bars", counted)
+
+    overview, summaries = DailyBoardService(database).build_board(groups, grouped_quotes)
+
+    assert calls == ["SPY", "NVDA"]
+    assert overview["universe"]["history_count"] == 2  # type: ignore[index]
+    assert summaries["NVDA"]["has_history"] is True
+    assert summaries["NVDA"]["performance"]["1W"] is not None  # type: ignore[index]
+
+
+def test_sparkline_keeps_full_count_when_current_equals_last_close() -> None:
+    closes = [float(value) for value in range(1, 41)]
+
+    # Regression: when current == last close nothing is appended, so the
+    # eager pre-trim to count-1 used to leave 31 points instead of 32.
+    assert len(_sparkline_values(40.0, closes)) == 32
+    assert len(_sparkline_values(41.0, closes)) == 32
+    assert _sparkline_values(41.0, closes)[-1] == 41.0
+
 
 
 def _rising_bars(symbol: str, start_price: float = 100.0) -> list[Bar]:

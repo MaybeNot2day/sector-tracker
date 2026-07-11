@@ -240,6 +240,217 @@ def test_crypto_panels_swap_open_column_for_rolling_24h(page: Page, base_url: st
     expect(rows.nth(1)).to_have_attribute("data-symbol", "ETH")
 
 
+def test_crypto_tape_reconciles_in_place_and_delegates_actions(
+    page: Page,
+    base_url: str,
+) -> None:
+    _goto_board(page, base_url)
+    page.locator("#markets-tab").click()
+    page.locator('.category-tabs button[data-category="crypto"]').click()
+
+    panel = page.locator('#crypto-tape .tape-panel[data-basket="L1"]')
+    row = panel.locator(f'.asset-row[data-symbol="{TAPE_SYMBOL}"]')
+    expect(panel).to_be_visible()
+    expect(row).to_be_visible()
+    expect(row.locator(".last-cell")).to_have_text("48.20")
+
+    pager = panel.locator(".tape-pager")
+    expect(pager.locator("span")).to_have_text("1\u201315 of 17")
+    expect(pager.get_by_role("button", name="Previous page")).to_be_disabled()
+    expect(pager.get_by_role("button", name="Next page")).to_be_enabled()
+
+    # Sort clicks are delegated by the persistent tape root and reorder keyed rows.
+    volume_sort = panel.locator('.group-title button[data-sort-key="volume"]')
+    volume_sort.click()
+    expect(volume_sort).to_have_attribute("aria-label", re.compile("ascending"))
+    expect(panel.locator(".asset-row").first).to_have_attribute("data-symbol", "QA00")
+    volume_sort.click()
+    expect(volume_sort).to_have_attribute("aria-label", re.compile("descending"))
+    expect(panel.locator(".asset-row").first).to_have_attribute("data-symbol", "SOL")
+
+    row.focus()
+    page.evaluate(
+        """() => {
+          window.__tapePanelBeforeRefresh = document.querySelector(
+            '#crypto-tape .tape-panel[data-basket="L1"]'
+          );
+          window.__tapeRowBeforeRefresh = document.querySelector(
+            '#crypto-tape .asset-row[data-symbol="ZEC"]'
+          );
+        }"""
+    )
+    page.evaluate("() => fetchQuotes()")
+    expect(row.locator(".last-cell")).to_have_text("49.70")
+    identity = page.evaluate(
+        """() => ({
+          panel: window.__tapePanelBeforeRefresh === document.querySelector(
+            '#crypto-tape .tape-panel[data-basket="L1"]'
+          ),
+          row: window.__tapeRowBeforeRefresh === document.querySelector(
+            '#crypto-tape .asset-row[data-symbol="ZEC"]'
+          ),
+          focused: document.activeElement === window.__tapeRowBeforeRefresh,
+        })"""
+    )
+    assert identity == {"panel": True, "row": True, "focused": True}
+
+    # Pager and row actions continue to work through the one delegated listener.
+    pager.get_by_role("button", name="Next page").click()
+    expect(pager.locator("span")).to_have_text("16\u201317 of 17")
+    expect(pager.get_by_role("button", name="Next page")).to_be_disabled()
+    pager.get_by_role("button", name="Previous page").click()
+    expect(row).to_be_visible()
+    row.click()
+    expect(page.locator("#chart-modal")).to_have_attribute("aria-hidden", "false")
+    expect(page.locator("#chart-title")).to_have_text(TAPE_SYMBOL)
+
+
+def test_market_search_debounces_and_enter_flushes_before_focus(
+    page: Page,
+    base_url: str,
+) -> None:
+    _goto_board(page, base_url)
+    page.locator("#markets-tab").click()
+    page.locator('.category-tabs button[data-category="tradfi"]').click()
+    search = page.locator("#market-search")
+    spy_row = page.locator('#board .asset-row[data-symbol="SPY"]')
+    expect(spy_row).to_be_visible()
+
+    search.fill("does-not-exist")
+    # The input event does not synchronously rebuild the board or URL.
+    expect(spy_row).to_be_visible()
+    assert "q=does-not-exist" not in page.url
+    page.wait_for_timeout(160)
+    expect(spy_row).to_have_count(0)
+    assert "q=does-not-exist" in page.url
+
+    page.locator("#market-filter-clear").click()
+    expect(page.locator('#board .asset-row[data-symbol="SPY"]')).to_be_visible()
+    assert "q=" not in page.url
+
+    search.fill("SPY")
+    search.press("Enter")
+    expect(page.locator('#board .asset-row[data-symbol="SPY"]')).to_be_focused()
+    assert "q=SPY" in page.url
+    # No stale debounce callback may undo the Enter-flushed state.
+    page.wait_for_timeout(160)
+    expect(page.locator('#board .asset-row[data-symbol="SPY"]')).to_be_focused()
+
+
+def test_unchanged_news_keeps_nodes_and_refreshes_age_text(
+    page: Page,
+    base_url: str,
+) -> None:
+    _goto_board(page, base_url)
+    item = page.locator("#news-list .news-item")
+    channel = page.locator("#news-channels .news-channel-chip")
+    age = item.locator("time")
+    expect(item).to_have_count(1)
+    expect(channel).to_have_count(1)
+    expect(age).to_have_attribute("data-news-timestamp", NEWS_PAYLOAD["items"][0]["timestamp"])
+    page.evaluate(
+        """() => {
+          window.__newsItemBeforeRefresh = document.querySelector('#news-list .news-item');
+          window.__newsChannelBeforeRefresh = document.querySelector(
+            '#news-channels .news-channel-chip'
+          );
+          document.querySelector('#news-list time').textContent = 'stale age';
+        }"""
+    )
+
+    page.evaluate("() => fetchNews()")
+    identity = page.evaluate(
+        """() => ({
+          item: window.__newsItemBeforeRefresh === document.querySelector('#news-list .news-item'),
+          channel: window.__newsChannelBeforeRefresh === document.querySelector(
+            '#news-channels .news-channel-chip'
+          ),
+          age: document.querySelector('#news-list time').textContent,
+        })"""
+    )
+    assert identity["item"] is True
+    assert identity["channel"] is True
+    assert identity["age"] != "stale age"
+
+
+def test_news_refresh_keeps_reading_position_when_items_prepend(
+    page: Page,
+    base_url: str,
+) -> None:
+    _goto_board(page, base_url)
+
+    def news_payload(extra: int) -> dict[str, Any]:
+        posts = [
+            {
+                "id": f"qa_channel/{200 - index}",
+                "channel": "qa_channel",
+                "channel_title": "QA Channel",
+                "text": f"Post number {200 - index} with enough text to give every row height.",
+                "timestamp": _iso(),
+                "link": f"https://t.me/qa_channel/{200 - index}",
+            }
+            for index in range(-extra, 24)
+        ]
+        return {"status": "ok", "channels": ["qa_channel"], "items": posts, "updated_at": _iso()}
+
+    state = {"extra": 0}
+    page.route(
+        "**/api/news",
+        lambda route: _fulfill_json(route, news_payload(state["extra"])),
+    )
+    page.locator("#news-toggle").click()
+    page.evaluate("() => fetchNews()")
+    expect(page.locator("#news-list .news-item")).to_have_count(24)
+
+    # Read something below the fold, then let three new posts land.
+    anchored = page.evaluate(
+        """() => {
+          const list = document.querySelector('#news-list');
+          const target = list.querySelectorAll('.news-item')[6];
+          list.scrollTop = target.getBoundingClientRect().top
+            - list.getBoundingClientRect().top + list.scrollTop;
+          const offset = target.getBoundingClientRect().top - list.getBoundingClientRect().top;
+          return { id: target.dataset.newsId, offset };
+        }"""
+    )
+    state["extra"] = 3
+    page.evaluate("() => fetchNews()")
+    expect(page.locator("#news-list .news-item")).to_have_count(27)
+
+    after = page.evaluate(
+        f"""() => {{
+          const list = document.querySelector('#news-list');
+          const item = list.querySelector('[data-news-id="{anchored["id"]}"]');
+          return item.getBoundingClientRect().top - list.getBoundingClientRect().top;
+        }}"""
+    )
+    # The item under the reader's eyes must not move when posts prepend.
+    assert abs(after - anchored["offset"]) <= 2
+
+
+def test_daily_board_rebuild_preserves_page_scroll(page: Page, base_url: str) -> None:
+    _goto_board(page, base_url)
+    expect(page.locator("#daily-view")).to_be_visible()
+
+    result = page.evaluate(
+        """() => {
+          const scroller = document.scrollingElement;
+          scroller.scrollTop = 400;
+          const before = scroller.scrollTop;
+          const marker = document.querySelector('#daily-board').firstElementChild;
+          lastDailyRenderKey = "";
+          renderDailyBoard(latestData.overview, latestCryptoEtfFlows);
+          return {
+            before,
+            after: scroller.scrollTop,
+            rebuilt: document.querySelector('#daily-board').firstElementChild !== marker,
+          };
+        }"""
+    )
+    assert result["rebuilt"] is True
+    assert result["after"] == result["before"]
+
+
 def test_tape_deep_link_restores_crypto_chart_when_tape_row_exists(
     page: Page,
     base_url: str,
@@ -294,6 +505,8 @@ def test_reports_modal_lists_reports_and_renders_escaped_markdown_reader(
     expect(page.locator("#reports-list .reports-date").first).to_contain_text("Jul 9, 2026")
     expect(cards.first).to_contain_text("Hermes Daily Flows")
     expect(cards.first).to_contain_text("Position sizing check")
+    # Back button belongs to the reader; in list view it stays hidden.
+    expect(page.locator("#reports-back")).to_be_hidden()
 
     cards.first.click()
     expect(page.locator("#reports-list")).to_be_hidden()
@@ -309,9 +522,32 @@ def test_reports_modal_lists_reports_and_renders_escaped_markdown_reader(
     # Raw HTML in a report body must be escaped: visible as text, never a live element.
     expect(body).to_contain_text("<script>alert(1)</script>")
     expect(body.locator("script")).to_have_count(0)
+    # Hard-wrapped list items keep their indented continuation inside the same <li>,
+    # never spilling into a paragraph after the list.
+    wrapped_bullet = "Funding across majors normalized under twelve percent."
+    expect(body.locator("li").filter(has_text=wrapped_bullet)).to_have_count(1)
+    expect(body.locator("p").filter(has_text="normalized under twelve percent")).to_have_count(0)
+    wrapped_ordered = "Rotate stale hedges toward liquid perps."
+    expect(body.locator("ol li").filter(has_text=wrapped_ordered)).to_have_count(1)
+    expect(body.locator("p").filter(has_text="toward liquid perps")).to_have_count(0)
+    # Hard-wrapped paragraph lines are soft breaks: one flowing <p>, no forced <br>.
+    flowed = body.locator("p").filter(has_text="two-sided across assets with funding normalizing")
+    expect(flowed).to_have_count(1)
+    expect(flowed.locator("br")).to_have_count(0)
+    # A trailing double space is a Markdown hard break and keeps its <br>.
+    expect(body.locator("p").filter(has_text="Hard break stays").locator("br")).to_have_count(1)
+    # Indented bullets nest as a sublist inside the parent <li>.
+    parent_item = body.locator("ul > li").filter(has_text="Integration tools")
+    expect(parent_item.locator("ul > li")).to_have_count(2)
+    expect(parent_item.locator("ul > li").first).to_have_text("Valetudo firmware")
+    # ~~text~~ renders as <del>, ![[embeds]]/[[Target|Alias]] collapse to plain text.
+    expect(body.locator("del")).to_have_text("stale claim")
+    expect(body).to_contain_text("chart alias and Chart Note")
+    expect(body).not_to_contain_text("[[")
 
     page.locator("#reports-back").click()
     expect(page.locator("#report-reader")).to_be_hidden()
+    expect(page.locator("#reports-back")).to_be_hidden()
     expect(page.locator("#reports-list .report-card")).to_have_count(3)
 
 
@@ -370,12 +606,19 @@ def _visible_market_row_count(page: Page) -> int:
 
 
 def _stub_board_apis(page: Page) -> None:
+    quote_requests = 0
+
     def handle(route: Any) -> None:
+        nonlocal quote_requests
         request = route.request
         parsed = urlparse(request.url)
         path = parsed.path
         if path == "/api/quotes":
-            _fulfill_json(route, BOARD_PAYLOAD)
+            quote_requests += 1
+            payload = json.loads(json.dumps(BOARD_PAYLOAD))
+            if quote_requests >= 2:
+                payload["crypto_tape"][0]["last"] = 49.7
+            _fulfill_json(route, payload)
         elif path == "/api/crypto-etf-flows":
             _fulfill_json(route, CRYPTO_ETF_FLOWS)
         elif path == "/api/snapshots":
@@ -719,6 +962,21 @@ BOARD_PAYLOAD: dict[str, Any] = {
         {"label": "DXY", "value": 98.4, "change_pct": 0.2},
     ],
 }
+BOARD_PAYLOAD["crypto_tape"].extend(
+    [
+        {
+            "symbol": f"QA{index:02d}",
+            "last": 1.0 + index,
+            "change_pct": float(index) / 10,
+            "funding_rate": 0.000001,
+            "open_interest_usd": 100_000 + index,
+            "day_volume_usd": 1_000_000 + index,
+            "basket": "L1",
+        }
+        for index in range(15)
+    ]
+)
+
 
 CRYPTO_ETF_FLOWS: dict[str, Any] = {
     "status": "ok",
@@ -753,7 +1011,21 @@ SNAPSHOTS_PAYLOAD: dict[str, Any] = {
     ]
 }
 
-NEWS_PAYLOAD: dict[str, Any] = {"status": "ok", "channels": [], "items": []}
+NEWS_PAYLOAD: dict[str, Any] = {
+    "status": "ok",
+    "updated_at": _iso(),
+    "channels": ["qa_news"],
+    "items": [
+        {
+            "id": "qa-news-1",
+            "channel": "qa_news",
+            "channel_title": "QA News",
+            "timestamp": _iso(),
+            "link": "https://example.com/qa-news-1",
+            "text": "Deterministic market news fixture.",
+        }
+    ],
+}
 
 REPORTS_LIST_PAYLOAD: dict[str, Any] = {
     "reports": [
@@ -794,9 +1066,27 @@ REPORT_BODY_MARKDOWN = "\n".join(
         "",
         "Position is **oversized** relative to plan.",
         "",
+        "Overnight tape was two-sided across",
+        "assets with funding normalizing.",
+        "",
+        "Hard break stays  ",
+        "on its own line.",
+        "",
         "| Asset | Change |",
         "| --- | --- |",
         "| ZEC | +4.2% |",
+        "",
+        "- Funding across majors",
+        "  normalized under twelve percent.",
+        "- Basis steady",
+        "- Integration tools",
+        "  - Valetudo firmware",
+        "  - node client",
+        "",
+        "1. Rotate stale hedges",
+        "   toward liquid perps.",
+        "",
+        "~~stale claim~~ replaced by ![[chart alias.png|chart alias]] and [[Chart Note]].",
         "",
         "<script>alert(1)</script>",
     ]

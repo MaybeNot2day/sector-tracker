@@ -31,13 +31,15 @@ class FakeHTTP:
     def __init__(self, routes: dict[str, Any]) -> None:
         self.routes = routes
         self.requests: list[tuple[str, dict[str, Any]]] = []
+        self.constructions = 0
+        self.closes = 0
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake = self
 
         class _Client:
             def __init__(self, *args: Any, **kwargs: Any) -> None:
-                pass
+                fake.constructions += 1
 
             async def __aenter__(self) -> "_Client":
                 return self
@@ -45,10 +47,16 @@ class FakeHTTP:
             async def __aexit__(self, *exc: Any) -> bool:
                 return False
 
+            async def aclose(self) -> None:
+                fake.closes += 1
+
             async def get(self, url: str, params: dict[str, Any] | None = None) -> FakeResponse:
                 path = url.removeprefix(lighter_module.BASE_URL)
                 fake.requests.append((path, dict(params or {})))
                 result = fake.routes[path]
+                if callable(result):
+                    # Dynamic routes let pagination tests answer per-request.
+                    result = result(dict(params or {}))
                 return result if isinstance(result, FakeResponse) else FakeResponse(result)
 
         monkeypatch.setattr(lighter_module.httpx, "AsyncClient", _Client)
@@ -216,6 +224,22 @@ async def test_details_cached_within_ttl(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.mark.asyncio
+async def test_http_client_is_reused_and_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeHTTP({"/orderBookDetails": details_payload()})
+    fake.install(monkeypatch)
+    provider = LighterProvider()
+
+    await provider.get_quotes([AAPL_EQUITY])
+    provider._details_time -= DETAILS_TTL_SECONDS
+    await provider.get_quotes([AAPL_EQUITY])
+
+    assert fake.count("/orderBookDetails") == 2
+    assert fake.constructions == 1
+    await provider.aclose()
+    assert fake.closes == 1
+
+
+@pytest.mark.asyncio
 async def test_funding_cache_outlives_details_refresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -313,6 +337,59 @@ async def test_get_history_maps_interval_to_supported_resolution(
     _, params = fake.requests[-1]
     assert params["resolution"] == expected_resolution
 
+
+@pytest.mark.asyncio
+async def test_get_history_pages_backwards_past_the_500_candle_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 1200 one-minute candles ending "now": one call caps at MAX_CANDLES, so
+    # the provider must walk end_timestamp backwards until the short last page.
+    step_ms = 60_000
+    newest_ms = int(datetime.now(UTC).timestamp() * 1000) // step_ms * step_ms
+    history = [newest_ms - i * step_ms for i in range(1200)][::-1]
+
+    def candles(params: dict[str, Any]) -> dict[str, Any]:
+        window = [t for t in history if params["start_timestamp"] <= t <= params["end_timestamp"]]
+        page = window[-lighter_module.MAX_CANDLES :]  # newest-N, served ascending
+        return {"c": [{"t": t, "o": 1.0, "h": 2.0, "l": 0.5, "c": 1.5, "v": 1.0} for t in page]}
+
+    fake = FakeHTTP({"/candles": candles})
+    fake.install(monkeypatch)
+    provider = seeded_provider({"BTC": {"symbol": "BTC", "market_id": 1, "status": "active"}})
+
+    bars = await provider.get_history(BTC_PERP, interval="1m", range_="1d")
+
+    assert fake.count("/candles") == 3  # 500 + 500 + 200
+    assert len(bars) == 1200
+    timestamps = [bar.timestamp for bar in bars]
+    assert timestamps == sorted(timestamps)
+    assert len(set(timestamps)) == 1200  # boundary candles deduplicated
+    assert timestamps[-1] == datetime.fromtimestamp(newest_ms / 1000, tz=UTC)
+
+
+@pytest.mark.asyncio
+async def test_get_history_failed_later_page_keeps_earlier_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    step_ms = 60_000
+    newest_ms = int(datetime.now(UTC).timestamp() * 1000) // step_ms * step_ms
+
+    def candles(params: dict[str, Any]) -> dict[str, Any]:
+        if params["end_timestamp"] < newest_ms:
+            raise RuntimeError("second page 500s")
+        page = [newest_ms - i * step_ms for i in range(lighter_module.MAX_CANDLES)][::-1]
+        return {"c": [{"t": t, "o": 1.0, "h": 2.0, "l": 0.5, "c": 1.5, "v": 1.0} for t in page]}
+
+    fake = FakeHTTP({"/candles": candles})
+    fake.install(monkeypatch)
+    provider = seeded_provider({"BTC": {"symbol": "BTC", "market_id": 1, "status": "active"}})
+
+    bars = await provider.get_history(BTC_PERP, interval="1m", range_="1d")
+
+    # The failed second page must degrade to the data already fetched,
+    # not raise or discard the first full page.
+    assert fake.count("/candles") == 2
+    assert len(bars) == lighter_module.MAX_CANDLES
 
 @pytest.mark.asyncio
 async def test_get_history_unknown_symbol_returns_empty_without_fetch(

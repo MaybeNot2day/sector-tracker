@@ -7,7 +7,8 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
-data/*.sqlite3
+# Runtime database (+ WAL/SHM sidecars); the seed lives in config/.
+data/
 
 .vercel/
 .claude/

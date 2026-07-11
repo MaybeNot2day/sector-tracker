@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import time
+from threading import Lock
 from typing import Any
 
 # yfinance (and its pandas dependency) is imported lazily inside the two
@@ -15,31 +16,67 @@ USD_FX_SYMBOLS = {
 
 
 class AssetProfileService:
-    def __init__(self, *, cache_seconds: int = 3600) -> None:
+    def __init__(
+        self,
+        *,
+        cache_seconds: int = 3600,
+        failure_retry_seconds: int = 120,
+    ) -> None:
         self.cache_seconds = cache_seconds
+        self.failure_retry_seconds = failure_retry_seconds
         self._cache: dict[str, tuple[float, dict[str, object]]] = {}
+        self._failures: dict[str, tuple[float, dict[str, object]]] = {}
+        self._symbol_locks: dict[str, Lock] = {}
+        self._locks_guard = Lock()
 
     def get_profile(self, asset: AssetConfig) -> dict[str, object]:
+        # The route runs this method in a thread pool. A per-symbol lock
+        # collapses concurrent cold misses without serializing other symbols.
+        with self._symbol_lock(asset.symbol):
+            return self._get_profile_locked(asset)
+
+    def _symbol_lock(self, symbol: str) -> Lock:
+        with self._locks_guard:
+            return self._symbol_locks.setdefault(symbol, Lock())
+
+    def _get_profile_locked(self, asset: AssetConfig) -> dict[str, object]:
+        now = time.monotonic()
         cached = self._cache.get(asset.symbol)
-        if cached and time.monotonic() - cached[0] < self.cache_seconds:
+        if cached and now - cached[0] < self.cache_seconds:
             return cached[1]
 
+        failure = self._failures.get(asset.symbol)
+        if (
+            failure
+            and self.failure_retry_seconds > 0
+            and now - failure[0] < self.failure_retry_seconds
+        ):
+            return cached[1] if cached and _is_cacheable_profile(cached[1]) else failure[1]
+
         payload = _base_profile(asset)
-        if asset.source == "yahoo" and asset.type in {"equity", "etf", "index_proxy"}:
-            try:
-                import yfinance as yf
+        if asset.source != "yahoo" or asset.type not in {"equity", "etf", "index_proxy"}:
+            return payload
 
-                info = yf.Ticker(asset.symbol).get_info()
-                if isinstance(info, dict):
-                    payload = _profile_from_yahoo_info(asset, info)
-            except Exception:
-                if cached and _is_cacheable_profile(cached[1]):
-                    return cached[1]
-                payload["status"] = "partial"
+        try:
+            import yfinance as yf  # type: ignore[import-untyped]
 
+            info = yf.Ticker(asset.symbol).get_info()
+            if isinstance(info, dict):
+                payload = _profile_from_yahoo_info(asset, info)
+        except Exception:
+            payload["status"] = "partial"
+
+        now = time.monotonic()
         if _is_cacheable_profile(payload):
-            self._cache[asset.symbol] = (time.monotonic(), payload)
-        return payload
+            self._cache[asset.symbol] = (now, payload)
+            self._failures.pop(asset.symbol, None)
+            return payload
+
+        # Keep a stale good profile through an outage; otherwise retain the
+        # partial payload briefly so repeated requests do not hammer Yahoo.
+        fallback = cached[1] if cached and _is_cacheable_profile(cached[1]) else payload
+        self._failures[asset.symbol] = (now, fallback)
+        return fallback
 
 
 def _base_profile(asset: AssetConfig) -> dict[str, object]:
@@ -155,7 +192,7 @@ def _number(info: dict[str, Any], key: str) -> float | None:
 
 def _usd_money_divisor(info: dict[str, Any]) -> float | None:
     currency = _profile_currency(info)
-    if currency in (None, "USD"):
+    if currency is None or currency == "USD":
         return 1.0
     symbol = USD_FX_SYMBOLS.get(currency)
     if symbol is None:

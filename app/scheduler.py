@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import suppress
 from typing import Any
 
@@ -11,6 +12,8 @@ from app.services.daily_board import crypto_breadth_metrics
 from app.services.macro import MACRO_TAPE_GROUP_NAME, macro_payload, with_macro_group
 from app.services.quotes import grouped_quotes_payload
 
+logger = logging.getLogger(__name__)
+
 
 class ConnectionManager:
     def __init__(self) -> None:
@@ -18,6 +21,10 @@ class ConnectionManager:
 
     async def connect(self, websocket: WebSocket) -> None:
         await websocket.accept()
+
+    def register(self, websocket: WebSocket) -> None:
+        # Kept separate from connect(): the WS handler sends its initial
+        # snapshot first, so a concurrent broadcast can't race frame order.
         self._clients.add(websocket)
 
     def disconnect(self, websocket: WebSocket) -> None:
@@ -41,6 +48,10 @@ class ConnectionManager:
         for websocket, result in zip(clients, results, strict=True):
             if isinstance(result, BaseException):
                 self.disconnect(websocket)
+                # Best-effort close so the dropped socket is torn down
+                # instead of lingering half-open until keepalive timeout.
+                with suppress(Exception):
+                    await websocket.close()
 
 
 async def quote_poll_loop(app_state: Any) -> None:
@@ -59,7 +70,7 @@ async def quote_poll_loop(app_state: Any) -> None:
         except asyncio.CancelledError:
             raise
         except Exception:
-            pass
+            logger.exception("quote poll cycle failed")
         await asyncio.sleep(app_state.settings.quote_poll_seconds)
 
 
@@ -71,7 +82,7 @@ async def history_refresh_loop(app_state: Any) -> None:
         except asyncio.CancelledError:
             raise
         except Exception:
-            pass
+            logger.exception("history refresh cycle failed")
         await asyncio.sleep(app_state.settings.history_refresh_seconds)
 
 
@@ -93,7 +104,7 @@ async def news_poll_loop(app_state: Any) -> None:
         except asyncio.CancelledError:
             raise
         except Exception:
-            pass
+            logger.exception("news poll cycle failed")
         await asyncio.sleep(app_state.settings.news_poll_seconds)
 
 
@@ -118,19 +129,57 @@ async def _refresh_daily_history(app_state: Any) -> None:
 # Memoized on the grouped-quotes snapshot: QuoteService returns the SAME
 # dict object for the whole cache window, so identity is a correct key and
 # the poll loop, HTTP route, and WS handshake share one build per window.
-# Holding the dict itself (not just id()) keeps the key valid across GC.
+# Holding each dict itself (not just id()) keeps identity valid across GC.
 _payload_cache: tuple[Any, dict[str, object]] | None = None
+_payload_tasks: dict[int, tuple[Any, asyncio.Task[dict[str, object]]]] = {}
+_payload_generation = 0
 
 
-async def board_payload_async(app_state: Any, groups: Any, grouped: Any) -> dict[str, object]:
-    global _payload_cache
+async def board_payload_async(
+    app_state: Any, groups: Any, grouped: Any
+) -> dict[str, object]:
+    global _payload_generation
     if _payload_cache is not None and _payload_cache[0] is grouped:
         return _payload_cache[1]
-    # build_board loads the full 1d bars table (~75k rows, 300-550ms):
-    # off the event loop, or every WS ping and HTTP response stalls.
+
+    key = id(grouped)
+    in_flight = _payload_tasks.get(key)
+    if in_flight is not None and in_flight[0] is grouped:
+        task = in_flight[1]
+    else:
+        _payload_generation += 1
+        task = asyncio.create_task(
+            _build_and_cache_payload(
+                app_state, groups, grouped, _payload_generation
+            )
+        )
+        _payload_tasks[key] = (grouped, task)
+        task.add_done_callback(
+            lambda finished: _discard_payload_task(key, grouped, finished)
+        )
+
+    return await asyncio.shield(task)
+
+
+async def _build_and_cache_payload(
+    app_state: Any, groups: Any, grouped: Any, generation: int
+) -> dict[str, object]:
+    global _payload_cache
+    # build_board loads the full 1d bars table: keep that work off the event loop.
     payload = await asyncio.to_thread(_board_payload, app_state, groups, grouped)
-    _payload_cache = (grouped, payload)
+    if generation == _payload_generation:
+        _payload_cache = (grouped, payload)
     return payload
+
+
+def _discard_payload_task(
+    key: int,
+    grouped: Any,
+    task: asyncio.Task[dict[str, object]],
+) -> None:
+    in_flight = _payload_tasks.get(key)
+    if in_flight is not None and in_flight[0] is grouped and in_flight[1] is task:
+        del _payload_tasks[key]
 
 
 def _board_payload(app_state: Any, groups: Any, grouped: Any) -> dict[str, object]:

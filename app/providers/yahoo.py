@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
 from time import monotonic, sleep
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote as url_quote
 from urllib.parse import urlencode
 
@@ -36,6 +36,8 @@ YAHOO_USER_AGENT = "Mozilla/5.0"
 # After a 429, stop hitting Yahoo for this long and serve SQLite-cached
 # data instead; continuing to hammer extends the per-IP ban.
 YAHOO_RATE_LIMIT_COOLDOWN_SECONDS = 60.0
+# Transport, server, and parse failures use a shorter family-local backoff.
+YAHOO_FAILURE_COOLDOWN_SECONDS = 30.0
 YAHOO_USD_FX_SYMBOLS = {
     "KRW": "KRW=X",
 }
@@ -284,7 +286,8 @@ def _bars_with_usd_display(
 
 
 def _asset_listing_currency(asset: AssetConfig) -> str | None:
-    if asset.exchange == "KRX" or asset.symbol.upper().endswith(".KS"):
+    # .KS = KOSPI, .KQ = KOSDAQ — both KRX venues quoting in raw KRW.
+    if asset.exchange == "KRX" or asset.symbol.upper().endswith((".KS", ".KQ")):
         return "KRW"
     return None
 
@@ -329,20 +332,26 @@ def _get_json_with_retry(
     *,
     params: dict[str, str],
 ) -> dict[str, Any]:
+    families = {_endpoint_family(url) for url in urls}
+    for family in families:
+        _raise_if_cooling_down(family)
     error: Exception | None = None
     for attempt in range(3):
         for url in urls:
             try:
                 return _get_json(url, params)
-            except YahooRateLimited as exc:
-                # Retrying a 429 makes the ban longer; bail immediately and
-                # let callers fall back to cached bars.
-                raise exc
+            except (YahooRateLimited, YahooFailureCooldown):
+                # Retrying during either cooldown only adds latency (and a
+                # retried 429 can extend Yahoo's ban).
+                raise
             except Exception as exc:
                 error = exc
                 continue
         if attempt < 2:
             sleep(1.5 * (attempt + 1))
+    failed_at = monotonic()
+    for family in families:
+        _failure_until[family] = failed_at + YAHOO_FAILURE_COOLDOWN_SECONDS
     if error is not None:
         raise error
     raise RuntimeError("request did not run")
@@ -351,9 +360,14 @@ def _get_json_with_retry(
 # Spark (v7) and chart (v8) are throttled independently by Yahoo, so track
 # cooldowns per endpoint family — a banned spark must not block chart calls.
 _rate_limited_until: dict[str, float] = {}
+_failure_until: dict[str, float] = {}
 
 
 class YahooRateLimited(Exception):
+    pass
+
+
+class YahooFailureCooldown(Exception):
     pass
 
 
@@ -361,10 +375,17 @@ def _endpoint_family(url: str) -> str:
     return "spark" if "/spark" in url else "chart"
 
 
+def _raise_if_cooling_down(family: str) -> None:
+    now = monotonic()
+    if now < _rate_limited_until.get(family, 0.0):
+        raise YahooRateLimited(f"{family} cooling down after 429")
+    if now < _failure_until.get(family, 0.0):
+        raise YahooFailureCooldown(f"{family} cooling down after request failures")
+
+
 def _get_json(url: str, params: dict[str, str]) -> dict[str, Any]:
     family = _endpoint_family(url)
-    if monotonic() < _rate_limited_until.get(family, 0.0):
-        raise YahooRateLimited(f"{family} cooling down after 429")
+    _raise_if_cooling_down(family)
     completed = subprocess.run(
         [
             "curl",
@@ -384,7 +405,7 @@ def _get_json(url: str, params: dict[str, str]) -> dict[str, Any]:
             _rate_limited_until[family] = monotonic() + YAHOO_RATE_LIMIT_COOLDOWN_SECONDS
             raise YahooRateLimited(completed.stderr.strip()[:120])
         raise RuntimeError(completed.stderr.strip()[:120] or f"curl exit {completed.returncode}")
-    return json.loads(completed.stdout)
+    return cast(dict[str, Any], json.loads(completed.stdout))
 
 
 def _chunks(items: list[AssetConfig], size: int) -> Iterable[list[AssetConfig]]:

@@ -1,4 +1,12 @@
+import asyncio
+import threading
+import time
+
+import pytest
+
+import app.services.crypto_etf_flows as crypto_etf_flows
 from app.services.crypto_etf_flows import (
+    CryptoEtfFlowService,
     parse_farside_table,
     parse_pipe_table,
     parse_token_table,
@@ -218,3 +226,88 @@ def test_summarize_ignores_all_zero_current_day_placeholder() -> None:
     assert payload["latest_date"] == "2026-06-26"
     assert payload["latest_flow_usd"] == -444_500_000
     assert payload["laggards"][0]["ticker"] == "IBIT"  # type: ignore[index]
+
+
+def test_fetch_assets_sync_is_bounded_concurrent_ordered_and_best_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = CryptoEtfFlowService()
+    lock = threading.Lock()
+    barrier = threading.Barrier(3)
+    active = 0
+    max_active = 0
+    calls: list[str] = []
+    completed: list[str] = []
+    delays = {"BTC": 0.15, "ETH": 0.10, "SOL": 0.05}
+    failure: str | None = None
+
+    def fake_fetch_markdown(url: str) -> str:
+        nonlocal active, max_active
+        symbol = next(
+            symbol
+            for symbol, config in crypto_etf_flows.FARSIDE_ASSETS.items()
+            if config["url"] == url
+        )
+        with lock:
+            calls.append(symbol)
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            barrier.wait(timeout=1)
+            time.sleep(delays[symbol])
+            if symbol == failure:
+                raise RuntimeError(f"{symbol} failed")
+            with lock:
+                completed.append(symbol)
+            return """
+| Date | FUND | Total |
+| --- | --- | --- |
+| 1 Jul 2026 | 1.0 | 1.0 |
+"""
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(crypto_etf_flows, "_fetch_markdown", fake_fetch_markdown)
+
+    started = time.monotonic()
+    assets = service._fetch_assets_sync()
+    elapsed = time.monotonic() - started
+
+    assert max_active == 3
+    assert sorted(calls) == ["BTC", "ETH", "SOL"]
+    assert completed == ["SOL", "ETH", "BTC"]
+    assert [asset["asset"] for asset in assets] == ["BTC", "ETH", "SOL"]
+    assert elapsed < 0.30  # bounded by the slowest 0.15s request, not their 0.30s sum
+
+    calls.clear()
+    completed.clear()
+    barrier = threading.Barrier(3)
+    failure = "ETH"
+    surviving_assets = service._fetch_assets_sync()
+
+    assert sorted(calls) == ["BTC", "ETH", "SOL"]
+    assert [asset["asset"] for asset in surviving_assets] == ["BTC", "SOL"]
+
+
+def test_get_flows_carries_cached_assets_through_partial_fetch() -> None:
+    # Regression: a partial cycle (only BTC survives) used to replace the
+    # full cached payload with status ok / is_stale False, hiding the good
+    # ETH/SOL data for the whole cache TTL.
+    service = CryptoEtfFlowService()
+    service._fetch_assets_sync = lambda: [  # type: ignore[method-assign]
+        {"asset": "BTC", "name": "BTC Spot ETFs"},
+        {"asset": "ETH", "name": "ETH Spot ETFs"},
+        {"asset": "SOL", "name": "SOL Spot ETFs"},
+    ]
+    first = asyncio.run(service.get_flows())
+    assert first["is_stale"] is False
+
+    service._cache_time = -1e9  # expire the TTL so the next call refetches
+    service._fetch_assets_sync = lambda: [  # type: ignore[method-assign]
+        {"asset": "BTC", "name": "BTC Spot ETFs"},
+    ]
+    second = asyncio.run(service.get_flows())
+
+    assert second["is_stale"] is True
+    assert [entry["asset"] for entry in second["assets"]] == ["BTC", "ETH", "SOL"]  # type: ignore[index]
