@@ -544,6 +544,13 @@ def test_reports_modal_lists_reports_and_renders_escaped_markdown_reader(
     expect(body.locator("del")).to_have_text("stale claim")
     expect(body).to_contain_text("chart alias and Chart Note")
     expect(body).not_to_contain_text("[[")
+    # Bare source URLs autolink; the wrapping paren stays outside the anchor.
+    autolink = body.locator('a[href="https://example.com/oil-prices-jump"]')
+    expect(autolink).to_have_text("https://example.com/oil-prices-jump")
+    expect(autolink).to_have_attribute("target", "_blank")
+    expect(body.locator("p").filter(has_text="Sources: Al Jazeera")).to_contain_text(
+        "(https://example.com/oil-prices-jump)"
+    )
 
     page.locator("#reports-back").click()
     expect(page.locator("#report-reader")).to_be_hidden()
@@ -1071,6 +1078,8 @@ REPORT_BODY_MARKDOWN = "\n".join(
         "",
         "Hard break stays  ",
         "on its own line.",
+        "",
+        "Sources: Al Jazeera (https://example.com/oil-prices-jump), desk color.",
         "",
         "| Asset | Change |",
         "| --- | --- |",

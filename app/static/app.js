@@ -1059,6 +1059,21 @@ function mdInline(text) {
     /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
     '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>'
   );
+  // Bare URLs (agents cite sources as "Name (https://...)") become links
+  // too. Split around anchors/code the passes above produced so hrefs and
+  // code spans are never re-linkified. Parens and trailing punctuation stay
+  // outside the link; text is already escaped, so &amp; in queries is safe.
+  out = out
+    .split(/(<a [^>]*>.*?<\/a>|<code>.*?<\/code>)/g)
+    .map((part) =>
+      part.startsWith("<a ") || part.startsWith("<code>")
+        ? part
+        : part.replace(
+            /https?:\/\/[^\s<>()]*[^\s<>().,;:!?'"]/g,
+            (url) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`
+          )
+    )
+    .join("");
   return out;
 }
 
