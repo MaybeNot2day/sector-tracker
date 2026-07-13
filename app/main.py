@@ -428,8 +428,8 @@ async def crypto_etf_flows() -> dict[str, object]:
 async def create_report(request: ReportRequest) -> dict[str, object]:
     """Ingest one agent-written markdown report (e.g. a Hermes cron job).
 
-    Keyed by (slug, date): a re-run of the same job on the same day
-    replaces its report instead of stacking duplicates.
+    Only the newest report per slug is kept: same-day re-runs replace
+    that day's report, and a new day's brief replaces the previous one.
     """
     report_date = request.date or datetime.now(UTC).date().isoformat()
     slug = _report_slug(request.slug or request.title)

@@ -240,7 +240,7 @@ def test_upsert_same_slug_and_date_replaces_body_and_title(
     assert detail["body"] == "new body"
 
 
-def test_same_slug_on_new_date_creates_second_report(
+def test_same_slug_on_new_date_replaces_previous_days_brief(
     configure_app: Callable[[str], None],
 ) -> None:
     configure_app("")
@@ -255,11 +255,37 @@ def test_same_slug_on_new_date_creates_second_report(
         json={"title": "Flows", "body": "tuesday", "slug": "hermes-flows", "date": "2026-07-09"},
     )
 
-    assert second.json()["id"] != first.json()["id"]
+    # Only the newest brief per slug survives; yesterday's is gone entirely.
     reports = client.get("/api/reports").json()["reports"]
-    assert [item["date"] for item in reports] == ["2026-07-09", "2026-07-08"]
-    assert client.get(f"/api/reports/{first.json()['id']}").json()["body"] == "monday"
+    assert [(item["slug"], item["date"]) for item in reports] == [("hermes-flows", "2026-07-09")]
     assert client.get(f"/api/reports/{second.json()['id']}").json()["body"] == "tuesday"
+    assert client.get(f"/api/reports/{first.json()['id']}").status_code == 404
+
+
+def test_stale_older_date_cannot_displace_newer_brief(
+    configure_app: Callable[[str], None],
+) -> None:
+    configure_app("")
+    client = TestClient(app)
+
+    client.post(
+        "/api/reports",
+        json={"title": "Flows", "body": "tuesday", "slug": "hermes-flows", "date": "2026-07-09"},
+    )
+    # A late edit to an older vault file re-uploads with its old date; the
+    # newer brief must win, not the stale re-upload.
+    client.post(
+        "/api/reports",
+        json={
+            "title": "Flows",
+            "body": "monday edit",
+            "slug": "hermes-flows",
+            "date": "2026-07-08",
+        },
+    )
+
+    reports = client.get("/api/reports").json()["reports"]
+    assert [(item["slug"], item["date"]) for item in reports] == [("hermes-flows", "2026-07-09")]
 
 
 # --- GET /api/reports: ordering, item shape, limit, previews ---

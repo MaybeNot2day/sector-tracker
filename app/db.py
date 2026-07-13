@@ -360,7 +360,13 @@ def load_board_snapshots(path: Path, limit: int) -> list[dict[str, object]]:
 
 
 def save_report(path: Path, *, slug: str, report_date: str, title: str, body: str) -> int:
-    """Upsert one agent report keyed by (slug, date) so cron re-runs replace."""
+    """Upsert one agent report; only the NEWEST date per slug survives.
+
+    Same-day cron re-runs replace that day's report; a new day's brief
+    replaces the previous day's entirely. Pruning by MAX(report_date)
+    (not the incoming date) means a late edit to an older vault file can
+    never displace a newer brief. Delete + insert share one transaction.
+    """
     init_db(path)
     with _connect(path) as conn:
         row = conn.execute(
@@ -375,6 +381,14 @@ def save_report(path: Path, *, slug: str, report_date: str, title: str, body: st
             """,
             (slug, report_date, title, body, _to_iso(datetime.now(UTC))),
         ).fetchone()
+        conn.execute(
+            """
+            DELETE FROM reports
+            WHERE slug = ?
+              AND report_date < (SELECT MAX(report_date) FROM reports WHERE slug = ?)
+            """,
+            (slug, slug),
+        )
     return int(row["id"])
 
 
