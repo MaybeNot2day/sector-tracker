@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     crypto_etf_flow_cache_seconds: int = Field(default=900, ge=60)
     # Public Telegram channels for the live news drawer, comma-separated
     # t.me handles. Polled every news_poll_seconds and pushed over the WS.
-    news_telegram_channels: str = "marketfeed,RetardFrens,tradehaven,AGGRNEWSWIRE"
+    news_telegram_channels: str = "marketfeed,RetardFrens,tradehaven,AGGRNEWSWIRE,WalterBloomberg"
     news_poll_seconds: int = Field(default=15, ge=5)
     enable_background_tasks: bool = True
 
