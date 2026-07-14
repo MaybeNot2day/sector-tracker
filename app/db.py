@@ -66,6 +66,19 @@ CREATE TABLE IF NOT EXISTS reports (
     created_at TEXT NOT NULL,
     UNIQUE (slug, report_date)
 );
+
+CREATE TABLE IF NOT EXISTS key_dates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_date TEXT NOT NULL,
+    event_time TEXT,
+    title TEXT NOT NULL,
+    category TEXT NOT NULL,
+    source_slug TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (event_date, title)
+);
+
+CREATE INDEX IF NOT EXISTS idx_key_dates_slug ON key_dates (source_slug);
 """
 _initialized_paths: set[Path] = set()
 _init_lock = Lock()
@@ -434,10 +447,73 @@ def load_report(path: Path, report_id: int) -> dict[str, object] | None:
 
 
 def delete_report(path: Path, report_id: int) -> bool:
+    """Remove one report and the key dates it fed (slug maps to <=1 report)."""
     init_db(path)
     with _connect(path) as conn:
-        cursor = conn.execute("DELETE FROM reports WHERE id = ?", (report_id,))
-        return cursor.rowcount > 0
+        row = conn.execute("SELECT slug FROM reports WHERE id = ?", (report_id,)).fetchone()
+        if row is None:
+            return False
+        conn.execute("DELETE FROM key_dates WHERE source_slug = ?", (str(row["slug"]),))
+        conn.execute("DELETE FROM reports WHERE id = ?", (report_id,))
+        return True
+
+
+def replace_key_dates(
+    path: Path, *, slug: str, events: Sequence[tuple[str, str | None, str, str]]
+) -> int:
+    """Mirror one report's key dates: drop the slug's old rows, upsert the new.
+
+    Events are (date, time, title, category). A (date, title) collision with
+    another slug's row is the same real-world event mentioned by two briefs;
+    the newest mention wins the row instead of duplicating the calendar.
+    Delete + upsert share one transaction, so a re-ingested report that
+    dropped its Key Dates section also clears its stale calendar entries.
+    """
+    init_db(path)
+    now = _to_iso(datetime.now(UTC))
+    with _connect(path) as conn:
+        conn.execute("DELETE FROM key_dates WHERE source_slug = ?", (slug,))
+        conn.executemany(
+            """
+            INSERT INTO key_dates (event_date, event_time, title, category, source_slug, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(event_date, title) DO UPDATE SET
+                event_time = excluded.event_time,
+                category = excluded.category,
+                source_slug = excluded.source_slug,
+                created_at = excluded.created_at
+            """,
+            [(date, time, title, category, slug, now) for date, time, title, category in events],
+        )
+    return len(events)
+
+
+def load_key_dates(path: Path, *, start: str, end: str, limit: int) -> list[dict[str, object]]:
+    """Events with start <= date <= end, soonest first; NULL times sort last
+    within a day (all-day items like unlocks trail timed prints)."""
+    init_db(path)
+    with _connect(path) as conn:
+        rows = conn.execute(
+            """
+            SELECT id, event_date, event_time, title, category, source_slug
+            FROM key_dates
+            WHERE event_date >= ? AND event_date <= ?
+            ORDER BY event_date, event_time IS NULL, event_time, title
+            LIMIT ?
+            """,
+            (start, end, limit),
+        ).fetchall()
+    return [
+        {
+            "id": int(row["id"]),
+            "date": str(row["event_date"]),
+            "time": str(row["event_time"]) if row["event_time"] is not None else None,
+            "title": str(row["title"]),
+            "category": str(row["category"]),
+            "source_slug": str(row["source_slug"]),
+        }
+        for row in rows
+    ]
 
 
 _MD_NOISE = str.maketrans({"#": None, "*": None, "`": None, ">": None, "|": None, "_": None})

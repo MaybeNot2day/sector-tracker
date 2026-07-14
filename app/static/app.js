@@ -55,6 +55,8 @@ const reportReaderElement = document.querySelector("#report-reader");
 
 let latestData = null;
 let latestCryptoEtfFlows = null;
+let latestKeyDates = null;
+let keyDatesRevision = 0;
 let latestSnapshots = null;
 let watchlistConfig = null;
 let activeSymbol = null;
@@ -382,6 +384,7 @@ function init() {
   restoreCachedBoard();
   fetchQuotes();
   fetchCryptoEtfFlows();
+  fetchKeyDates();
   fetchSnapshots();
   setNewsOpen(localStorage.getItem(NEWS_OPEN_KEY) === "1");
   fetchNews();
@@ -400,6 +403,7 @@ function init() {
     if (!document.hidden) {
       fetchCryptoEtfFlows();
       fetchSnapshots();
+      fetchKeyDates();
     }
   }, 300000);
   // WS pushes news instantly; polling is the fallback for serverless hosts.
@@ -424,6 +428,7 @@ function init() {
       }
     }
     fetchCryptoEtfFlows();
+    fetchKeyDates();
   });
   window.addEventListener("pagehide", flushBoardCache);
   newsToggle.addEventListener("click", () => setNewsOpen(!document.body.classList.contains("news-open")));
@@ -445,6 +450,7 @@ function init() {
     fetchQuotes();
     fetchCryptoEtfFlows();
     fetchSnapshots();
+    fetchKeyDates();
   });
   viewButtons.forEach((button) => {
     button.addEventListener("click", () => selectView(button.dataset.view || "daily"));
@@ -1247,6 +1253,23 @@ async function fetchCryptoEtfFlows() {
   }
 }
 
+async function fetchKeyDates() {
+  try {
+    const response = await fetch("/api/key-dates?days=90");
+    if (!response.ok) throw new Error("key_dates_failed");
+    latestKeyDates = await response.json();
+    keyDatesRevision += 1;
+  } catch (error) {
+    // Keep the last good payload: a transient fetch error must not blank
+    // a calendar that already renders events.
+    if (!latestKeyDates || latestKeyDates.error) {
+      latestKeyDates = { key_dates: [], as_of: "", error: "key_dates_failed" };
+      keyDatesRevision += 1;
+    }
+  }
+  if (latestData?.overview) renderDailyBoard(latestData.overview, latestCryptoEtfFlows);
+}
+
 async function fetchSnapshots() {
   try {
     const response = await fetch("/api/snapshots?days=30");
@@ -1334,6 +1357,7 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
     cryptoEtfFlows?.status || "",
     cryptoEtfFlows?.updated_at || "",
     snapshotRevision,
+    keyDatesRevision,
   ].join("|");
   if (renderKey === lastDailyRenderKey) return;
   lastDailyRenderKey = renderKey;
@@ -1450,6 +1474,8 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
       )}
       ${cryptoEtfFlowPanel(cryptoEtfFlows)}
     </section>
+
+    ${keyDatesSection(latestKeyDates)}
 
     <section class="analytics-panel">
       ${panelHeading(
@@ -1738,6 +1764,73 @@ function flowItem(item, tone) {
     <strong>${escapeHtml(item.ticker || "--")}</strong>
     <span class="${tone}">${formatUsdFlow(item.flow_usd)}</span>
   </div>`;
+}
+
+const KEY_DATE_MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+
+function keyDatesSection(payload) {
+  const items = Array.isArray(payload?.key_dates) ? payload.key_dates : [];
+  return `<section class="analytics-panel">
+    ${panelHeading(
+      "Key Dates",
+      keyDatesNote(items),
+      'Upcoming market events fed by agent reports: any "## Key Dates" section in an uploaded brief lands on this calendar. Bullets follow "YYYY-MM-DD [time] \u2014 Title [CATEGORY]", and days count on the US Eastern trading date.'
+    )}
+    ${keyDatesList(items, payload)}
+  </section>`;
+}
+
+function keyDatesNote(items) {
+  if (!items.length) return "Agent-fed calendar";
+  const span =
+    items.length === 1
+      ? keyDateShort(items[0].date)
+      : `${keyDateShort(items[0].date)} \u2013 ${keyDateShort(items[items.length - 1].date)}`;
+  return `${span} \u00b7 ${items.length} event${items.length === 1 ? "" : "s"}`;
+}
+
+function keyDateShort(date) {
+  const [, month, day] = String(date || "").split("-").map(Number);
+  if (!month || !day) return "";
+  return `${KEY_DATE_MONTHS[month - 1]} ${day}`;
+}
+
+function keyDatesList(items, payload) {
+  if (!items.length) {
+    const copy = !payload
+      ? "Loading key dates"
+      : payload.error
+        ? "Key dates unavailable"
+        : 'No key dates yet \u2014 add a "## Key Dates" section to an agent report';
+    return `<div class="empty-state">${copy}</div>`;
+  }
+  const asOf = payload?.as_of || "";
+  return `<div class="key-dates-list">${items.map((item) => keyDateRow(item, asOf)).join("")}</div>`;
+}
+
+function keyDateRow(item, asOf) {
+  const [, month, day] = String(item.date || "").split("-").map(Number);
+  const diff = keyDateDayDiff(item.date, asOf);
+  const relative =
+    diff === 0 ? "today" : diff === 1 ? "tomorrow" : diff > 1 ? `in ${diff} days` : "";
+  const meta = [relative, item.time].filter(Boolean).join(" \u00b7 ");
+  return `<div class="key-date-row${diff === 0 ? " is-today" : ""}">
+    <span class="key-date-chip"><em>${month ? KEY_DATE_MONTHS[month - 1] : "--"}</em><strong>${day || "--"}</strong></span>
+    <div class="key-date-main">
+      <strong>${escapeHtml(item.title)}</strong>
+      ${meta ? `<span>${escapeHtml(meta)}</span>` : ""}
+    </div>
+    <span class="key-date-tag key-tag-${classToken(item.category, "event")}">${escapeHtml(item.category || "EVENT")}</span>
+  </div>`;
+}
+
+function keyDateDayDiff(date, asOf) {
+  // Date-only ISO strings parse as UTC midnight, so the difference is an
+  // exact whole number of days — no DST wobble.
+  const event = Date.parse(date || "");
+  const anchor = Date.parse(asOf || "");
+  if (Number.isNaN(event) || Number.isNaN(anchor)) return NaN;
+  return Math.round((event - anchor) / 86400000);
 }
 
 function hasLatestFlowPrint(asset) {

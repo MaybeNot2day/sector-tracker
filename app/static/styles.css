@@ -1090,6 +1090,116 @@ h1 {
   color: var(--red);
 }
 
+.key-dates-list {
+  max-height: 420px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.key-date-row {
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.key-date-row:last-child {
+  border-bottom: 0;
+}
+
+.key-date-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  font-family: var(--font-mono);
+  line-height: 1.15;
+}
+
+.key-date-chip em {
+  font-style: normal;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: var(--track-label);
+  color: var(--muted);
+}
+
+.key-date-chip strong {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--muted-strong);
+}
+
+.key-date-row.is-today .key-date-chip em,
+.key-date-row.is-today .key-date-chip strong {
+  color: var(--accent);
+}
+
+.key-date-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.key-date-main strong {
+  font-size: 12.5px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.key-date-main span {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.key-date-tag {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 3px;
+  border: 1px solid var(--line-strong);
+  color: var(--muted-strong);
+  background: var(--surface-soft);
+  white-space: nowrap;
+}
+
+.key-tag-macro {
+  color: var(--accent);
+  border-color: rgba(184, 160, 106, 0.35);
+  background: var(--accent-soft);
+}
+
+.key-tag-crypto {
+  color: #5fb3c9;
+  border-color: rgba(95, 179, 201, 0.35);
+  background: #101a1d;
+}
+
+.key-tag-earnings {
+  color: var(--green);
+  border-color: rgba(77, 179, 138, 0.35);
+  background: var(--green-bg);
+}
+
+.key-tag-opex {
+  color: #a58fd4;
+  border-color: rgba(165, 143, 212, 0.35);
+  background: #16121d;
+}
+
+.key-tag-holiday {
+  color: var(--muted);
+}
+
 .rotation-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

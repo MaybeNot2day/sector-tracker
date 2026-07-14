@@ -8,8 +8,9 @@ import secrets
 import shutil
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from fastapi import (
     Depends,
@@ -47,12 +48,16 @@ from app.services.asset_profile import AssetProfileService
 from app.services.crypto_etf_flows import CryptoEtfFlowService
 from app.services.daily_board import DailyBoardService
 from app.services.history import HistoryService, bars_payload, find_asset
+from app.services.key_dates import parse_key_dates
 from app.services.macro import MACRO_TAPE_GROUP_NAME, with_macro_group
 from app.services.news import NewsService
 from app.services.quotes import QuoteService
 
 APP_DIR = Path(__file__).parent
 STATIC_DIR = APP_DIR / "static"
+
+# The dashboard's calendar runs on the US Eastern trading day.
+_EASTERN = ZoneInfo("America/New_York")
 
 logger = logging.getLogger(__name__)
 
@@ -430,20 +435,33 @@ async def create_report(request: ReportRequest) -> dict[str, object]:
 
     Only the newest report per slug is kept: same-day re-runs replace
     that day's report, and a new day's brief replaces the previous one.
+    A ``## Key Dates`` section in the body feeds the calendar; its rows
+    mirror the report, so a re-run without the section clears them.
     """
     report_date = request.date or datetime.now(UTC).date().isoformat()
     slug = _report_slug(request.slug or request.title)
     if not slug:
         raise HTTPException(status_code=422, detail="report_slug_invalid")
-    report_id = await asyncio.to_thread(
-        db.save_report,
-        app.state.settings.database_path,
-        slug=slug,
-        report_date=report_date,
-        title=clean_text(request.title),
-        body=request.body,
-    )
-    return {"id": report_id, "slug": slug, "date": report_date}
+    events = parse_key_dates(request.body)
+
+    def _ingest() -> int:
+        path = app.state.settings.database_path
+        report_id = db.save_report(
+            path,
+            slug=slug,
+            report_date=report_date,
+            title=clean_text(request.title),
+            body=request.body,
+        )
+        db.replace_key_dates(
+            path,
+            slug=slug,
+            events=[(e.date, e.time, e.title, e.category) for e in events],
+        )
+        return report_id
+
+    report_id = await asyncio.to_thread(_ingest)
+    return {"id": report_id, "slug": slug, "date": report_date, "key_dates": len(events)}
 
 
 @app.get("/api/reports")
@@ -466,6 +484,27 @@ async def delete_report(report_id: int) -> dict[str, object]:
     if not removed:
         raise HTTPException(status_code=404, detail="report_not_found")
     return {"status": "deleted"}
+
+
+@app.get("/api/key-dates")
+async def key_dates(
+    days: int = Query(default=90, ge=1, le=365),
+    limit: int = Query(default=200, ge=1, le=500),
+) -> dict[str, object]:
+    """Upcoming agent-fed calendar events, soonest first.
+
+    "Today" is the US Eastern trading date — the panel renders an ET clock,
+    and an evening UTC rollover must not drop the current session's events.
+    """
+    today = datetime.now(_EASTERN).date()
+    items = await asyncio.to_thread(
+        db.load_key_dates,
+        app.state.settings.database_path,
+        start=today.isoformat(),
+        end=(today + timedelta(days=days)).isoformat(),
+        limit=limit,
+    )
+    return {"key_dates": items, "as_of": today.isoformat()}
 
 
 def _report_slug(value: str) -> str:

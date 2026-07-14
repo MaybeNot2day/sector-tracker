@@ -108,6 +108,28 @@ PY
 lists metadata with previews, `GET /api/reports/{id}` returns the full body, and
 `DELETE /api/reports/{id}` (token-gated) removes one.
 
+### Key Dates
+
+A `## Key Dates` section in any report body feeds the calendar panel on the Daily view
+(styled after terminal key-date rails), one bullet per event:
+
+```markdown
+## Key Dates
+
+- 2026-07-15 08:30 ET — PPI — Producer Price Index (June) [MACRO]
+- 2026-07-17 — US monthly options expiration (opex) [OPEX]
+- 2026-07-22 AMC — TSLA earnings [EARNINGS]
+- 2026-07-16 — ARB unlock — 92.6M ARB (1.4% of circ supply) [CRYPTO]
+```
+
+Grammar: ISO date, optional time (`HH:MM` plus timezone word, or `AMC`/`BMO`), a dash or
+colon separator, the title, and an optional trailing `[CATEGORY]` tag (defaults to
+`EVENT`; `MACRO`, `CRYPTO`, `EARNINGS`, `OPEX`, and `HOLIDAY` get dedicated colors).
+Malformed bullets are skipped, never fatal. The stored rows mirror their source report:
+a re-run replaces that slug's events wholesale, deleting the report clears them, and
+two briefs naming the same `(date, title)` share one calendar row. `GET /api/key-dates`
+serves upcoming events from the current US-Eastern day forward (`days`, default 90).
+
 ### Automatic vault uploads
 
 `scripts/vault_report_uploader.py` makes the pipeline hands-off: it scans a vault
