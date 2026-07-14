@@ -1,12 +1,15 @@
 """Key dates: parse from agent reports, mirror per slug, serve upcoming.
 
-Contract: a ``## Key Dates`` section in a report body feeds the calendar.
-Bullets follow ``- YYYY-MM-DD [time] — Title [CATEGORY]``; prose and
-malformed bullets are skipped, never rejected. POST /api/reports replaces
-the slug's previous key dates wholesale (a re-run without the section
-clears them), DELETE /api/reports/{id} drops the slug's rows, and
-GET /api/key-dates returns events from the US-Eastern today forward,
-soonest first, with NULL times sorting after timed prints within a day.
+Contract: any section whose heading mentions "calendar" or "key dates"
+feeds the board. Hermes-style markdown tables (when-cell, event-cell)
+resolve dates against the report date — subheadings pin dates, weekday
+and month-day tokens roll forward — and a timezone in the section heading
+suffixes bare times. Explicit bullets follow ``- YYYY-MM-DD [time] —
+Title [CATEGORY]``. Prose and malformed rows are skipped, never rejected.
+POST /api/reports replaces the slug's previous key dates wholesale (a
+re-run without a calendar clears them), DELETE /api/reports/{id} drops
+the slug's rows, and GET /api/key-dates returns events from the
+US-Eastern today forward, soonest first, NULL times after timed prints.
 
 Like test_reports, the app lifespan never runs: settings are stubbed on
 app.state with a tmp database path and TestClient is not entered.
@@ -140,6 +143,118 @@ def test_duplicate_date_title_pairs_collapse_and_cap_applies() -> None:
     assert len(events) == MAX_EVENTS
     # First mention wins the duplicate; its category survives.
     assert events[0] == KeyDate("2026-07-15", None, "Same event", "MACRO")
+
+
+# --- parser: Hermes economic-calendar tables ---
+
+
+MACRO_BRIEF = """\
+## Material Stories — Past 18 Hours
+
+| Feed | Items |
+|---|---|
+| BloombergMarkets | 30 |
+
+## Economic Calendar (CEST)
+
+### Tuesday, July 14, 2026
+
+| Time (CEST) | Event | Forecast | Implication if Above/Below |
+|---|---|---|---|
+| **09:30** | UK S&P Global Composite PMI Flash (July) | 49.3 | Below 50 = contraction. |
+| **14:30** | **US June CPI (M-o-M)** | **-0.1%** | Hot print = risk-off. |
+| **Monday Jul 13** | — | No high-impact releases scheduled | — |
+
+### Wednesday, July 15, 2026
+
+| Time (CEST) | Event | Forecast | Implication |
+|---|---|---|---|
+| **16:00** | Fed Chair Warsh testimony, Senate Banking | — | Second chance to reprice July. |
+
+## Key Narrative
+
+| Time (CEST) | Event |
+|---|---|
+| 09:00 | Table outside the calendar section must not feed the board |
+"""
+
+
+def test_hermes_calendar_table_pins_dates_from_subheadings() -> None:
+    events = parse_key_dates(MACRO_BRIEF, default_date="2026-07-14")
+    assert events == [
+        KeyDate("2026-07-14", "09:30 CEST", "UK S&P Global Composite PMI Flash (July)", "MACRO"),
+        KeyDate("2026-07-14", "14:30 CEST", "US June CPI (M-o-M)", "MACRO"),
+        KeyDate("2026-07-15", "16:00 CEST", "Fed Chair Warsh testimony, Senate Banking", "MACRO"),
+    ]
+    # Bold markers stripped, header/separator/placeholder rows skipped, and
+    # the Key Narrative table (same-level heading closed the section) ignored.
+
+
+ASIA_CLOSE = """\
+### Today's Calendar — CET
+
+_Source note: times converted from UTC._
+
+| CET Time | Event | Region | Implication |
+|---:|---|---|---|
+| 14:30 | June CPI / Core CPI | US | Above consensus = risk-off. |
+| Tue, pre/open | Major bank earnings: JPM, BAC, C | US | Credit quality tone. |
+| 11:00 Wed | Euro Area industrial production | Euro Area | Weak = ECB caution. |
+| Wed Asia session, exact time not verified | China Q2 GDP / activity data | China | — |
+| Thu Jul 16 14:30 | US June Retail Sales | US | Consumer read. |
+
+### Key Narrative
+
+Prose follows.
+"""
+
+
+def test_asia_close_weekday_and_month_day_tokens_resolve_forward() -> None:
+    # Report date 2026-07-14 is a Tuesday.
+    events = parse_key_dates(ASIA_CLOSE, default_date="2026-07-14")
+    assert events == [
+        KeyDate("2026-07-14", "14:30 CET", "June CPI / Core CPI", "MACRO"),
+        KeyDate("2026-07-14", None, "Major bank earnings: JPM, BAC, C", "EARNINGS"),
+        KeyDate("2026-07-15", "11:00 CET", "Euro Area industrial production", "MACRO"),
+        KeyDate("2026-07-15", None, "China Q2 GDP / activity data", "MACRO"),
+        KeyDate("2026-07-16", "14:30 CET", "US June Retail Sales", "MACRO"),
+    ]
+    # "Tue" on the report's own weekday = today; "exact time not verified"
+    # containing the word "time" must not read as a table header; the
+    # month-day token wins over its (possibly wrong) weekday prefix.
+
+
+def test_yearless_month_day_rolls_into_next_year() -> None:
+    body = "## Economic Calendar\n\n| When | Event |\n|---|---|\n| Jan 5 09:00 | FOMC minutes |\n"
+    events = parse_key_dates(body, default_date="2026-12-30")
+    assert events == [KeyDate("2027-01-05", "09:00", "FOMC minutes", "MACRO")]
+
+
+def test_table_rows_without_anchor_need_explicit_dates() -> None:
+    body = (
+        "## Economic Calendar\n\n"
+        "| When | Event |\n|---|---|\n"
+        "| 14:30 Wed | Dropped without an anchor |\n"
+        "| 2026-07-15 14:30 | Kept via explicit ISO date |\n"
+    )
+    events = parse_key_dates(body)
+    assert events == [KeyDate("2026-07-15", "14:30", "Kept via explicit ISO date", "MACRO")]
+
+
+def test_untagged_titles_infer_category() -> None:
+    body = (
+        "## Key Dates\n"
+        "- 2026-07-22 AMC — TSLA earnings\n"
+        "- 2026-07-17 — US monthly options expiration (opex)\n"
+        "- 2026-07-20 — JPX closed — Marine Day\n"
+        "- 2026-07-15 — STRK unlock — 226.4M STRK\n"
+    )
+    assert [event.category for event in parse_key_dates(body)] == [
+        "EARNINGS",
+        "OPEX",
+        "HOLIDAY",
+        "CRYPTO",
+    ]
 
 
 # --- DB: replace-per-slug mirrors the newest report ---

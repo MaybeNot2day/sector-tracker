@@ -110,25 +110,35 @@ lists metadata with previews, `GET /api/reports/{id}` returns the full body, and
 
 ### Key Dates
 
-A `## Key Dates` section in any report body feeds the calendar panel on the Daily view
-(styled after terminal key-date rails), one bullet per event:
+Any section whose heading mentions **calendar** or **key dates** feeds the calendar
+panel on the Daily view (styled after terminal key-date rails). Hermes briefs need no
+changes: their `## Economic Calendar (CEST)` / `### Today's Calendar — CET` markdown
+tables are parsed as-is — the first column is the when-cell, the second the event.
+Dates resolve against the report date: a `### Tuesday, July 14, 2026` subheading pins
+the rows below it, weekday tokens (`11:00 Wed`) roll forward to the next occurrence,
+month-day tokens (`Thu Jul 16 14:30`) are explicit, and bare times mean the report's
+own day. A timezone in the section heading is appended to bare times, so the panel
+shows exactly the zone the agent wrote.
+
+Other agents can feed the panel with explicit bullets, one per event:
 
 ```markdown
 ## Key Dates
 
 - 2026-07-15 08:30 ET — PPI — Producer Price Index (June) [MACRO]
-- 2026-07-17 — US monthly options expiration (opex) [OPEX]
 - 2026-07-22 AMC — TSLA earnings [EARNINGS]
 - 2026-07-16 — ARB unlock — 92.6M ARB (1.4% of circ supply) [CRYPTO]
 ```
 
 Grammar: ISO date, optional time (`HH:MM` plus timezone word, or `AMC`/`BMO`), a dash or
-colon separator, the title, and an optional trailing `[CATEGORY]` tag (defaults to
-`EVENT`; `MACRO`, `CRYPTO`, `EARNINGS`, `OPEX`, and `HOLIDAY` get dedicated colors).
-Malformed bullets are skipped, never fatal. The stored rows mirror their source report:
-a re-run replaces that slug's events wholesale, deleting the report clears them, and
-two briefs naming the same `(date, title)` share one calendar row. `GET /api/key-dates`
-serves upcoming events from the current US-Eastern day forward (`days`, default 90).
+colon separator, the title, and an optional trailing `[CATEGORY]` tag. Untagged titles
+infer a category from keywords (earnings/opex/holiday/unlock); tables default to `MACRO`,
+bullets to `EVENT`. `MACRO`, `CRYPTO`, `EARNINGS`, `OPEX`, and `HOLIDAY` get dedicated
+colors. Malformed rows are skipped, never fatal. The stored rows mirror their source
+report: a re-run replaces that slug's events wholesale, deleting the report clears them,
+and two briefs naming the same `(date, title)` share one calendar row.
+`GET /api/key-dates` serves upcoming events from the current US-Eastern day forward
+(`days`, default 90).
 
 ### Automatic vault uploads
 

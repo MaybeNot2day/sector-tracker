@@ -435,14 +435,15 @@ async def create_report(request: ReportRequest) -> dict[str, object]:
 
     Only the newest report per slug is kept: same-day re-runs replace
     that day's report, and a new day's brief replaces the previous one.
-    A ``## Key Dates`` section in the body feeds the calendar; its rows
-    mirror the report, so a re-run without the section clears them.
+    Any "Economic Calendar"/"Key Dates" section in the body feeds the
+    key-dates panel; its rows mirror the report, so a re-run without
+    the section clears them.
     """
     report_date = request.date or datetime.now(UTC).date().isoformat()
     slug = _report_slug(request.slug or request.title)
     if not slug:
         raise HTTPException(status_code=422, detail="report_slug_invalid")
-    events = parse_key_dates(request.body)
+    events = parse_key_dates(request.body, default_date=report_date)
 
     def _ingest() -> int:
         path = app.state.settings.database_path

@@ -1774,7 +1774,7 @@ function keyDatesSection(payload) {
     ${panelHeading(
       "Key Dates",
       keyDatesNote(items),
-      'Upcoming market events fed by agent reports: any "## Key Dates" section in an uploaded brief lands on this calendar. Bullets follow "YYYY-MM-DD [time] \u2014 Title [CATEGORY]", and days count on the US Eastern trading date.'
+      'Upcoming market events fed by agent reports: economic-calendar tables and "Key Dates" bullets in uploaded briefs land here automatically. Times show the timezone the agent wrote; days count on the US Eastern trading date.'
     )}
     ${keyDatesList(items, payload)}
   </section>`;
