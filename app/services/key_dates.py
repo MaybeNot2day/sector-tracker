@@ -64,6 +64,8 @@ _EVENT = re.compile(
 )
 _ISO_DATE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 _TIME = re.compile(r"\b(\d{1,2}:\d{2})\b")
+# Session tokens legal in when-cells/bullets in place of a clock time.
+_SESSION = re.compile(r"\b(?:AMC|BMO)\b")
 _YEAR = re.compile(r"\b(20\d{2})\b")
 _MONTH_DAY = re.compile(
     r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b",
@@ -227,7 +229,11 @@ def _parse_table_row(line: str, current: date | None, zone: str | None) -> KeyDa
     time_match = _TIME.search(when)
     time_text: str | None = None
     if time_match is not None:
-        time_text = f"{time_match.group(1)} {zone}" if zone else time_match.group(1)
+        # The cell's own zone wins over the heading zone: "14:30 ET" under a
+        # CEST-labelled calendar is an ET print, not a CEST one.
+        cell_zone = _ZONE.search(when)
+        time_zone = cell_zone.group(1) if cell_zone else zone
+        time_text = f"{time_match.group(1)} {time_zone}" if time_zone else time_match.group(1)
     return KeyDate(
         date=event_date.isoformat(),
         time=time_text[:_MAX_TIME] if time_text else None,
@@ -241,7 +247,10 @@ def _cell_date(text: str, current: date | None) -> date | None:
 
     Precedence: ISO date, then month-day (Hermes writes "Wed Jul 16" with
     the weekday occasionally wrong — the explicit date wins), then weekday
-    rolled forward from the anchor, then the anchor itself.
+    rolled forward from the anchor.
+    A bare time or session token (AMC/BMO) means the anchor day itself;
+    cells with no date and no time-ish token (importance columns like
+    "High", "TBD", stray header rows) resolve to nothing.
     """
     iso = _ISO_DATE.search(text)
     if iso is not None:
@@ -267,7 +276,9 @@ def _cell_date(text: str, current: date | None) -> date | None:
             return None
         target = _WEEKDAY_NUMBERS[weekday.group(1).lower()[:3]]
         return current + timedelta(days=(target - current.weekday()) % 7)
-    return current
+    if _TIME.search(text) or _SESSION.search(text):
+        return current
+    return None
 
 
 def _heading_date(text: str, anchor: date | None) -> date | None:

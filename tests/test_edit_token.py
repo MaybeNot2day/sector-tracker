@@ -77,6 +77,9 @@ def test_require_edit_token_allows(
         pytest.param(TOKEN[:-1], id="prefix-of-token"),
         pytest.param(TOKEN + "x", id="token-plus-suffix"),
         pytest.param(TOKEN.upper(), id="case-differs"),
+        # Headers decode as latin-1; str compare_digest would raise TypeError
+        # on non-ASCII, turning a garbage header into an unauthenticated 500.
+        pytest.param("ÿ" * len(TOKEN), id="non-ascii-header"),
     ],
 )
 def test_require_edit_token_rejects_with_401(
@@ -167,5 +170,29 @@ def test_create_asset_rejects_symbol_containing_slash(
     client = TestClient(app)
 
     response = client.post("/api/groups/TEST/assets", json={"symbol": "BRK/A"})
+
+    assert response.status_code == 422
+
+
+def test_create_asset_rejects_blank_symbol(
+    configure_edit_token: Callable[[str], None],
+) -> None:
+    # " " passes min_length but collapses to "" — it would persist as an
+    # empty-symbol asset unreachable by the DELETE path param.
+    configure_edit_token("")
+    client = TestClient(app)
+
+    response = client.post("/api/groups/TEST/assets", json={"symbol": "   "})
+
+    assert response.status_code == 422
+
+
+def test_create_group_rejects_blank_name(
+    configure_edit_token: Callable[[str], None],
+) -> None:
+    configure_edit_token("")
+    client = TestClient(app)
+
+    response = client.post("/api/groups", json={"name": "   "})
 
     assert response.status_code == 422

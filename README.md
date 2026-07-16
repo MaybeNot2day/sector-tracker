@@ -34,7 +34,7 @@ score deltas, and `/api/snapshots?days=30` serves the raw history.
 
 Watchlists live in YAML and can also be edited in the app. Quotes and OHLC bars are cached in
 SQLite, and market data providers are isolated behind a common interface so Yahoo, Lighter,
-Stooq, Finnhub, and Farside can be swapped or extended.
+Stooq, and Farside can be swapped or extended.
 
 ## Quick Start
 
@@ -140,6 +140,15 @@ and two briefs naming the same `(date, title)` share one calendar row.
 `GET /api/key-dates` serves upcoming events from the current US-Eastern day forward
 (`days`, default 90).
 
+Macro events are enriched at serve time from TradingView's public economic calendar:
+each matched item gains a `release` object with consensus, previous, actual, surprise,
+importance, and an indicator description, refreshed every ~20s around scheduled release
+times so actuals land within about a minute (pushed over the WS as `key_dates` frames).
+Matching is fuzzy-title within ±1 day of the stored date; unmatched events keep
+`release: null`. Nothing is persisted, and a calendar outage degrades to the plain
+payload. `ECON_CALENDAR_COUNTRIES` filters the source feed and
+`ECON_CALENDAR_CACHE_SECONDS` sets the idle cache TTL.
+
 ### Automatic vault uploads
 
 `scripts/vault_report_uploader.py` makes the pipeline hands-off: it scans a vault
@@ -177,7 +186,6 @@ The board supports:
 Environment variables:
 
 ```bash
-FINNHUB_API_KEY=
 EDIT_TOKEN=                # when set, watchlist edits require this token
 DATABASE_PATH=./data/market_board.sqlite3
 DATABASE_SEED_PATH=./config/market_board_seed.sqlite3
@@ -186,6 +194,8 @@ WATCHLIST_SEED_PATH=./config/watchlists.yaml
 QUOTE_POLL_SECONDS=10
 HISTORY_REFRESH_SECONDS=3600
 CRYPTO_ETF_FLOW_CACHE_SECONDS=900
+ECON_CALENDAR_CACHE_SECONDS=300         # key-dates enrichment cache; auto-drops to 20s around releases
+ECON_CALENDAR_COUNTRIES=US,EU,DE,GB,JP,CN
 NEWS_TELEGRAM_CHANNELS=marketfeed,RetardFrens,tradehaven,AGGRNEWSWIRE,WalterBloomberg   # public t.me handles; each gets a mute chip in the drawer
 NEWS_POLL_SECONDS=15
 ```

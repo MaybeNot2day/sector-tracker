@@ -25,9 +25,9 @@ class CloseProbe:
 
     async def aclose(self) -> None:
         # Network resources must not close until every background user stopped.
-        assert self.tracker.stopped_tasks == 3
+        assert self.tracker.stopped_tasks == 4
         self.tracker.started.append(self.name)
-        if len(self.tracker.started) == 4:
+        if len(self.tracker.started) == 5:
             self.tracker.all_started.set()
         await self.tracker.all_started.wait()
         if self.fail:
@@ -46,15 +46,17 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
         "lighter": CloseProbe("lighter", tracker, fail=True),
         "stooq": CloseProbe("stooq", tracker),
         "news": CloseProbe("news", tracker),
+        "econ": CloseProbe("econ", tracker),
     }
     settings = SimpleNamespace(
         watchlist_path=tmp_path / "watchlists.yaml",
         watchlist_seed_path=tmp_path / "seed.yaml",
         database_path=tmp_path / "board.db",
         database_seed_path=tmp_path / "seed.db",
-        finnhub_api_key="",
         quote_poll_seconds=15,
         crypto_etf_flow_cache_seconds=300,
+        econ_calendar_cache_seconds=300,
+        econ_calendar_countries="US,EU",
         news_channels=[],
         news_poll_seconds=15,
         enable_background_tasks=True,
@@ -87,6 +89,8 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
     monkeypatch.setattr(main_module, "quote_poll_loop", idle_loop)
     monkeypatch.setattr(main_module, "history_refresh_loop", idle_loop)
     monkeypatch.setattr(main_module, "news_poll_loop", idle_loop)
+    monkeypatch.setattr(main_module, "econ_calendar_loop", idle_loop)
+    monkeypatch.setattr(main_module, "EconCalendarService", lambda *args, **kwargs: probes["econ"])
     monkeypatch.setattr(main_module, "stop_task", fake_stop_task)
     test_app = SimpleNamespace(state=SimpleNamespace())
 
@@ -96,7 +100,7 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
 
     await asyncio.wait_for(run_lifespan(), timeout=1.0)
 
-    assert tracker.stopped_tasks == 3
-    assert set(tracker.started) == {"yahoo", "lighter", "stooq", "news"}
+    assert tracker.stopped_tasks == 4
+    assert set(tracker.started) == {"yahoo", "lighter", "stooq", "news", "econ"}
     # Lighter's close failure is isolated; every other resource still closes.
-    assert set(tracker.completed) == {"yahoo", "stooq", "news"}
+    assert set(tracker.completed) == {"yahoo", "stooq", "news", "econ"}

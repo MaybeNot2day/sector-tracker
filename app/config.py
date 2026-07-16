@@ -14,7 +14,6 @@ from app.models import AssetConfig, AssetType, GroupConfig, ProviderName
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    finnhub_api_key: str = ""
     # When set, watchlist create/delete endpoints require the X-Edit-Token
     # header; leave empty for open local development.
     edit_token: str = ""
@@ -27,6 +26,11 @@ class Settings(BaseSettings):
     quote_poll_seconds: int = Field(default=10, ge=5)
     history_refresh_seconds: int = Field(default=3600, ge=300)
     crypto_etf_flow_cache_seconds: int = Field(default=900, ge=60)
+    # TradingView economic-calendar enrichment for the Key Dates rail:
+    # base cache TTL (drops to ~20s around scheduled releases) and the
+    # comma-separated country filter sent to the calendar endpoint.
+    econ_calendar_cache_seconds: int = Field(default=300, ge=30)
+    econ_calendar_countries: str = "US,EU,DE,GB,JP,CN"
     # Public Telegram channels for the live news drawer, comma-separated
     # t.me handles. Polled every news_poll_seconds and pushed over the WS.
     news_telegram_channels: str = "marketfeed,RetardFrens,tradehaven,AGGRNEWSWIRE,WalterBloomberg"

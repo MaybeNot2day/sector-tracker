@@ -197,6 +197,24 @@ async def test_refresh_within_ttl_skips_http_and_returns_zero(
 
 
 @pytest.mark.asyncio
+async def test_first_refresh_fetches_even_with_near_zero_uptime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Fresh microVMs boot with monotonic() near zero; the first refresh
+    # must not read that as a live cache window and serve an empty feed.
+    fake = FakeHTTP({CHANNEL: page(post_block(f"{CHANNEL}/1", "P1", "2026-07-07T08:00:00+00:00"))})
+    fake.install(monkeypatch)
+    monkeypatch.setattr(news_module, "monotonic", lambda: 1.0)
+    service = NewsService([CHANNEL], cache_seconds=15)
+
+    assert await service.refresh() == 1
+    assert fake.requests == [CHANNEL]
+
+    assert await service.refresh() == 0
+    assert fake.requests == [CHANNEL]  # window now applies normally
+
+
+@pytest.mark.asyncio
 async def test_refresh_counts_only_previously_unseen_posts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

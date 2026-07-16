@@ -42,7 +42,10 @@ class NewsService:
         self.cache_seconds = cache_seconds
         self._items: dict[str, dict[str, Any]] = {}
         self._titles: dict[str, str] = {}
-        self._fetched = 0.0
+        # None (not 0.0): monotonic() is near-zero right after host boot,
+        # which would otherwise read as a live cache window and skip the
+        # first refresh on a fresh microVM.
+        self._fetched: float | None = None
         self._lock = asyncio.Lock()
         self._client: httpx.AsyncClient | None = None
         self._fetch_semaphore = asyncio.Semaphore(MAX_FETCH_CONCURRENCY)
@@ -53,10 +56,12 @@ class NewsService:
 
     async def refresh(self) -> int:
         """Fetch all channels once per cache window; returns new-item count."""
-        if not self.channels or monotonic() - self._fetched < self.cache_seconds:
+        if not self.channels or (
+            self._fetched is not None and monotonic() - self._fetched < self.cache_seconds
+        ):
             return 0
         async with self._lock:
-            if monotonic() - self._fetched < self.cache_seconds:
+            if self._fetched is not None and monotonic() - self._fetched < self.cache_seconds:
                 return 0
             pages = await asyncio.gather(
                 *(self._fetch_channel(channel) for channel in self.channels),

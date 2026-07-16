@@ -27,6 +27,22 @@ apt-get update -y -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
   git curl ca-certificates python3 python3-venv
 
+# The app needs Python >=3.11 (pyproject.toml); Ubuntu 22.04 ships 3.10 as
+# python3. Fall back to python3.11 from universe, then deadsnakes if missing.
+PYTHON=python3
+if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+      python3.11 python3.11-venv; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+      software-properties-common
+    add-apt-repository -y ppa:deadsnakes/ppa
+    apt-get update -y -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+      python3.11 python3.11-venv
+  fi
+  PYTHON=python3.11
+fi
+
 echo "==> Creating service user"
 id -u "$APP_USER" >/dev/null 2>&1 || useradd --system --create-home --shell /usr/sbin/nologin "$APP_USER"
 
@@ -34,15 +50,21 @@ echo "==> Fetching the app"
 if [ ! -d "$APP_DIR/.git" ]; then
   git clone --quiet "$REPO_URL" "$APP_DIR"
 else
-  # Re-runs may pass a different REPO_URL; keep origin pointed at it.
-  git -C "$APP_DIR" remote set-url origin "$REPO_URL"
+  # Re-runs may pass a different REPO_URL; keep origin pointed at it. Run as
+  # the owning user: root git in the board-owned worktree trips git's
+  # dubious-ownership fatal and aborts the re-run under set -e.
+  sudo -u "$APP_USER" git -C "$APP_DIR" remote set-url origin "$REPO_URL"
 fi
 chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 
 echo "==> Installing dependencies"
 sudo -u "$APP_USER" bash -ec "
   cd '$APP_DIR'
-  [ -d .venv ] || python3 -m venv .venv
+  # A previous run may have built the venv with a pre-3.11 interpreter.
+  if [ -x .venv/bin/python ] && ! .venv/bin/python -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
+    rm -rf .venv
+  fi
+  [ -d .venv ] || $PYTHON -m venv .venv
   .venv/bin/pip install --quiet --upgrade pip
   .venv/bin/pip install --quiet -r requirements.txt
 "

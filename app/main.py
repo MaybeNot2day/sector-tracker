@@ -8,9 +8,8 @@ import secrets
 import shutil
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from fastapi import (
     Depends,
@@ -32,13 +31,13 @@ from app import db
 from app.config import Settings, find_group, load_watchlists, save_watchlists
 from app.models import AssetConfig, AssetType, GroupConfig, ProviderName
 from app.providers.base import QuoteProvider
-from app.providers.finnhub import FinnhubProvider
 from app.providers.lighter import LighterProvider
 from app.providers.stooq import StooqProvider
 from app.providers.yahoo import YahooProvider
 from app.scheduler import (
     ConnectionManager,
     board_payload_async,
+    econ_calendar_loop,
     history_refresh_loop,
     news_poll_loop,
     quote_poll_loop,
@@ -47,6 +46,7 @@ from app.scheduler import (
 from app.services.asset_profile import AssetProfileService
 from app.services.crypto_etf_flows import CryptoEtfFlowService
 from app.services.daily_board import DailyBoardService
+from app.services.econ_calendar import EconCalendarService, key_dates_payload
 from app.services.history import HistoryService, bars_payload, find_asset
 from app.services.key_dates import parse_key_dates
 from app.services.macro import MACRO_TAPE_GROUP_NAME, with_macro_group
@@ -56,8 +56,6 @@ from app.services.quotes import QuoteService
 APP_DIR = Path(__file__).parent
 STATIC_DIR = APP_DIR / "static"
 
-# The dashboard's calendar runs on the US Eastern trading day.
-_EASTERN = ZoneInfo("America/New_York")
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +65,15 @@ class GroupRequest(BaseModel):
     # slash could never match the DELETE path param — undeletable forever.
     name: str = Field(min_length=1, max_length=64, pattern=r"^[^/\\]+$")
 
+    @field_validator("name")
+    @classmethod
+    def _name_not_blank(cls, value: str) -> str:
+        # min_length admits " "; clean_text collapses it to "", persisting an
+        # empty-named group the DELETE path param can never match.
+        if not clean_text(value):
+            raise ValueError("name is blank")
+        return value
+
 
 class AssetRequest(BaseModel):
     # Same slash ban as GroupRequest.name, for the same DELETE-path reason.
@@ -75,6 +82,15 @@ class AssetRequest(BaseModel):
     source: ProviderName = "yahoo"
     exchange: str | None = Field(default=None, max_length=32)
     name: str | None = Field(default=None, max_length=96)
+
+    @field_validator("symbol")
+    @classmethod
+    def _symbol_not_blank(cls, value: str) -> str:
+        # Same blank-collapse hole as GroupRequest.name: a " " symbol would
+        # persist as "" and be undeletable via the DELETE path param.
+        if not clean_symbol(value):
+            raise ValueError("symbol is blank")
+        return value
 
 
 class ReportRequest(BaseModel):
@@ -109,8 +125,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         "lighter": LighterProvider(),
         "stooq": StooqProvider(),
     }
-    if settings.finnhub_api_key:
-        providers["finnhub"] = FinnhubProvider(settings.finnhub_api_key)
 
     app.state.settings = settings
     app.state.groups = groups
@@ -130,15 +144,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.news_channels,
         cache_seconds=settings.news_poll_seconds,
     )
+    app.state.econ_calendar_service = EconCalendarService(
+        cache_seconds=settings.econ_calendar_cache_seconds,
+        countries=settings.econ_calendar_countries,
+    )
     app.state.connection_manager = ConnectionManager()
     app.state.watchlist_lock = asyncio.Lock()
     app.state.poll_task = None
     app.state.history_task = None
     app.state.news_task = None
+    app.state.econ_calendar_task = None
     if settings.enable_background_tasks:
         app.state.poll_task = asyncio.create_task(quote_poll_loop(app.state))
         app.state.history_task = asyncio.create_task(history_refresh_loop(app.state))
         app.state.news_task = asyncio.create_task(news_poll_loop(app.state))
+        app.state.econ_calendar_task = asyncio.create_task(econ_calendar_loop(app.state))
 
     try:
         yield
@@ -149,9 +169,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await stop_task(app.state.history_task)
         if app.state.news_task is not None:
             await stop_task(app.state.news_task)
+        if app.state.econ_calendar_task is not None:
+            await stop_task(app.state.econ_calendar_task)
         await asyncio.gather(
             *(provider.aclose() for provider in providers.values()),
             app.state.news_service.aclose(),
+            app.state.econ_calendar_service.aclose(),
             return_exceptions=True,
         )
 
@@ -245,7 +268,9 @@ def require_edit_token(
     token = app.state.settings.edit_token
     if not token:
         return
-    if not x_edit_token or not secrets.compare_digest(x_edit_token, token):
+    # Compare as bytes: compare_digest on str raises TypeError for non-ASCII
+    # (headers decode as latin-1), turning a garbage header into a 500.
+    if not x_edit_token or not secrets.compare_digest(x_edit_token.encode(), token.encode()):
         raise HTTPException(status_code=401, detail="edit_token_required")
 
 
@@ -492,20 +517,18 @@ async def key_dates(
     days: int = Query(default=90, ge=1, le=365),
     limit: int = Query(default=200, ge=1, le=500),
 ) -> dict[str, object]:
-    """Upcoming agent-fed calendar events, soonest first.
+    """Upcoming agent-fed calendar events, soonest first, with release data.
 
     "Today" is the US Eastern trading date — the panel renders an ET clock,
     and an evening UTC rollover must not drop the current session's events.
+    Each item carries a `release` enrichment (null when unmatched); a
+    calendar outage serves the plain payload, never an error.
     """
-    today = datetime.now(_EASTERN).date()
-    items = await asyncio.to_thread(
-        db.load_key_dates,
-        app.state.settings.database_path,
-        start=today.isoformat(),
-        end=(today + timedelta(days=days)).isoformat(),
-        limit=limit,
+    # getattr: unit tests exercise this route without running the lifespan.
+    service = getattr(app.state, "econ_calendar_service", None)
+    return await key_dates_payload(
+        app.state.settings.database_path, service, days=days, limit=limit
     )
-    return {"key_dates": items, "as_of": today.isoformat()}
 
 
 def _report_slug(value: str) -> str:

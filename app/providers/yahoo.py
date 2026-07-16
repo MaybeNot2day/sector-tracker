@@ -332,9 +332,8 @@ def _get_json_with_retry(
     *,
     params: dict[str, str],
 ) -> dict[str, Any]:
-    families = {_endpoint_family(url) for url in urls}
-    for family in families:
-        _raise_if_cooling_down(family)
+    for url in urls:
+        _raise_if_cooling_down(url)
     error: Exception | None = None
     for attempt in range(3):
         for url in urls:
@@ -350,16 +349,21 @@ def _get_json_with_retry(
         if attempt < 2:
             sleep(1.5 * (attempt + 1))
     failed_at = monotonic()
-    for family in families:
-        _failure_until[family] = failed_at + YAHOO_FAILURE_COOLDOWN_SECONDS
+    for scope in {_failure_scope(url) for url in urls}:
+        _failure_until[scope] = failed_at + YAHOO_FAILURE_COOLDOWN_SECONDS
     if error is not None:
         raise error
     raise RuntimeError("request did not run")
 
 
 # Spark (v7) and chart (v8) are throttled independently by Yahoo, so track
-# cooldowns per endpoint family — a banned spark must not block chart calls.
+# 429 cooldowns per endpoint family — a banned spark must not block chart
+# calls. 429s are IP-scoped, so the whole family cools down together.
 _rate_limited_until: dict[str, float] = {}
+# Non-429 failures cool down per scope: chart URLs embed one symbol, and a
+# single delisted ticker's 404 on the per-symbol fallback must not degrade
+# every other symbol's chart calls. Scopes come from configured watchlist
+# symbols, so the dict stays naturally bounded.
 _failure_until: dict[str, float] = {}
 
 
@@ -375,17 +379,26 @@ def _endpoint_family(url: str) -> str:
     return "spark" if "/spark" in url else "chart"
 
 
-def _raise_if_cooling_down(family: str) -> None:
+def _failure_scope(url: str) -> str:
+    family = _endpoint_family(url)
+    if family != "chart":
+        return family
+    return f"{family}:{url.rstrip('/').rsplit('/', 1)[-1]}"
+
+
+def _raise_if_cooling_down(url: str) -> None:
     now = monotonic()
+    family = _endpoint_family(url)
     if now < _rate_limited_until.get(family, 0.0):
         raise YahooRateLimited(f"{family} cooling down after 429")
-    if now < _failure_until.get(family, 0.0):
-        raise YahooFailureCooldown(f"{family} cooling down after request failures")
+    scope = _failure_scope(url)
+    if now < _failure_until.get(scope, 0.0):
+        raise YahooFailureCooldown(f"{scope} cooling down after request failures")
 
 
 def _get_json(url: str, params: dict[str, str]) -> dict[str, Any]:
     family = _endpoint_family(url)
-    _raise_if_cooling_down(family)
+    _raise_if_cooling_down(url)
     completed = subprocess.run(
         [
             "curl",
@@ -472,6 +485,7 @@ def _quote_from_chart_result(asset: AssetConfig, result: dict[str, Any]) -> Quot
         currency=_currency(meta),
         volume=_number(meta.get("regularMarketVolume")),
         open_price=_session_open(result),
+        official_close=_official_regular_close(meta),
     )
 
 
@@ -552,6 +566,46 @@ def _latest_market_price(meta: dict[str, Any]) -> tuple[float, datetime] | None:
     if timestamp <= 0:
         return price, datetime.now(UTC)
     return price, datetime.fromtimestamp(timestamp, UTC)
+
+
+def _official_regular_close(meta: dict[str, Any]) -> float | None:
+    """Close of the last COMPLETED regular session, straight from the payload.
+
+    While the regular session trades, `regularMarketPrice` is the live print
+    and the last completed close is `previousClose`; once the session ends
+    the regular print freezes at the official close. The session is over
+    when a NEWER pre/post print exists (Yahoo only stamps those outside
+    regular hours — covers Friday evening, weekends, and pre-open Monday)
+    or the regular print has reached `currentTradingPeriod.regular.end`.
+    With neither signal return None and let consumers fall back to their
+    freshness heuristic.
+    """
+    regular_price = _number(meta.get("regularMarketPrice"))
+    regular_time = _number(meta.get("regularMarketTime"))
+    if regular_price is None or regular_time is None or regular_time <= 0:
+        return None
+    off_session_time = max(
+        _number(meta.get("postMarketTime")) or 0.0,
+        _number(meta.get("preMarketTime")) or 0.0,
+    )
+    if off_session_time > regular_time:
+        return regular_price
+    session_end = _regular_session_end(meta)
+    if session_end is None:
+        return None
+    if regular_time >= session_end:
+        return regular_price
+    return _first_float(meta, "previousClose", "chartPreviousClose")
+
+
+def _regular_session_end(meta: dict[str, Any]) -> float | None:
+    period = meta.get("currentTradingPeriod")
+    if not isinstance(period, dict):
+        return None
+    regular = period.get("regular")
+    if not isinstance(regular, dict):
+        return None
+    return _number(regular.get("end"))
 
 
 def _last_chart_close(result: dict[str, Any]) -> float | None:

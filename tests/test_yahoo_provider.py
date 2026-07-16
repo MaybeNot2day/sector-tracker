@@ -36,6 +36,9 @@ def test_quote_from_chart_result_uses_latest_market_price() -> None:
     assert quote.change_pct == 4.081633
     assert quote.timestamp == datetime.fromtimestamp(1_788_000_300, UTC)
     assert quote.currency == "USD"
+    # Post print newer than the regular print -> Friday-close semantics: the
+    # frozen regular price IS the last completed official session close.
+    assert quote.official_close == 100.0
 
 
 def test_quote_from_chart_result_falls_back_to_last_close() -> None:
@@ -167,7 +170,7 @@ def test_successful_alternate_host_does_not_arm_failure_cooldown(
     assert "chart" not in yahoo_module._failure_until
 
 
-def test_exhausted_failure_arms_family_cooldown_then_retries_after_expiry(
+def test_exhausted_failure_arms_symbol_cooldown_then_retries_after_expiry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clock = 1_000.0
@@ -195,12 +198,12 @@ def test_exhausted_failure_arms_family_cooldown_then_retries_after_expiry(
 
     assert calls == list(chart_urls) * 3
     assert sleeps == [1.5, 3.0]
-    assert yahoo_module._failure_until == {"chart": 1_030.0}
+    assert yahoo_module._failure_until == {"chart:SPY": 1_030.0}
 
     first_call_count = len(calls)
     with pytest.raises(
         yahoo_module.YahooFailureCooldown,
-        match="chart cooling down after request failures",
+        match="chart:SPY cooling down after request failures",
     ):
         yahoo_module._get_json_with_retry(chart_urls, params={"range": "1d"})
     assert len(calls) == first_call_count
@@ -218,3 +221,89 @@ def test_exhausted_failure_arms_family_cooldown_then_retries_after_expiry(
         params={"range": "1d"},
     ) == {"family": "chart"}
     assert calls[-1] == chart_urls[0]
+
+
+def test_one_symbol_chart_failure_does_not_cool_down_others(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_get_json(url: str, params: dict[str, str]) -> dict[str, object]:
+        if url.endswith("/DEAD"):
+            raise RuntimeError("404 delisted")
+        return {"symbol": url.rsplit("/", 1)[-1]}
+
+    monkeypatch.setattr(yahoo_module, "_get_json", fake_get_json)
+    monkeypatch.setattr(yahoo_module, "sleep", lambda seconds: None)
+    dead_urls = tuple(url.format(symbol="DEAD") for url in yahoo_module.YAHOO_CHART_URLS)
+    spy_urls = tuple(url.format(symbol="SPY") for url in yahoo_module.YAHOO_CHART_URLS)
+
+    with pytest.raises(RuntimeError, match="404 delisted"):
+        yahoo_module._get_json_with_retry(dead_urls, params={"range": "1d"})
+
+    # Only the delisted symbol cools down; every other chart call proceeds.
+    assert set(yahoo_module._failure_until) == {"chart:DEAD"}
+    assert yahoo_module._get_json_with_retry(spy_urls, params={"range": "1d"}) == {
+        "symbol": "SPY"
+    }
+    with pytest.raises(yahoo_module.YahooFailureCooldown):
+        yahoo_module._get_json_with_retry(dead_urls, params={"range": "1d"})
+
+
+def test_official_close_is_previous_close_while_regular_session_trades() -> None:
+    asset = AssetConfig(symbol="XME", type="etf", source="yahoo")
+    result = {
+        "meta": {
+            "regularMarketPrice": 101.0,
+            "regularMarketTime": 1_788_000_000,
+            # This morning's pre-market print is OLDER than the regular one.
+            "preMarketPrice": 99.5,
+            "preMarketTime": 1_787_980_000,
+            "previousClose": 98.0,
+            "currentTradingPeriod": {
+                "regular": {"start": 1_787_990_000, "end": 1_788_010_000}
+            },
+        },
+    }
+
+    quote = _quote_from_chart_result(asset, result)
+
+    assert quote is not None
+    assert quote.official_close == 98.0
+
+
+def test_official_close_is_regular_close_when_session_period_has_ended() -> None:
+    # Just after the bell, before any post-market print lands: the regular
+    # print sits at currentTradingPeriod.regular.end, i.e. today's close.
+    asset = AssetConfig(symbol="XME", type="etf", source="yahoo")
+    result = {
+        "meta": {
+            "regularMarketPrice": 100.0,
+            "regularMarketTime": 1_788_010_000,
+            "previousClose": 98.0,
+            "currentTradingPeriod": {
+                "regular": {"start": 1_787_986_600, "end": 1_788_010_000}
+            },
+        },
+    }
+
+    quote = _quote_from_chart_result(asset, result)
+
+    assert quote is not None
+    assert quote.official_close == 100.0
+
+
+def test_official_close_absent_without_session_signals() -> None:
+    # Slim meta (no pre/post prints, no trading period) is undecidable; the
+    # overlay then falls back to its freshness heuristic.
+    asset = AssetConfig(symbol="XME", type="etf", source="yahoo")
+    result = {
+        "meta": {
+            "regularMarketPrice": 100.0,
+            "regularMarketTime": 1_788_000_000,
+            "previousClose": 98.0,
+        },
+    }
+
+    quote = _quote_from_chart_result(asset, result)
+
+    assert quote is not None
+    assert quote.official_close is None

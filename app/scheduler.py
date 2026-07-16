@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import suppress
-from typing import Any
+from typing import Any, cast
 
 from fastapi import WebSocket
 
 from app.providers.lighter import LighterProvider
 from app.services.daily_board import crypto_breadth_metrics
+from app.services.econ_calendar import any_hot_release, key_dates_payload
 from app.services.macro import MACRO_TAPE_GROUP_NAME, macro_payload, with_macro_group
 from app.services.quotes import grouped_quotes_payload
 
@@ -106,6 +107,71 @@ async def news_poll_loop(app_state: Any) -> None:
         except Exception:
             logger.exception("news poll cycle failed")
         await asyncio.sleep(app_state.settings.news_poll_seconds)
+
+
+# Poll cadence for the economic-calendar loop: tight around scheduled
+# releases so actuals land within ~a minute, relaxed otherwise.
+ECON_HOT_POLL_SECONDS = 20.0
+ECON_IDLE_POLL_SECONDS = 120.0
+
+
+async def econ_calendar_loop(app_state: Any) -> None:
+    """Refresh key-date release enrichment and push changes over the WS.
+
+    Broadcasting only when an actual printed or the matched set changed
+    keeps the socket quiet between releases; around a scheduled print the
+    loop tightens to a 20s cadence so the number lands within a minute.
+    """
+    await asyncio.sleep(3)
+    last_state: dict[object, tuple[object, object]] | None = None
+    while True:
+        sleep_seconds = ECON_IDLE_POLL_SECONDS
+        try:
+            payload = await key_dates_payload(
+                app_state.settings.database_path, app_state.econ_calendar_service
+            )
+            items = cast(list[dict[str, Any]], payload["key_dates"])
+            state = _release_state(items)
+            # The first cycle only primes the baseline: WS clients get a
+            # full snapshot on connect, so there is nothing new to push.
+            if last_state is not None and _release_changed(last_state, state):
+                await app_state.connection_manager.broadcast(
+                    {"type": "key_dates", "data": payload}
+                )
+            last_state = state
+            if any_hot_release(items):
+                sleep_seconds = ECON_HOT_POLL_SECONDS
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("econ calendar cycle failed")
+        await asyncio.sleep(sleep_seconds)
+
+
+def _release_state(items: list[dict[str, Any]]) -> dict[object, tuple[object, object]]:
+    """Per-item (matched_title, actual) for every enriched key-date row."""
+    state: dict[object, tuple[object, object]] = {}
+    for item in items:
+        release = item.get("release")
+        if isinstance(release, dict):
+            state[item.get("id")] = (release.get("matched_title"), release.get("actual"))
+    return state
+
+
+def _release_changed(
+    before: dict[object, tuple[object, object]],
+    after: dict[object, tuple[object, object]],
+) -> bool:
+    """True when the matched set changed or any actual printed (null→value)."""
+    if {key: value[0] for key, value in before.items()} != {
+        key: value[0] for key, value in after.items()
+    }:
+        return True
+    return any(
+        before[key][1] is None and value[1] is not None
+        for key, value in after.items()
+        if key in before
+    )
 
 
 async def _refresh_daily_history(app_state: Any) -> None:

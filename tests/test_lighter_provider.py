@@ -258,6 +258,48 @@ async def test_funding_cache_outlives_details_refresh(
 
 
 @pytest.mark.asyncio
+async def test_empty_successful_funding_response_advances_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeHTTP(
+        {"/orderBookDetails": details_payload(), "/funding-rates": {"funding_rates": []}}
+    )
+    fake.install(monkeypatch)
+    provider = LighterProvider()
+
+    await provider.get_quotes([BTC_PERP])
+    await provider.get_quotes([BTC_PERP])
+
+    # A successful-but-empty response is a fresh answer: the TTL absorbs the
+    # second poll instead of burning another request on the 60/min budget.
+    assert fake.count("/funding-rates") == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_funding_fetch_stamps_no_ttl_and_retries_after_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeHTTP(
+        {
+            "/orderBookDetails": details_payload(),
+            "/funding-rates": FakeResponse({}, status_code=500),
+        }
+    )
+    fake.install(monkeypatch)
+    provider = LighterProvider()
+
+    await provider.get_quotes([BTC_PERP])
+    # Failures rely on the endpoint cooldown alone; once it lapses the next
+    # poll fetches again and lands the rates.
+    provider._cooldown_until = {}
+    fake.routes["/funding-rates"] = funding_payload()
+    quotes = await provider.get_quotes([BTC_PERP])
+
+    assert fake.count("/funding-rates") == 2
+    assert quotes[0].funding_rate == pytest.approx(1.2e-05)
+
+
+@pytest.mark.asyncio
 async def test_429_triggers_cooldown_that_blocks_further_requests(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

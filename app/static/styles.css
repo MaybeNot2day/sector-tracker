@@ -1158,6 +1158,30 @@ h1 {
   color: var(--muted);
 }
 
+.key-date-figures {
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The actual is the number the room waits for — brighter mono. Undo the
+   title styling that .key-date-main strong would otherwise cascade in. */
+.key-date-figures strong {
+  font-size: inherit;
+  font-weight: 600;
+  color: var(--muted-strong);
+  overflow: visible;
+  white-space: inherit;
+}
+
+/* Signed actual-vs-est delta: direction of "good" depends on the indicator,
+   so it stays neutral amber, never green/red. */
+.key-date-surprise {
+  font-style: normal;
+  color: var(--accent);
+}
+
 .key-date-tag {
   font-family: var(--font-mono);
   font-size: 9px;
@@ -1170,6 +1194,15 @@ h1 {
   color: var(--muted-strong);
   background: var(--surface-soft);
   white-space: nowrap;
+}
+
+/* Stacks the optional HIGH importance chip above the category chip without
+   adding a fourth grid column to the row. */
+.key-date-tags {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
 }
 
 .key-tag-macro {
@@ -1198,6 +1231,12 @@ h1 {
 
 .key-tag-holiday {
   color: var(--muted);
+}
+
+.key-tag-high {
+  color: var(--accent);
+  border-color: rgba(184, 160, 106, 0.5);
+  background: var(--accent-soft);
 }
 
 .rotation-grid {

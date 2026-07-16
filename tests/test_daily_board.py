@@ -158,6 +158,41 @@ def test_sparkline_keeps_full_count_when_current_equals_last_close() -> None:
     assert _sparkline_values(41.0, closes)[-1] == 41.0
 
 
+def test_ytd_ignores_stale_quote_timestamp_from_prior_year() -> None:
+    # Regression: a stale Dec-31-stamped quote must not anchor the YTD year
+    # backwards — early-January boards reported the entire prior year's
+    # return as "YTD". Anchored to the wall clock, a history with no bar in
+    # the current year measures YTD off the prior year's final close.
+    stamp = datetime(2025, 12, 31, tzinfo=UTC)
+    bars = [
+        Bar(
+            symbol="SPY",
+            provider="yahoo",
+            interval="1d",
+            timestamp=stamp - timedelta(days=1 - index),
+            open=close,
+            high=close + 1,
+            low=close - 1,
+            close=close,
+        )
+        for index, close in enumerate([90.0, 100.0])
+    ]
+    quote = Quote.from_last_and_prev_close(
+        symbol="SPY",
+        asset_type="etf",
+        provider="yahoo",
+        last=105.0,
+        previous_close=100.0,
+        timestamp=stamp,
+    )
+    asset = AssetConfig(symbol="SPY", type="etf", source="yahoo")
+
+    summary = daily_board._market_summary(asset, quote, bars)
+
+    # Off the Dec 31 close (100), not the first prior-year bar (90).
+    assert summary["performance"]["YTD"] == 5.0  # type: ignore[index]
+
+
 
 def _rising_bars(symbol: str, start_price: float = 100.0) -> list[Bar]:
     start = datetime(2025, 1, 1, tzinfo=UTC)

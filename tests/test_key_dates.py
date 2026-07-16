@@ -241,6 +241,39 @@ def test_table_rows_without_anchor_need_explicit_dates() -> None:
     assert events == [KeyDate("2026-07-15", "14:30", "Kept via explicit ISO date", "MACRO")]
 
 
+def test_cells_without_date_or_time_tokens_are_not_events() -> None:
+    # Importance layouts, TBD cells, and stray separator-less header rows
+    # must not become phantom events dated the report's own day; session
+    # tokens (AMC/BMO) and bare times still mean the report's own day.
+    body = (
+        "## Economic Calendar\n\n"
+        "| Time | Event Description |\n"
+        "| High | US CPI |\n"
+        "| TBD | FOMC minutes |\n"
+        "| AMC | TSLA earnings |\n"
+        "| 14:30 | Real print |\n"
+    )
+    events = parse_key_dates(body, default_date="2026-07-14")
+    assert events == [
+        KeyDate("2026-07-14", None, "TSLA earnings", "EARNINGS"),
+        KeyDate("2026-07-14", "14:30", "Real print", "MACRO"),
+    ]
+
+
+def test_cell_zone_wins_over_heading_zone() -> None:
+    body = (
+        "## Economic Calendar (CEST)\n\n"
+        "| When | Event |\n|---|---|\n"
+        "| 14:30 ET | US CPI |\n"
+        "| 09:30 | Local print |\n"
+    )
+    events = parse_key_dates(body, default_date="2026-07-14")
+    assert events == [
+        KeyDate("2026-07-14", "14:30 ET", "US CPI", "MACRO"),
+        KeyDate("2026-07-14", "09:30 CEST", "Local print", "MACRO"),
+    ]
+
+
 def test_untagged_titles_infer_category() -> None:
     body = (
         "## Key Dates\n"

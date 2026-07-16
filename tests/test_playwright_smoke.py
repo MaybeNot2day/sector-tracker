@@ -170,6 +170,21 @@ def test_daily_board_loads_without_page_errors_and_renders_core_sections(
     expect(theme_rows.nth(0)).to_be_visible()
     assert theme_rows.count() >= 1
 
+    # Key Dates enrichment: one released print (figures + HIGH chip + neutral
+    # delta), one pending (ACT em dash), one non-macro event with release null.
+    key_date_rows = page.locator("#daily-board .key-date-row")
+    expect(key_date_rows).to_have_count(3)
+    cpi_row = key_date_rows.nth(0)
+    expect(cpi_row.locator(".key-date-figures")).to_have_text(
+        "EST -0.1% · PREV 1% · ACT -0.2% -0.10"
+    )
+    expect(cpi_row.locator(".key-tag-high")).to_have_text("HIGH")
+    expect(cpi_row).to_have_attribute("title", re.compile("Consumer Price Index"))
+    expect(key_date_rows.nth(1).locator(".key-date-figures")).to_have_text(
+        "EST 0.3% · PREV 0.4% · ACT —"
+    )
+    expect(key_date_rows.nth(2).locator(".key-date-figures")).to_have_count(0)
+
 
 def test_markets_tabs_render_rows_and_open_canvas_chart(page: Page, base_url: str) -> None:
     _goto_board(page, base_url)
@@ -632,6 +647,8 @@ def _stub_board_apis(page: Page) -> None:
             _fulfill_json(route, SNAPSHOTS_PAYLOAD)
         elif path == "/api/news":
             _fulfill_json(route, NEWS_PAYLOAD)
+        elif path == "/api/key-dates":
+            _fulfill_json(route, KEY_DATES_PAYLOAD)
         elif path == "/api/groups" and request.method == "GET":
             _fulfill_json(route, WATCHLIST_PAYLOAD)
         elif (
@@ -1031,6 +1048,57 @@ NEWS_PAYLOAD: dict[str, Any] = {
             "link": "https://example.com/qa-news-1",
             "text": "Deterministic market news fixture.",
         }
+    ],
+}
+
+# as_of pins the relative-day labels; release objects exercise the economic
+# calendar enrichment: released with surprise + high importance, pending
+# (actual null), and unmatched (release null — the common non-macro case).
+KEY_DATES_PAYLOAD: dict[str, Any] = {
+    "as_of": "2026-07-09",
+    "key_dates": [
+        {
+            "date": "2026-07-09",
+            "time": "14:30 CET",
+            "title": "US June CPI (M-o-M)",
+            "category": "MACRO",
+            "release": {
+                "time_utc": "2026-07-09T12:30:00Z",
+                "period": "Jun",
+                "actual": "-0.2%",
+                "forecast": "-0.1%",
+                "previous": "1%",
+                "surprise": -0.1,
+                "importance": 1,
+                "comment": "Consumer Price Index measures the change in prices "
+                "paid by consumers for a representative basket of goods.",
+                "matched_title": "Consumer Price Index MoM",
+            },
+        },
+        {
+            "date": "2026-07-10",
+            "time": "08:30 ET",
+            "title": "US Retail Sales",
+            "category": "MACRO",
+            "release": {
+                "time_utc": "2026-07-10T12:30:00Z",
+                "period": "Jun",
+                "actual": None,
+                "forecast": "0.3%",
+                "previous": "0.4%",
+                "surprise": None,
+                "importance": 0,
+                "comment": None,
+                "matched_title": "Retail Sales MoM",
+            },
+        },
+        {
+            "date": "2026-07-14",
+            "time": None,
+            "title": "TSLA earnings",
+            "category": "EARNINGS",
+            "release": None,
+        },
     ],
 }
 

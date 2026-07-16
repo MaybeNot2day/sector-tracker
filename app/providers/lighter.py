@@ -248,6 +248,12 @@ class LighterProvider(QuoteProvider):
         parsed = _parse_funding(payload)
         if parsed:
             self._funding = parsed
+        if payload is not None:
+            # A successful-but-empty response is still a fresh answer: stamp
+            # the TTL or every poll re-fires the request forever (the
+            # starvation guard in get_quotes retries while _funding is empty)
+            # against the 60 req/min budget. Failures stamp nothing and rely
+            # on _get_json's cooldown before the retry.
             self._funding_time = monotonic()
         return self._funding
 

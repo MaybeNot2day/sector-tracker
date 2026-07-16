@@ -71,12 +71,16 @@ class HistoryService:
                 except Exception:
                     bars = []
         if bars:
-            db.save_bars(self.database_path, bars)
+            await asyncio.to_thread(db.save_bars, self.database_path, bars)
             return filter_bars_to_range(bars, range_)
-        cached = db.load_bars(self.database_path, asset.symbol, interval, asset.source)
+        cached = await asyncio.to_thread(
+            db.load_bars, self.database_path, asset.symbol, interval, asset.source
+        )
         if cached:
             return filter_bars_to_range(cached, range_)
-        cached_any_provider = db.load_bars(self.database_path, asset.symbol, interval)
+        cached_any_provider = await asyncio.to_thread(
+            db.load_bars, self.database_path, asset.symbol, interval
+        )
         return filter_bars_to_range(cached_any_provider, range_)
 
     async def _tape_asset(self, symbol: str) -> AssetConfig | None:
@@ -101,9 +105,9 @@ class HistoryService:
         is opened. This picks up to SELF_HEAL_BATCH symbols whose newest 1d
         bar is older than STALE_BAR_AGE and re-fetches them; a per-symbol
         cooldown keeps weekends/holidays from re-fetching a closed market
-        every poll. Called fire-and-forget from the quotes route.
+        every poll. Awaited under a short wait_for from the quotes route.
         """
-        newest = db.newest_bar_timestamps(self.database_path, "1d")
+        newest = await asyncio.to_thread(db.newest_bar_timestamps, self.database_path, "1d")
         now_dt = datetime.now(UTC)
         now_mono = monotonic()
         candidates: list[tuple[datetime, str]] = []

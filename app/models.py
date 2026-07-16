@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Literal
 
 AssetType = Literal["equity", "etf", "future", "crypto_perp", "crypto_spot", "index_proxy"]
-ProviderName = Literal["yahoo", "stooq", "finnhub", "lighter"]
+ProviderName = Literal["yahoo", "stooq", "lighter"]
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,10 @@ class Quote:
     # Today's session open (or first live print early in the session).
     # Transient: feeds the from-open column, deliberately not persisted.
     open_price: float | None = None
+    # Close of the last COMPLETED regular session, when the provider payload
+    # states it (Yahoo). Feeds the synthetic-perp overlay 1D baseline.
+    # Transient: deliberately not persisted, like open_price.
+    official_close: float | None = None
 
     @classmethod
     def from_last_and_prev_close(
@@ -55,6 +59,7 @@ class Quote:
         funding_rate: float | None = None,
         open_interest_usd: float | None = None,
         open_price: float | None = None,
+        official_close: float | None = None,
     ) -> Quote:
         if previous_close and previous_close != 0:
             change_abs = round(last - previous_close, 6)
@@ -83,6 +88,7 @@ class Quote:
             funding_rate=funding_rate,
             open_interest_usd=open_interest_usd,
             open_price=open_price,
+            official_close=official_close,
         )
 
 

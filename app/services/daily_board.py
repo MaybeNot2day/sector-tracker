@@ -223,7 +223,10 @@ def _market_summary_prepared(
             "1W": _return_from_close(current, closes, 6),
             "1M": _return_from_close(current, closes, 22),
             "3M": _return_from_close(current, closes, 64),
-            "YTD": _ytd_return(current, bars, quote.timestamp if quote else None),
+            # No quote.timestamp here: a stale Dec-31-stamped quote in early
+            # January would anchor the year backwards and report the entire
+            # prior year's return as "YTD". Wall clock only.
+            "YTD": _ytd_return(current, bars),
             "1Y": _return_from_close(current, closes, 252),
         },
         "range_52w": _range_52w(current, bars),

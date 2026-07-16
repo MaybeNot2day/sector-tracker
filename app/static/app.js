@@ -79,9 +79,10 @@ let marketCategory = "tradfi"; // "tradfi" | "crypto"
 let tapeSorts = {}; // per-basket { key, direction }
 let tapePages = {}; // per-basket page index
 let marketSearchTimer = null;
-let feedMode = "poll"; // "ws" locally, "poll" on serverless deployments
+let feedMode = "poll"; // flips to "ws" only once the socket actually opens
 let activeSocket = null; // live WS reference so wake-up checks can close a zombie
 let lastWsFrameAt = 0; // Date.now() of the last WS frame, for zombie detection
+let wsReconnectDelayMs = 3000; // doubles per failed reconnect, capped at 30s
 let activeView = "daily";
 let pendingChartFromUrl = null;
 let restoringUrlState = false;
@@ -108,13 +109,22 @@ let dataIsCached = false;
 // fresher one (or a WS frame). Declared here because init() runs above.
 let quotesFetchSeq = 0;
 let quotesFetchApplied = 0;
+// Same monotonic guard, per fetch family (interval + visibility refetches
+// overlap; for news a WS frame must also outrank in-flight polls).
+let newsFetchSeq = 0;
+let newsFetchApplied = 0;
+let cryptoEtfFlowsFetchSeq = 0;
+let cryptoEtfFlowsFetchApplied = 0;
+let keyDatesFetchSeq = 0;
+let keyDatesFetchApplied = 0;
+let snapshotsFetchSeq = 0;
+let snapshotsFetchApplied = 0;
 let snapshotRevision = 0;
 
 const sourceLabels = {
   yahoo: "YH",
   lighter: "LTR",
   stooq: "STQ",
-  finnhub: "FH",
 };
 
 // --- Display timezone ------------------------------------------------------
@@ -389,9 +399,10 @@ function init() {
   setNewsOpen(localStorage.getItem(NEWS_OPEN_KEY) === "1");
   fetchNews();
   refreshReportsBadge();
-  feedMode = shouldUseWebSocket() ? "ws" : "poll";
+  // Stay in "poll" until the socket's open handler flips to "ws" — assigning
+  // "ws" here gates off the 10s poll while the socket hangs in CONNECTING.
   updateFeedModeLabel();
-  if (feedMode === "ws") openSocket();
+  if (shouldUseWebSocket()) openSocket();
   // Poll only while the tab is visible; a hidden tab otherwise burns
   // ~5.7k serverless invocations/day for nothing. On WS hosts frames
   // stream in; polling would double-fetch and risk stale overwrites
@@ -406,6 +417,13 @@ function init() {
       fetchKeyDates();
     }
   }, 300000);
+  // Release actuals land within ~1 min of the print; when WS is unavailable,
+  // a 30s poll runs ONLY while some rendered event is HOT (matched release,
+  // actual still null, inside [T-2min, T+45min]) so quiet hours stay on the
+  // 5-min baseline above.
+  window.setInterval(() => {
+    if (!document.hidden && feedMode !== "ws" && hasHotKeyDate()) fetchKeyDates();
+  }, 30000);
   // WS pushes news instantly; polling is the fallback for serverless hosts.
   window.setInterval(() => {
     if (!document.hidden && feedMode !== "ws") fetchNews();
@@ -417,6 +435,9 @@ function init() {
     }
     if (feedMode !== "ws") {
       fetchQuotes();
+      // Reconnects are not scheduled while hidden; reopen on return
+      // (openSocket no-ops if a socket is already OPEN/CONNECTING).
+      if (shouldUseWebSocket()) openSocket();
     } else if (Date.now() - lastWsFrameAt > 30000) {
       // Laptop sleep can leave a zombie socket that never errors: fetch
       // once for freshness and close it so the reconnect logic takes over.
@@ -665,12 +686,21 @@ function shouldUseWebSocket() {
 }
 
 function openSocket() {
+  // A pending reconnect timer and a visibility reopen can race; never
+  // stack a second socket on a live one.
+  if (
+    activeSocket &&
+    (activeSocket.readyState === WebSocket.OPEN || activeSocket.readyState === WebSocket.CONNECTING)
+  ) {
+    return;
+  }
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   const socket = new WebSocket(`${protocol}://${window.location.host}/ws/quotes`);
   activeSocket = socket;
 
   socket.addEventListener("open", () => {
     lastWsFrameAt = Date.now(); // a fresh socket is not a zombie yet
+    wsReconnectDelayMs = 3000; // healthy again: restart backoff from base
     feedMode = "ws";
     updateFeedModeLabel();
     setConnection("live");
@@ -687,14 +717,25 @@ function openSocket() {
       persistBoardCache(message.data);
       setConnection("live");
     } else if (message.type === "news") {
+      // WS news is freshest; drop any poll response still in flight.
+      newsFetchApplied = newsFetchSeq;
       renderNews(message.data);
+    } else if (message.type === "key_dates") {
+      // WS key-dates frame is freshest; drop any poll response still in flight.
+      keyDatesFetchApplied = keyDatesFetchSeq;
+      applyKeyDates(message.data);
     }
   });
   socket.addEventListener("close", () => {
     feedMode = "poll";
     updateFeedModeLabel();
     setConnection("error");
-    window.setTimeout(openSocket, 3000);
+    // Back off doubling to 30s so a dead server isn't hammered; hidden tabs
+    // skip the retry entirely — the visibilitychange handler reopens.
+    if (!document.hidden) {
+      window.setTimeout(openSocket, wsReconnectDelayMs);
+      wsReconnectDelayMs = Math.min(wsReconnectDelayMs * 2, 30000);
+    }
   });
   socket.addEventListener("error", () => setConnection("error"));
 }
@@ -838,7 +879,11 @@ function renderReportsList(reports) {
   });
 }
 
+let reportOpenToken = 0;
+
 async function openReport(reportId) {
+  // Rapid clicks race: the slower response must not render over the newer.
+  const token = ++reportOpenToken;
   reportsListElement.hidden = true;
   reportsBackButton.hidden = false;
   reportReaderElement.hidden = false;
@@ -847,6 +892,7 @@ async function openReport(reportId) {
     const response = await fetch(`/api/reports/${reportId}`);
     if (!response.ok) throw new Error("report_failed");
     const item = await response.json();
+    if (token !== reportOpenToken) return;
     reportReaderElement.innerHTML = `
       <header class="report-head">
         <h2>${escapeHtml(item.title)}</h2>
@@ -855,6 +901,7 @@ async function openReport(reportId) {
       <div class="report-body">${renderMarkdown(item.body)}</div>`;
     reportReaderElement.scrollTop = 0;
   } catch (error) {
+    if (token !== reportOpenToken) return;
     reportReaderElement.innerHTML = '<div class="empty-state">Report unavailable</div>';
   }
 }
@@ -1084,11 +1131,18 @@ function mdInline(text) {
 }
 
 async function fetchNews() {
+  const seq = ++newsFetchSeq;
   try {
     const response = await fetch("/api/news");
     if (!response.ok) throw new Error("news_failed");
-    renderNews(await response.json());
+    const payload = await response.json();
+    // A slower poll must never overwrite fresher news (a WS frame bumps
+    // newsFetchApplied, so stale in-flight polls drop here).
+    if (seq <= newsFetchApplied) return;
+    newsFetchApplied = seq;
+    renderNews(payload);
   } catch (error) {
+    if (seq <= newsFetchApplied) return;
     if (!latestNews) {
       newsList.innerHTML = '<div class="empty-state">News feed unavailable</div>';
     }
@@ -1231,11 +1285,17 @@ function newsAge(timestamp) {
 }
 
 async function fetchCryptoEtfFlows() {
+  const seq = ++cryptoEtfFlowsFetchSeq;
   try {
     const response = await fetch("/api/crypto-etf-flows");
     if (!response.ok) throw new Error("crypto_etf_flows_failed");
-    latestCryptoEtfFlows = await response.json();
+    const payload = await response.json();
+    // A slower response must never overwrite a fresher one.
+    if (seq <= cryptoEtfFlowsFetchApplied) return;
+    cryptoEtfFlowsFetchApplied = seq;
+    latestCryptoEtfFlows = payload;
   } catch (error) {
+    if (seq <= cryptoEtfFlowsFetchApplied) return;
     // Keep the last good payload: a transient fetch error must not blank
     // panels that already show flows.
     if (!latestCryptoEtfFlows || latestCryptoEtfFlows.status !== "ok") {
@@ -1254,30 +1314,60 @@ async function fetchCryptoEtfFlows() {
 }
 
 async function fetchKeyDates() {
+  const seq = ++keyDatesFetchSeq;
   try {
     const response = await fetch("/api/key-dates?days=90");
     if (!response.ok) throw new Error("key_dates_failed");
-    latestKeyDates = await response.json();
-    keyDatesRevision += 1;
+    const payload = await response.json();
+    // A slower response must never overwrite a fresher one.
+    if (seq <= keyDatesFetchApplied) return;
+    keyDatesFetchApplied = seq;
+    applyKeyDates(payload);
   } catch (error) {
+    if (seq <= keyDatesFetchApplied) return;
     // Keep the last good payload: a transient fetch error must not blank
     // a calendar that already renders events.
     if (!latestKeyDates || latestKeyDates.error) {
-      latestKeyDates = { key_dates: [], as_of: "", error: "key_dates_failed" };
-      keyDatesRevision += 1;
+      applyKeyDates({ key_dates: [], as_of: "", error: "key_dates_failed" });
     }
   }
+}
+
+// Store a key-dates payload and repaint the daily board — the single apply
+// path shared by the HTTP poll and the WS "key_dates" push.
+function applyKeyDates(payload) {
+  latestKeyDates = payload;
+  keyDatesRevision += 1;
   if (latestData?.overview) renderDailyBoard(latestData.overview, latestCryptoEtfFlows);
 }
 
+// HOT window shared with the backend enrichment: from 2 minutes before the
+// scheduled print until 45 minutes after, while the actual has not landed.
+function hasHotKeyDate() {
+  const items = Array.isArray(latestKeyDates?.key_dates) ? latestKeyDates.key_dates : [];
+  const now = Date.now();
+  return items.some((item) => {
+    const release = item.release;
+    if (!release || release.actual != null) return false;
+    const at = Date.parse(release.time_utc || "");
+    if (Number.isNaN(at)) return false;
+    return now >= at - 120000 && now <= at + 2700000;
+  });
+}
+
 async function fetchSnapshots() {
+  const seq = ++snapshotsFetchSeq;
   try {
     const response = await fetch("/api/snapshots?days=30");
     if (!response.ok) throw new Error("snapshots_failed");
     const payload = await response.json();
+    // A slower response must never overwrite a fresher one.
+    if (seq <= snapshotsFetchApplied) return;
+    snapshotsFetchApplied = seq;
     latestSnapshots = Array.isArray(payload.snapshots) ? payload.snapshots : [];
     snapshotRevision += 1;
   } catch (error) {
+    if (seq <= snapshotsFetchApplied) return;
     latestSnapshots = latestSnapshots || [];
   }
   if (latestData?.overview) renderDailyBoard(latestData.overview, latestCryptoEtfFlows);
@@ -1814,14 +1904,38 @@ function keyDateRow(item, asOf) {
   const relative =
     diff === 0 ? "today" : diff === 1 ? "tomorrow" : diff > 1 ? `in ${diff} days` : "";
   const meta = [relative, item.time].filter(Boolean).join(" \u00b7 ");
-  return `<div class="key-date-row${diff === 0 ? " is-today" : ""}">
+  const release = item.release || null;
+  // The indicator description rides as a native title: the list scrolls
+  // (overflow-y: auto), which would clip the help-tip CSS popover.
+  const tooltip = release?.comment ? ` title="${escapeHtml(release.comment)}"` : "";
+  const high = release?.importance === 1;
+  return `<div class="key-date-row${diff === 0 ? " is-today" : ""}"${tooltip}>
     <span class="key-date-chip"><em>${month ? KEY_DATE_MONTHS[month - 1] : "--"}</em><strong>${day || "--"}</strong></span>
     <div class="key-date-main">
       <strong>${escapeHtml(item.title)}</strong>
       ${meta ? `<span>${escapeHtml(meta)}</span>` : ""}
+      ${release ? keyDateFigures(release) : ""}
     </div>
-    <span class="key-date-tag key-tag-${classToken(item.category, "event")}">${escapeHtml(item.category || "EVENT")}</span>
+    <span class="key-date-tags">${high ? '<span class="key-date-tag key-tag-high">HIGH</span>' : ""}<span class="key-date-tag key-tag-${classToken(item.category, "event")}">${escapeHtml(item.category || "EVENT")}</span></span>
   </div>`;
+}
+
+function keyDateFigures(release) {
+  const dash = "\u2014";
+  const est = escapeHtml(release.forecast ?? dash);
+  const prev = escapeHtml(release.previous ?? dash);
+  let act = dash;
+  if (release.actual != null) {
+    // Beat/miss direction depends on the indicator (a hot CPI is bad news,
+    // hot payrolls good), so the surprise delta keeps the neutral accent —
+    // never green/red. Sub-cent surprises round to +0.00 noise; skip them.
+    const delta =
+      typeof release.surprise === "number" && Number(release.surprise.toFixed(2)) !== 0
+        ? ` <em class="key-date-surprise">${escapeHtml(formatSigned(release.surprise))}</em>`
+        : "";
+    act = `<strong>${escapeHtml(release.actual)}</strong>${delta}`;
+  }
+  return `<span class="key-date-figures">EST ${est} \u00b7 PREV ${prev} \u00b7 ACT ${act}</span>`;
 }
 
 function keyDateDayDiff(date, asOf) {
@@ -2692,27 +2806,34 @@ async function mutateWatchlists(url, options) {
           : {}),
       },
     });
-  let response = await send();
-  if (response.status === 401) {
-    // The server has an EDIT_TOKEN configured; ask once and retry.
-    const token = window.prompt("This board is protected. Enter the edit token:");
-    if (token) {
-      localStorage.setItem(EDIT_TOKEN_KEY, token.trim());
-      response = await send();
+  try {
+    let response = await send();
+    if (response.status === 401) {
+      // The server has an EDIT_TOKEN configured; ask once and retry.
+      const token = window.prompt("This board is protected. Enter the edit token:");
+      if (token) {
+        localStorage.setItem(EDIT_TOKEN_KEY, token.trim());
+        response = await send();
+      }
     }
-  }
-  if (!response.ok) {
-    if (response.status === 401) localStorage.removeItem(EDIT_TOKEN_KEY);
-    const payload = await response.json().catch(() => ({}));
-    setEditorStatus(editorErrorCopy(payload.detail));
+    if (!response.ok) {
+      if (response.status === 401) localStorage.removeItem(EDIT_TOKEN_KEY);
+      const payload = await response.json().catch(() => ({}));
+      setEditorStatus(editorErrorCopy(payload.detail));
+      return false;
+    }
+    watchlistConfig = await response.json();
+    renderEditor();
+    const notice = persistenceNotice();
+    setEditorStatus(notice ? `Saved (session only) — ${notice}` : "Saved");
+    await fetchQuotes();
+    return true;
+  } catch (error) {
+    // fetch rejects on network failure; without this the editor wedges on
+    // "Saving" with an unhandled rejection.
+    setEditorStatus("Network error — changes not saved. Check your connection and retry.");
     return false;
   }
-  watchlistConfig = await response.json();
-  renderEditor();
-  const notice = persistenceNotice();
-  setEditorStatus(notice ? `Saved (session only) — ${notice}` : "Saved");
-  await fetchQuotes();
-  return true;
 }
 
 function syncSourceToType() {
@@ -3066,6 +3187,13 @@ async function loadChart(symbol, range, interval) {
     scheduleChartResize();
   } catch (error) {
     if (activeSymbol !== symbol || requestId !== chartLoadToken) return;
+    // renderChart assigns the global before wiring series; a throw mid-build
+    // must dispose it here or the instance leaks (token check above proves
+    // this call still owns it — a stale call never reaches renderChart).
+    if (chart) {
+      chart.remove();
+      chart = null;
+    }
     chartContextLoading = false;
     activeHistoryContext = null;
     updateProfileMarketContext();
@@ -3675,7 +3803,7 @@ function classToken(value, fallback = "neutral") {
 }
 
 function formatPrice(value, error) {
-  if (error || typeof value !== "number" || value === 0) return "--";
+  if (error || !Number.isFinite(value)) return "--";
   if (Math.abs(value) >= 1000) return value.toLocaleString(undefined, { maximumFractionDigits: 1 });
   if (Math.abs(value) >= 1) return value.toFixed(2);
   // toPrecision flips to scientific notation for micro prices ("4.200e-7");
@@ -3688,7 +3816,7 @@ function formatPrice(value, error) {
 
 
 function formatBoardPrice(value, error, currency) {
-  if (error || typeof value !== "number" || value === 0) return "--";
+  if (error || !Number.isFinite(value)) return "--";
   // USX = US cents (CBOT/ICE): full precision, bare, like USD.
   if (!currency || currency === "USD" || currency === "USX") return formatPrice(value);
   // formatCompactPrice is abs-based, so restore the sign for negatives.
@@ -3696,7 +3824,7 @@ function formatBoardPrice(value, error, currency) {
 }
 
 function formatCurrencyPrice(value, currency = "USD") {
-  if (typeof value !== "number" || value === 0) return "--";
+  if (!Number.isFinite(value)) return "--";
   const prefix = currencyPrefix(currency);
   // formatCompactPrice is abs-based, so restore the sign for negatives.
   if (currency && currency !== "USD") return `${value < 0 ? "-" : ""}${prefix}${formatCompactPrice(value)}`;
@@ -3714,8 +3842,8 @@ function formatSigned(value) {
 
 function formatBoardSignedChange(value, currency) {
   if (typeof value !== "number") return "--";
-  // Zero is flat and unsigned; the non-USD path would otherwise render
-  // "+₩--" because formatCompactPrice(0) falls through to "--".
+  // Zero is flat and unsigned; keep it out of the signed non-USD path,
+  // which would otherwise render "+₩0.00".
   if (value === 0) return "0.00";
   if (!currency || currency === "USD" || currency === "USX") return formatSigned(value);
   return `${value >= 0 ? "+" : "-"}${currencyPrefix(currency)}${formatCompactPrice(Math.abs(value))}`;

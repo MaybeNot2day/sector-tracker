@@ -130,9 +130,8 @@ class QuoteService:
         Lighter's synthetic equity markets trade around the clock, so they
         drive price discovery while official-session data (previous close,
         share volume, daily bars) stays with the listing venue. The 1D
-        baseline is the last official close — the venue's previous close
-        while its quote is fresh (session live), else its last print (after
-        hours and weekends).
+        baseline is the close of the last COMPLETED official session — the
+        provider's explicit value when carried, else a freshness heuristic.
         """
         lighter = self.providers.get("lighter")
         if not isinstance(lighter, LighterProvider):
@@ -217,12 +216,17 @@ OFFICIAL_QUOTE_FRESH_SECONDS = 3600.0
 
 
 def _official_close(quote: Quote, now: datetime) -> float | None:
-    """Most recent official session close for a listing-venue quote.
+    """Close of the last completed official session for a listing-venue quote.
 
-    While the venue prints trades (fresh timestamp) the last completed close
-    is `previous_close`; once prints stop (overnight, weekends) the venue's
-    final `last` becomes the close to measure against.
+    Providers that see the venue payload carry it explicitly (Yahoo) — that
+    value is exact in every state, including the Friday close→post window
+    and weekends where `last` is a pre/post print. Without it, fall back to
+    freshness: while the venue prints trades (fresh timestamp) the last
+    completed close is `previous_close`; once prints stop (overnight,
+    weekends) the venue's final `last` becomes the close to measure against.
     """
+    if quote.official_close is not None and quote.official_close > 0:
+        return quote.official_close
     timestamp = quote.timestamp
     if timestamp.tzinfo is None:
         timestamp = timestamp.replace(tzinfo=UTC)
