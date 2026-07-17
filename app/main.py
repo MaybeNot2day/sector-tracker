@@ -47,9 +47,11 @@ from app.services.asset_profile import AssetProfileService
 from app.services.crypto_etf_flows import CryptoEtfFlowService
 from app.services.daily_board import DailyBoardService
 from app.services.econ_calendar import EconCalendarService, key_dates_payload
+from app.services.fringe import FringeService, parse_fringe_actions
 from app.services.history import HistoryService, bars_payload, find_asset
 from app.services.key_dates import parse_key_dates
 from app.services.macro import MACRO_TAPE_GROUP_NAME, with_macro_group
+from app.services.market_context import market_context_payload
 from app.services.news import NewsService
 from app.services.quotes import QuoteService
 
@@ -138,7 +140,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.daily_board_service = DailyBoardService(settings.database_path)
     app.state.crypto_etf_flow_service = CryptoEtfFlowService(
         cache_seconds=settings.crypto_etf_flow_cache_seconds,
+        database_path=settings.database_path,
     )
+    app.state.fringe_service = FringeService(settings.database_path, providers)
     app.state.asset_profile_service = AssetProfileService()
     app.state.news_service = NewsService(
         settings.news_channels,
@@ -462,13 +466,17 @@ async def create_report(request: ReportRequest) -> dict[str, object]:
     that day's report, and a new day's brief replaces the previous one.
     Any "Economic Calendar"/"Key Dates" section in the body feeds the
     key-dates panel; its rows mirror the report, so a re-run without
-    the section clears them.
+    the section clears them. A section whose heading mentions "fringe"
+    feeds the Fringe Corner ideas ledger — an accruing book, NOT a
+    mirror: only a same-day re-run can retract that day's new ideas.
     """
     report_date = request.date or datetime.now(UTC).date().isoformat()
     slug = _report_slug(request.slug or request.title)
     if not slug:
         raise HTTPException(status_code=422, detail="report_slug_invalid")
     events = parse_key_dates(request.body, default_date=report_date)
+    # None: no fringe section — the ledger stays untouched.
+    actions = parse_fringe_actions(request.body)
 
     def _ingest() -> int:
         path = app.state.settings.database_path
@@ -484,10 +492,33 @@ async def create_report(request: ReportRequest) -> dict[str, object]:
             slug=slug,
             events=[(e.date, e.time, e.title, e.category) for e in events],
         )
+        if actions is not None:
+            db.apply_fringe_actions(
+                path,
+                slug=slug,
+                report_date=report_date,
+                actions=[(a.action, a.ticker, a.direction, a.text, a.horizon) for a in actions],
+            )
         return report_id
 
     report_id = await asyncio.to_thread(_ingest)
-    return {"id": report_id, "slug": slug, "date": report_date, "key_dates": len(events)}
+    if actions:
+        # Entry/exit stamping is best-effort at ingest; a provider outage
+        # leaves prices null and /api/fringe re-stamps lazily. getattr:
+        # unit tests exercise this route without running the lifespan.
+        service = getattr(app.state, "fringe_service", None)
+        if service is not None:
+            try:
+                await service.stamp_prices()
+            except Exception:
+                logger.warning("fringe price stamping failed", exc_info=True)
+    return {
+        "id": report_id,
+        "slug": slug,
+        "date": report_date,
+        "key_dates": len(events),
+        "fringe_actions": len(actions or []),
+    }
 
 
 @app.get("/api/reports")
@@ -528,6 +559,36 @@ async def key_dates(
     service = getattr(app.state, "econ_calendar_service", None)
     return await key_dates_payload(
         app.state.settings.database_path, service, days=days, limit=limit
+    )
+
+
+@app.get("/api/fringe")
+async def fringe() -> dict[str, object]:
+    """The Fringe Corner book: open ideas marked to market + recent closes.
+
+    Missing entry prices (a provider outage at ingest) are lazily
+    re-stamped here; mark-to-market quotes sit behind a ~60s cache.
+    """
+    service: FringeService = app.state.fringe_service
+    return await service.payload()
+
+
+@app.get("/api/market-context")
+async def market_context(days: int = Query(default=30)) -> dict[str, object]:
+    """Continuous market memory for external agents (e.g. Hermes).
+
+    Snapshot history, watchlist movers, accrued ETF flows, the next week
+    of key dates, and the fringe book with P&L. `days` is clamped to
+    7..90 (the caller is a bot, not a form); a broken piece degrades to
+    empty, never a 500.
+    """
+    # getattr: unit tests exercise this route without running the lifespan.
+    return await market_context_payload(
+        app.state.settings.database_path,
+        groups=getattr(app.state, "groups", []),
+        econ_service=getattr(app.state, "econ_calendar_service", None),
+        fringe_service=getattr(app.state, "fringe_service", None),
+        days=days,
     )
 
 

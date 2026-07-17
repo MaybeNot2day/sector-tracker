@@ -79,6 +79,33 @@ CREATE TABLE IF NOT EXISTS key_dates (
 );
 
 CREATE INDEX IF NOT EXISTS idx_key_dates_slug ON key_dates (source_slug);
+
+CREATE TABLE IF NOT EXISTS fringe_ideas (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    thesis TEXT NOT NULL,
+    horizon TEXT,
+    status TEXT NOT NULL DEFAULT 'open',
+    opened_date TEXT NOT NULL,
+    closed_date TEXT,
+    close_reason TEXT,
+    entry_price REAL,
+    exit_price REAL,
+    last_mentioned TEXT NOT NULL,
+    source_slug TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_fringe_ideas_status ON fringe_ideas (status, ticker, direction);
+
+CREATE TABLE IF NOT EXISTS etf_flow_history (
+    asset TEXT NOT NULL,
+    flow_date TEXT NOT NULL,
+    flow REAL NOT NULL,
+    PRIMARY KEY (asset, flow_date)
+);
 """
 _initialized_paths: set[Path] = set()
 _init_lock = Lock()
@@ -514,6 +541,224 @@ def load_key_dates(path: Path, *, start: str, end: str, limit: int) -> list[dict
         }
         for row in rows
     ]
+
+
+# --- Fringe Corner ideas ledger -------------------------------------------
+
+
+def apply_fringe_actions(
+    path: Path,
+    *,
+    slug: str,
+    report_date: str,
+    actions: Sequence[tuple[str, str, str, str, str | None]],
+) -> dict[str, int]:
+    """Replay one report's fringe actions against the ideas ledger.
+
+    Actions are (action, ticker, direction, text, horizon), action in
+    open/hold/close, applied in report order. Unlike replace_key_dates this
+    is NOT a mirror: the ledger is an accruing book the agent manages
+    explicitly, so unmentioned open ideas stay open and deleting a report
+    leaves the book intact. The one mirror-like rule is same-day: open
+    ideas CREATED by (slug, report_date) that a same-day re-run no longer
+    mentions never really existed and are removed. Semantics:
+
+    - OPEN with an existing open (ticker, direction) idea updates thesis
+      and horizon; entry price and opened date are preserved (idempotent).
+    - HOLD updates the note and last_mentioned, keeping horizon unless the
+      bullet restates one; HOLD with no open idea is treated as OPEN.
+    - CLOSE stamps closed_date/close_reason; CLOSE with nothing open is
+      ignored (an already-closed idea keeps its original close).
+
+    Everything shares one transaction, like replace_key_dates.
+    """
+    init_db(path)
+    now = _to_iso(datetime.now(UTC))
+    counts = {"opened": 0, "updated": 0, "closed": 0, "removed": 0}
+    mentioned: set[tuple[str, str]] = set()
+    with _connect(path) as conn:
+        for action, ticker, direction, text, horizon in actions:
+            mentioned.add((ticker, direction))
+            row = conn.execute(
+                "SELECT id FROM fringe_ideas"
+                " WHERE ticker = ? AND direction = ? AND status = 'open'",
+                (ticker, direction),
+            ).fetchone()
+            if action == "close":
+                if row is None:
+                    continue
+                conn.execute(
+                    """
+                    UPDATE fringe_ideas
+                    SET status = 'closed', closed_date = ?, close_reason = ?,
+                        last_mentioned = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (report_date, text, report_date, now, int(row["id"])),
+                )
+                counts["closed"] += 1
+            elif row is not None:
+                # OPEN restates the idea (horizon replaced, even by nothing);
+                # HOLD only refreshes the note, keeping horizon unless given.
+                horizon_sql = "?" if action == "open" else "COALESCE(?, horizon)"
+                conn.execute(
+                    f"""
+                    UPDATE fringe_ideas
+                    SET thesis = ?, horizon = {horizon_sql},
+                        last_mentioned = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (text, horizon, report_date, now, int(row["id"])),
+                )
+                counts["updated"] += 1
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO fringe_ideas (
+                        ticker, direction, thesis, horizon, status, opened_date,
+                        last_mentioned, source_slug, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)
+                    """,
+                    (ticker, direction, text, horizon, report_date, report_date, slug, now, now),
+                )
+                counts["opened"] += 1
+        # Same-day mirror: a re-run of (slug, report_date) is the authority
+        # on what it opened today; prior-day ideas are never rolled back.
+        rows = conn.execute(
+            "SELECT id, ticker, direction FROM fringe_ideas"
+            " WHERE source_slug = ? AND opened_date = ? AND status = 'open'",
+            (slug, report_date),
+        ).fetchall()
+        orphaned = [
+            (int(row["id"]),)
+            for row in rows
+            if (str(row["ticker"]), str(row["direction"])) not in mentioned
+        ]
+        conn.executemany("DELETE FROM fringe_ideas WHERE id = ?", orphaned)
+        counts["removed"] = len(orphaned)
+    return counts
+
+
+def load_fringe_ideas(
+    path: Path, *, status: str, limit: int | None = None
+) -> list[dict[str, object]]:
+    """Ledger rows for one status: open ideas oldest first (stable panel
+    order), closed ideas newest close first (recent history)."""
+    init_db(path)
+    order = "closed_date DESC, id DESC" if status == "closed" else "opened_date, id"
+    params: list[object] = [status]
+    limit_clause = ""
+    if limit is not None:
+        limit_clause = "LIMIT ?"
+        params.append(limit)
+    with _connect(path) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id, ticker, direction, thesis, horizon, status, opened_date,
+                   closed_date, close_reason, entry_price, exit_price,
+                   last_mentioned, source_slug
+            FROM fringe_ideas
+            WHERE status = ?
+            ORDER BY {order}
+            {limit_clause}
+            """,
+            params,
+        ).fetchall()
+    return [
+        {
+            "id": int(row["id"]),
+            "ticker": str(row["ticker"]),
+            "direction": str(row["direction"]),
+            "thesis": str(row["thesis"]),
+            "horizon": str(row["horizon"]) if row["horizon"] is not None else None,
+            "status": str(row["status"]),
+            "opened_date": str(row["opened_date"]),
+            "closed_date": str(row["closed_date"]) if row["closed_date"] is not None else None,
+            "close_reason": str(row["close_reason"]) if row["close_reason"] is not None else None,
+            "entry_price": _optional_float(row["entry_price"]),
+            "exit_price": _optional_float(row["exit_price"]),
+            "last_mentioned": str(row["last_mentioned"]),
+            "source_slug": str(row["source_slug"]),
+        }
+        for row in rows
+    ]
+
+
+def latest_fringe_mention(path: Path) -> str | None:
+    """Newest report date that fed the book; open ideas older than this
+    were not refreshed by the latest report (the UI's `stale` flag)."""
+    init_db(path)
+    with _connect(path) as conn:
+        row = conn.execute("SELECT MAX(last_mentioned) AS latest FROM fringe_ideas").fetchone()
+    return str(row["latest"]) if row and row["latest"] is not None else None
+
+
+def stamp_fringe_prices(
+    path: Path,
+    *,
+    entries: Sequence[tuple[int, float]] = (),
+    exits: Sequence[tuple[int, float]] = (),
+) -> None:
+    """Fill missing entry/exit prices by idea id; never overwrites a stamp.
+
+    The IS NULL guard makes lazy re-stamping (a provider outage at ingest,
+    retried on the next /api/fringe build) safe to call repeatedly.
+    """
+    if not entries and not exits:
+        return
+    init_db(path)
+    now = _to_iso(datetime.now(UTC))
+    with _connect(path) as conn:
+        conn.executemany(
+            "UPDATE fringe_ideas SET entry_price = ?, updated_at = ?"
+            " WHERE id = ? AND entry_price IS NULL",
+            [(price, now, idea_id) for idea_id, price in entries],
+        )
+        conn.executemany(
+            "UPDATE fringe_ideas SET exit_price = ?, updated_at = ?"
+            " WHERE id = ? AND exit_price IS NULL",
+            [(price, now, idea_id) for idea_id, price in exits],
+        )
+
+
+# --- crypto ETF flow history ----------------------------------------------
+
+
+def upsert_etf_flow_history(path: Path, rows: Sequence[tuple[str, str, float]]) -> None:
+    """Accrue (asset, date, flow_usd) rows; a re-fetch updates in place.
+
+    Farside serves only a ~20-day window, so this table is what gives the
+    market-context digest flow history beyond the scrape horizon.
+    """
+    if not rows:
+        return
+    init_db(path)
+    with _connect(path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO etf_flow_history (asset, flow_date, flow)
+            VALUES (?, ?, ?)
+            ON CONFLICT(asset, flow_date) DO UPDATE SET flow = excluded.flow
+            """,
+            rows,
+        )
+
+
+def load_etf_flow_history(path: Path, *, start: str) -> dict[str, list[dict[str, object]]]:
+    """Per-asset daily flows from `start` onward, ascending by date."""
+    init_db(path)
+    with _connect(path) as conn:
+        rows = conn.execute(
+            "SELECT asset, flow_date, flow FROM etf_flow_history"
+            " WHERE flow_date >= ? ORDER BY asset, flow_date",
+            (start,),
+        ).fetchall()
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row["asset"]), []).append(
+            {"date": str(row["flow_date"]), "flow": float(row["flow"])}
+        )
+    return grouped
 
 
 _MD_NOISE = str.maketrans({"#": None, "*": None, "`": None, ">": None, "|": None, "_": None})

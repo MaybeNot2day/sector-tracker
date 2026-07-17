@@ -57,6 +57,8 @@ let latestData = null;
 let latestCryptoEtfFlows = null;
 let latestKeyDates = null;
 let keyDatesRevision = 0;
+let latestFringe = null;
+let fringeRevision = 0;
 let latestSnapshots = null;
 let watchlistConfig = null;
 let activeSymbol = null;
@@ -120,6 +122,8 @@ let keyDatesFetchApplied = 0;
 let snapshotsFetchSeq = 0;
 let snapshotsFetchApplied = 0;
 let snapshotRevision = 0;
+let fringeFetchSeq = 0;
+let fringeFetchApplied = 0;
 
 const sourceLabels = {
   yahoo: "YH",
@@ -396,6 +400,7 @@ function init() {
   fetchCryptoEtfFlows();
   fetchKeyDates();
   fetchSnapshots();
+  fetchFringe();
   setNewsOpen(localStorage.getItem(NEWS_OPEN_KEY) === "1");
   fetchNews();
   refreshReportsBadge();
@@ -415,6 +420,7 @@ function init() {
       fetchCryptoEtfFlows();
       fetchSnapshots();
       fetchKeyDates();
+      fetchFringe();
     }
   }, 300000);
   // Release actuals land within ~1 min of the print; when WS is unavailable,
@@ -450,6 +456,7 @@ function init() {
     }
     fetchCryptoEtfFlows();
     fetchKeyDates();
+    fetchFringe();
   });
   window.addEventListener("pagehide", flushBoardCache);
   newsToggle.addEventListener("click", () => setNewsOpen(!document.body.classList.contains("news-open")));
@@ -472,6 +479,7 @@ function init() {
     fetchCryptoEtfFlows();
     fetchSnapshots();
     fetchKeyDates();
+    fetchFringe();
   });
   viewButtons.forEach((button) => {
     button.addEventListener("click", () => selectView(button.dataset.view || "daily"));
@@ -1373,6 +1381,25 @@ async function fetchSnapshots() {
   if (latestData?.overview) renderDailyBoard(latestData.overview, latestCryptoEtfFlows);
 }
 
+async function fetchFringe() {
+  const seq = ++fringeFetchSeq;
+  try {
+    const response = await fetch("/api/fringe");
+    if (!response.ok) throw new Error("fringe_failed");
+    const payload = await response.json();
+    // A slower response must never overwrite a fresher one.
+    if (seq <= fringeFetchApplied) return;
+    fringeFetchApplied = seq;
+    latestFringe = payload;
+    fringeRevision += 1;
+    if (latestData?.overview) renderDailyBoard(latestData.overview, latestCryptoEtfFlows);
+  } catch (error) {
+    // Keep the last good book: a transient fetch error must not blank a
+    // panel that already renders ideas, and while nothing ever loaded the
+    // panel simply stays hidden — the rest of the board is untouched.
+  }
+}
+
 // --- Macro tape ------------------------------------------------------------
 // VIX / DXY / US10Y context strip. These symbols are polled alongside the
 // watchlists but stay out of the universe, so breadth metrics are unaffected.
@@ -1448,6 +1475,7 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
     cryptoEtfFlows?.updated_at || "",
     snapshotRevision,
     keyDatesRevision,
+    fringeRevision,
   ].join("|");
   if (renderKey === lastDailyRenderKey) return;
   lastDailyRenderKey = renderKey;
@@ -1567,6 +1595,8 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
 
     ${keyDatesSection(latestKeyDates)}
 
+    ${fringeSection(latestFringe)}
+
     <section class="analytics-panel">
       ${panelHeading(
         "Theme Rotation",
@@ -1594,6 +1624,24 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
   });
   dailyBoard.querySelectorAll(".theme-link").forEach((button) => {
     button.addEventListener("click", () => filterMarketsByGroup(button.dataset.group || ""));
+  });
+  // Fringe tickers are arbitrary Hermes symbols: resolve through the
+  // watchlist first (full asset config), then the crypto tape (perp quote
+  // context), else fall back to a bare Yahoo equity — the same resolution
+  // order deep links use. A failed chart load already shows chart-error.
+  dailyBoard.querySelectorAll(".fringe-ticker").forEach((button) => {
+    button.addEventListener("click", () => {
+      const symbol = button.dataset.symbol || "";
+      if (!symbol) return;
+      const asset = findAssetConfig(symbol);
+      if (asset) {
+        openChart(asset);
+      } else if ((latestData?.crypto_tape || []).some((row) => row.symbol === symbol)) {
+        openTapeChart(symbol);
+      } else {
+        openChart({ symbol, type: "equity", quote: { provider: "yahoo" } });
+      }
+    });
   });
 }
 
@@ -1945,6 +1993,84 @@ function keyDateDayDiff(date, asOf) {
   const anchor = Date.parse(asOf || "");
   if (Number.isNaN(event) || Number.isNaN(anchor)) return NaN;
   return Math.round((event - anchor) / 86400000);
+}
+
+// --- Fringe Corner ---------------------------------------------------------
+// Hermes' trading-ideas book, parsed server-side from uploaded reports.
+// Entry prices are stamped at ingest; open ideas mark to market on the
+// backend, so this is pure presentation. An empty (or never-loaded) book
+// renders nothing at all — no empty shell next to the key-dates rail.
+function fringeSection(payload) {
+  const open = Array.isArray(payload?.open) ? payload.open : [];
+  const closed = Array.isArray(payload?.closed) ? payload.closed : [];
+  if (!open.length && !closed.length) return "";
+  const note = [
+    open.length ? `${open.length} open` : "",
+    closed.length ? `${closed.length} closed` : "",
+  ]
+    .filter(Boolean)
+    .join(" \u00b7 ");
+  return `<section class="analytics-panel">
+    ${panelHeading(
+      "Fringe Corner",
+      note,
+      "Hermes' daily trading-ideas book, fed by uploaded agent reports. Entry prices are stamped when an idea first appears and open ideas mark to market. NOT REFRESHED means the newest report did not mention a still-open idea. Click a ticker to open its chart."
+    )}
+    ${open.length ? `<div class="fringe-list">${open.map(fringeOpenRow).join("")}</div>` : ""}
+    ${fringeClosedList(closed)}
+  </section>`;
+}
+
+function fringeOpenRow(idea) {
+  const direction = String(idea.direction || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+  const ticker = escapeHtml(idea.ticker || "");
+  const pct = numericOrNull(idea.unrealized_pct);
+  // A null mark (provider miss; the backend retries lazily) reads as a
+  // muted em dash — never a fake 0.00%.
+  const pnl =
+    pct === null
+      ? '<strong class="fringe-pnl fringe-missing">\u2014</strong>'
+      : `<strong class="fringe-pnl ${pct > 0 ? "tone-positive" : pct < 0 ? "tone-negative" : ""}">${escapeHtml(formatSignedPct(pct))}</strong>`;
+  const entry = numericOrNull(idea.entry_price);
+  const meta = [
+    idea.opened ? `opened ${idea.opened}` : "",
+    idea.horizon || "",
+    `entry ${entry === null ? "\u2014" : formatPrice(entry)}`,
+  ]
+    .filter(Boolean)
+    .join(" \u00b7 ");
+  return `<div class="fringe-row">
+    <span class="fringe-chip fringe-${direction.toLowerCase()}">${direction}</span>
+    <div class="fringe-main">
+      <div class="fringe-top">
+        <button type="button" class="fringe-ticker" data-symbol="${ticker}" title="Open ${ticker} chart">${ticker}</button>
+        ${pnl}
+      </div>
+      <span class="fringe-thesis" title="${escapeHtml(idea.thesis || "")}">${escapeHtml(idea.thesis || "")}</span>
+      <span class="fringe-meta">${escapeHtml(meta)}${idea.stale ? '<em class="fringe-stale">not refreshed</em>' : ""}</span>
+    </div>
+  </div>`;
+}
+
+// Compact realized-P&L footer: only the freshest 5 of the payload's 10
+// closed ideas — a ledger tail, not a history browser. The full close
+// reason rides as a native title since the row truncates it.
+function fringeClosedList(closed) {
+  if (!closed.length) return "";
+  const rows = closed.slice(0, 5).map((idea) => {
+    const pct = numericOrNull(idea.realized_pct);
+    const tone = pct === null ? "" : pct > 0 ? "tone-positive" : pct < 0 ? "tone-negative" : "";
+    return `<div class="fringe-closed-row" title="${escapeHtml(idea.close_reason || "")}">
+      <strong>${escapeHtml(idea.ticker || "")}</strong>
+      <span>${escapeHtml(String(idea.direction || "").toUpperCase())}</span>
+      <em class="${tone}">${pct === null ? "\u2014" : escapeHtml(formatSignedPct(pct))}</em>
+      <span class="fringe-closed-reason">${escapeHtml(idea.close_reason || "")}</span>
+    </div>`;
+  });
+  return `<div class="fringe-closed">
+    <span class="fringe-closed-label">Recently closed</span>
+    ${rows.join("")}
+  </div>`;
 }
 
 function hasLatestFlowPrint(asset) {

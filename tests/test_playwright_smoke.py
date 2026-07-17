@@ -185,6 +185,41 @@ def test_daily_board_loads_without_page_errors_and_renders_core_sections(
     )
     expect(key_date_rows.nth(2).locator(".key-date-figures")).to_have_count(0)
 
+    # Fringe Corner: Hermes' ideas book — direction chip, marked P&L, a
+    # missing price rendering as an em dash, the stale marker, and the
+    # compact closed footer.
+    fringe_rows = page.locator("#daily-board .fringe-row")
+    expect(fringe_rows).to_have_count(3)
+    expect(fringe_rows.nth(0).locator(".fringe-chip")).to_have_text("LONG")
+    expect(fringe_rows.nth(0).locator(".fringe-pnl")).to_have_text("+4.16%")
+    expect(fringe_rows.nth(0).locator(".fringe-ticker")).to_have_text("CIFR")
+    expect(fringe_rows.nth(1).locator(".fringe-chip")).to_have_text("SHORT")
+    expect(fringe_rows.nth(1).locator(".fringe-pnl")).to_have_text("—")
+    expect(fringe_rows.nth(1).locator(".fringe-meta")).to_contain_text("entry —")
+    expect(fringe_rows.nth(2).locator(".fringe-stale")).to_have_text("not refreshed")
+    closed_rows = page.locator("#daily-board .fringe-closed-row")
+    expect(closed_rows).to_have_count(2)
+    expect(closed_rows.nth(0)).to_contain_text("NVDA")
+    expect(closed_rows.nth(0)).to_contain_text("+8.05%")
+
+
+def test_daily_board_hides_fringe_panel_when_book_is_empty(page: Page, base_url: str) -> None:
+    # Routes registered later win in Playwright, so this overrides only the
+    # fixture's /api/fringe stub; every other endpoint keeps its data.
+    page.route(
+        "**/api/fringe",
+        lambda route: _fulfill_json(route, {"as_of": _iso(), "open": [], "closed": []}),
+    )
+    _goto_board(page, base_url)
+
+    # No empty shell: the panel does not exist at all, and the rest of the
+    # daily board renders unchanged.
+    expect(page.locator("#daily-board .benchmark-card").nth(0)).to_be_visible()
+    expect(
+        page.locator("#daily-board").get_by_role("heading", name="Fringe Corner")
+    ).to_have_count(0)
+    expect(page.locator("#daily-board .fringe-row")).to_have_count(0)
+
 
 def test_markets_tabs_render_rows_and_open_canvas_chart(page: Page, base_url: str) -> None:
     _goto_board(page, base_url)
@@ -649,6 +684,8 @@ def _stub_board_apis(page: Page) -> None:
             _fulfill_json(route, NEWS_PAYLOAD)
         elif path == "/api/key-dates":
             _fulfill_json(route, KEY_DATES_PAYLOAD)
+        elif path == "/api/fringe":
+            _fulfill_json(route, FRINGE_PAYLOAD)
         elif path == "/api/groups" and request.method == "GET":
             _fulfill_json(route, WATCHLIST_PAYLOAD)
         elif (
@@ -1098,6 +1135,83 @@ KEY_DATES_PAYLOAD: dict[str, Any] = {
             "title": "TSLA earnings",
             "category": "EARNINGS",
             "release": None,
+        },
+    ],
+}
+
+# Hermes book: an open long marking to market, an open short the providers
+# cannot price yet (null price → em dash), a stale idea the newest report
+# skipped, and two closed ideas for the footer list.
+FRINGE_PAYLOAD: dict[str, Any] = {
+    "as_of": _iso(),
+    "open": [
+        {
+            "id": 3,
+            "ticker": "CIFR",
+            "direction": "long",
+            "thesis": "Miner with HPC optionality; base building above 8.",
+            "horizon": "2w",
+            "opened": "2026-07-08",
+            "last_mentioned": "2026-07-09",
+            "stale": False,
+            "entry_price": 8.42,
+            "last": 8.77,
+            "unrealized_pct": 4.16,
+            "source_slug": "fringe-corner",
+        },
+        {
+            "id": 4,
+            "ticker": "PRIV",
+            "direction": "short",
+            "thesis": "Illiquid name no provider can price yet.",
+            "horizon": None,
+            "opened": "2026-07-09",
+            "last_mentioned": "2026-07-09",
+            "stale": False,
+            "entry_price": None,
+            "last": None,
+            "unrealized_pct": None,
+            "source_slug": "fringe-corner",
+        },
+        {
+            "id": 2,
+            "ticker": "XLU",
+            "direction": "short",
+            "thesis": "Defensive bid fading as yields back up.",
+            "horizon": "1m",
+            "opened": "2026-07-01",
+            "last_mentioned": "2026-07-05",
+            "stale": True,
+            "entry_price": 82.1,
+            "last": 80.9,
+            "unrealized_pct": 1.46,
+            "source_slug": "fringe-corner",
+        },
+    ],
+    "closed": [
+        {
+            "id": 1,
+            "ticker": "NVDA",
+            "direction": "long",
+            "thesis": "Blackwell ramp",
+            "opened": "2026-06-20",
+            "closed": "2026-07-08",
+            "entry_price": 160.2,
+            "exit_price": 173.1,
+            "realized_pct": 8.05,
+            "close_reason": "Target hit into earnings",
+        },
+        {
+            "id": 0,
+            "ticker": "GME",
+            "direction": "short",
+            "thesis": "Squeeze exhaustion",
+            "opened": "2026-06-15",
+            "closed": "2026-07-02",
+            "entry_price": 28.4,
+            "exit_price": 30.1,
+            "realized_pct": -5.99,
+            "close_reason": "Stopped on renewed retail flow",
         },
     ],
 }

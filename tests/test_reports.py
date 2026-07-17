@@ -117,7 +117,7 @@ def test_create_report_returns_id_slug_and_date(
 
     assert response.status_code == 200
     data = response.json()
-    assert set(data) == {"id", "slug", "date", "key_dates"}
+    assert set(data) == {"id", "slug", "date", "key_dates", "fringe_actions"}
     assert isinstance(data["id"], int)
     assert data["slug"] == "morning-flows-btc-eth"
     assert data["date"] == "2026-07-09"

@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from pathlib import Path
+
+from app import db
+
+logger = logging.getLogger(__name__)
 
 FARSIDE_READER_URL = "https://r.jina.ai/http://{url}"
 FARSIDE_ASSETS = {
@@ -31,8 +37,12 @@ class CryptoEtfFlowService:
     # guard) meant up to ~90s latency per caller, multiplied by clients.
     FAILURE_RETRY_SECONDS = 120
 
-    def __init__(self, *, cache_seconds: int = 900) -> None:
+    def __init__(self, *, cache_seconds: int = 900, database_path: Path | None = None) -> None:
         self.cache_seconds = cache_seconds
+        # When set, every successful fetch accrues its per-day rows into
+        # etf_flow_history so /api/market-context can serve flows beyond
+        # Farside's ~20-day scrape window.
+        self.database_path = database_path
         self._cache_payload: dict[str, object] | None = None
         self._cache_time = 0.0
         # None (not 0.0): monotonic() is near-zero right after host boot,
@@ -72,6 +82,14 @@ class CryptoEtfFlowService:
             # mark the payload stale. Only a fully fresh fetch is is_stale
             # False.
             fetched = {str(entry["asset"]): entry for entry in assets}
+            if self.database_path is not None:
+                try:
+                    await asyncio.to_thread(
+                        db.upsert_etf_flow_history, self.database_path, _history_rows(assets)
+                    )
+                except Exception:
+                    # History is a bonus; the flows payload must survive it.
+                    logger.warning("etf flow history persist failed", exc_info=True)
             cached_assets = self._cache_payload.get("assets") if self._cache_payload else None
             cached_by_symbol = (
                 {str(entry.get("asset")): entry for entry in cached_assets}
@@ -139,6 +157,24 @@ class CryptoEtfFlowService:
             for _, payload in sorted(completed)
             if payload is not None
         ]
+
+
+def _history_rows(assets: list[dict[str, object]]) -> list[tuple[str, str, float]]:
+    """Flatten freshly fetched asset summaries into (asset, date, flow_usd) rows."""
+    rows: list[tuple[str, str, float]] = []
+    for entry in assets:
+        asset = str(entry.get("asset") or "")
+        day_rows = entry.get("rows")
+        if not asset or not isinstance(day_rows, list):
+            continue
+        for day in day_rows:
+            if not isinstance(day, dict):
+                continue
+            flow = day.get("flow_usd")
+            date = day.get("date")
+            if isinstance(date, str) and isinstance(flow, int | float):
+                rows.append((asset, date, float(flow)))
+    return rows
 
 
 def parse_farside_table(markdown: str) -> list[dict[str, object]]:

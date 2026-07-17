@@ -149,6 +149,69 @@ Matching is fuzzy-title within ±1 day of the stored date; unmatched events keep
 payload. `ECON_CALENDAR_COUNTRIES` filters the source feed and
 `ECON_CALENDAR_CACHE_SECONDS` sets the idle cache TTL.
 
+### Fringe Corner
+
+A Hermes-managed book of daily fringe trading ideas, fed through the same pipeline as
+every other report: the Hermes cron writes a dated markdown brief into the vault,
+Syncthing ships it to the uploader box, and the vault uploader POSTs it to
+`/api/reports`. Any section whose heading mentions **fringe** feeds the book, one
+action per bullet:
+
+```markdown
+## Fringe Corner
+
+- OPEN LONG CIFR — miner squeeze into the halving narrative [horizon: 2w]
+- HOLD SHORT XLU — utilities still crowded, thesis intact
+- CLOSE LONG NVDA — earnings played out, taking the win
+```
+
+Grammar: `ACTION DIRECTION TICKER — text`, where ACTION is `OPEN`/`HOLD`/`CLOSE`
+(case-insensitive), DIRECTION is `LONG`/`SHORT`, the ticker is an uppercase
+`[A-Z0-9.-=]` token (`BRK-B`, `ES=F`, `BTC`), the separator is an em-dash, colon, or
+spaced hyphen, and an optional trailing `[horizon: ...]` tag carries free text.
+Malformed bullets are skipped, never fatal.
+
+Hermes manages its own book explicitly — unlike Key Dates the ledger **accrues**
+instead of mirroring. `OPEN` on an already-open `(ticker, direction)` idea just
+refreshes the thesis/horizon (entry price and opened date are preserved); `HOLD`
+updates the note; `HOLD` with nothing open opens forgivingly; `CLOSE` stamps the
+close date, reason, and exit price; `CLOSE` with nothing open is ignored. Ideas the
+latest report does not mention stay open and are flagged stale in the panel. The one
+mirror-like rule is same-day: re-uploading the same slug on the same date replays the
+actions idempotently and retracts ideas the run created that day but no longer
+mentions (they never really existed) — prior days' ideas are never rolled back, and
+deleting a report leaves the book intact.
+
+Entry prices are stamped at ingest and exits at close, using Lighter for tickers it
+lists as crypto and Yahoo for everything else (arbitrary tickers work; the watchlist
+is not consulted). A provider outage leaves the price null and the next `/api/fringe`
+build re-stamps it lazily. `GET /api/fringe` serves the open book marked to market
+(~60s quote cache) with unrealized P&L plus the ten most recent closes with realized
+P&L.
+
+`GET /api/market-context?days=30` (days clamped to 7..90) is the digest that gives
+Hermes continuous market memory instead of a moment: daily board snapshot history
+(same rows as `/api/snapshots`), 5d/20d watchlist leaders/laggards from cached daily
+bars, per-asset ETF flow history accrued from every successful Farside fetch, the
+next week of key dates (with release enrichment), and its own fringe book with P&L.
+Every piece degrades to empty on failure — the digest never 500s.
+
+On the uploader box, add the report title to `REPORT_TITLES` in
+`~/.config/sector-tracker/uploader.env` (e.g. `REPORT_TITLES=...,Fringe Corner`) or
+the vault watcher will skip the file.
+
+Reference skeleton for the Hermes cron job:
+
+```text
+1. GET $BOARD/api/market-context?days=30 — regime/breadth history, movers,
+   ETF flows, upcoming key dates, and your current book with P&L.
+2. Read today's research briefs.
+3. Write the daily report with a "## Fringe Corner" section that manages the
+   open book EXPLICITLY: HOLD every idea you still like (updated note),
+   CLOSE what is done or invalidated (reason), OPEN new ideas sparingly
+   (thesis + [horizon: ...]). Unmentioned ideas stay open but go stale.
+```
+
 ### Automatic vault uploads
 
 `scripts/vault_report_uploader.py` makes the pipeline hands-off: it scans a vault

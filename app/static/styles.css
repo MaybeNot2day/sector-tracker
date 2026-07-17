@@ -1239,6 +1239,169 @@ h1 {
   background: var(--accent-soft);
 }
 
+/* --- Fringe Corner ------------------------------------------------------ */
+/* Hermes' ideas book. Rows follow the key-dates rhythm; direction chips
+   reuse the session-chip framing with the existing green/red pair. */
+.fringe-list {
+  max-height: 420px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.fringe-row {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.fringe-row:last-child {
+  border-bottom: 0;
+}
+
+.fringe-chip {
+  margin-top: 2px;
+  padding: 2px 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--surface-soft);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-align: center;
+}
+
+.fringe-long {
+  border-color: rgba(77, 179, 138, 0.35);
+  background: var(--green-bg);
+  color: var(--green);
+}
+
+.fringe-short {
+  border-color: rgba(224, 99, 95, 0.35);
+  background: var(--red-bg);
+  color: var(--red);
+}
+
+.fringe-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.fringe-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.fringe-ticker {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--text);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.fringe-ticker:hover,
+.fringe-ticker:focus-visible {
+  color: var(--accent);
+  outline: none;
+}
+
+.fringe-pnl {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.fringe-missing {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+/* ~2-line clamp; the full thesis rides as a native title tooltip. */
+.fringe-thesis {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  color: var(--muted-strong);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.fringe-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 6px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.fringe-stale {
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--muted);
+  font-style: normal;
+}
+
+.fringe-closed {
+  padding: 8px 14px 10px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.fringe-closed-label {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+}
+
+.fringe-closed-row {
+  display: grid;
+  grid-template-columns: auto 42px 58px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 8px;
+  min-height: 20px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.fringe-closed-row strong {
+  color: var(--muted-strong);
+  font-weight: 600;
+}
+
+.fringe-closed-row em {
+  font-style: normal;
+  text-align: right;
+}
+
+.fringe-closed-reason {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .rotation-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
