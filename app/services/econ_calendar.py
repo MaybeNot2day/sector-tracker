@@ -120,6 +120,14 @@ _CONTAINMENT_BONUS = 0.1
 # clear the with-country threshold by itself: 0.767 * 0.75 < 0.6.
 _INDICATOR_DISCOUNT = 0.75
 
+# Hermes table titles append source attribution after a spaced em/en dash
+# ("Industrial Production MoM, Jun — Federal Reserve"); those tokens only
+# dilute the overlap score, so scoring strips the suffix.
+_ATTRIBUTION_SPLIT = re.compile(r"\s+[—–]\s+")
+# A trailing slash-segment is the secondary twin of a combined print; its
+# exact-match score must not beat the lead series (1.1 * 0.85 < 0.957,
+# the full-variant score for "Initial / Continuing Jobless Claims").
+_SECONDARY_SEGMENT_DISCOUNT = 0.85
 _EVENT_TIME = re.compile(r"\b(\d{1,2}):(\d{2})\s*([A-Za-z]{2,4})?\b")
 # Coarse zone map for the time-proximity tiebreak only; ZoneInfo handles
 # DST for the aliases that have it.
@@ -170,6 +178,34 @@ def normalize_event_title(title: str) -> frozenset[str]:
     if {"jobless", "claims"} <= tokens and "continuing" not in tokens:
         tokens.add("initial")
     return frozenset(tokens)
+
+
+def event_title_variants(title: str) -> tuple[tuple[frozenset[str], float], ...]:
+    """Weighted token-set variants scored against every candidate row.
+
+    The whole (attribution-stripped) title always scores at full weight; a
+    slash-combined twin print ("Building Permits / Housing Starts, Jun")
+    additionally scores each segment alone, since the combined set matches
+    neither row well. Segments after the first are slightly discounted:
+    the agent leads with the primary print, and an exact match on the
+    trailing twin ("Initial / Continuing Jobless Claims") must not outrank
+    the headline series. Single-token segments are dropped: with the
+    containment bonus a lone token like "initial" would clear the
+    threshold against any row that contains it.
+    """
+    base = _ATTRIBUTION_SPLIT.split(title, 1)[0]
+    variants: dict[frozenset[str], float] = {}
+    full = normalize_event_title(base)
+    if full:
+        variants[full] = 1.0
+    segments = base.split(" / ")
+    if len(segments) > 1:
+        for position, segment in enumerate(segments):
+            tokens = normalize_event_title(segment)
+            if len(tokens) > 1:
+                weight = 1.0 if position == 0 else _SECONDARY_SEGMENT_DISCOUNT
+                variants[tokens] = max(variants.get(tokens, 0.0), weight)
+    return tuple(variants.items())
 
 
 def _normalize_row_title(title: str) -> frozenset[str]:
@@ -302,8 +338,8 @@ def match_release(event: dict[str, object], rows: list[CalendarRow]) -> dict[str
     title = str(event.get("title") or "")
     if not title:
         return None
-    event_tokens = normalize_event_title(title)
-    if not event_tokens:
+    variants = event_title_variants(title)
+    if not variants:
         return None
     country = infer_country(title)
     threshold = (
@@ -320,7 +356,7 @@ def match_release(event: dict[str, object], rows: list[CalendarRow]) -> dict[str
         row_date = row.date.date()
         if abs((row_date - event_date).days) > 1:
             continue
-        score = _score(event_tokens, row)
+        score = max(weight * _score(tokens, row) for tokens, weight in variants)
         if score < threshold:
             continue
         proximity = -abs((row.date - moment).total_seconds()) if moment else 0.0

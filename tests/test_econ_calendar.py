@@ -138,7 +138,19 @@ _FIXTURE_JSON = r"""
   "forecast": null, "importance": 0, "date": "2026-07-15T12:45:00.000Z"},
  {"id": "420855", "title": "ECB Cipollone Speech", "indicator": "Interest Rate",
   "country": "EU", "period": "", "actual": null, "previous": null,
-  "forecast": null, "importance": -1, "date": "2026-07-17T10:00:00.000Z"}
+  "forecast": null, "importance": -1, "date": "2026-07-17T10:00:00.000Z"},
+ {"id": "404101", "title": "Housing Starts", "indicator": "Housing Starts",
+  "country": "US", "period": "Jun", "actual": null, "previous": 1.177,
+  "forecast": 1.31, "scale": "M", "currency": "USD", "importance": 1,
+  "date": "2026-07-17T12:30:00.000Z"},
+ {"id": "404102", "title": "Building Permits Prel", "indicator": "Building Permits",
+  "country": "US", "period": "Jun", "actual": null, "previous": 1.41,
+  "forecast": 1.4, "scale": "M", "currency": "USD", "importance": 1,
+  "date": "2026-07-17T12:30:00.000Z"},
+ {"id": "404103", "title": "Industrial Production MoM",
+  "indicator": "Industrial Production MoM", "country": "US", "period": "Jun",
+  "actual": null, "previous": 0.1, "forecast": 0.2, "unit": "%",
+  "currency": "USD", "importance": 0, "date": "2026-07-17T13:15:00.000Z"}
 ]
 """
 
@@ -222,6 +234,44 @@ def test_speech_events_match_speech_rows() -> None:
         matched_title({"date": "2026-07-17", "title": "ECB Cipollone speaks", "time": None})
         == "ECB Cipollone Speech"
     )
+
+
+def test_attribution_suffix_is_stripped_before_scoring() -> None:
+    # Hermes table titles carry "— <source>" attribution; those tokens
+    # diluted the overlap below threshold on the production board.
+    assert (
+        matched_title(
+            {
+                "date": "2026-07-17",
+                "title": "Industrial Production MoM, Jun — Federal Reserve",
+                "time": "15:15 CET",
+            }
+        )
+        == "Industrial Production MoM"
+    )
+    assert (
+        matched_title(
+            {
+                "date": "2026-07-17",
+                "title": "Euro Area CPI Final, Jun — Eurostat / TE",
+                "time": "11:00 CET",
+            }
+        )
+        == "Inflation Rate YoY Final"
+    )
+
+
+def test_slash_combined_titles_match_a_twin_print() -> None:
+    # "A / B" events score each side alone; the combined token set matches
+    # neither row well enough. Either twin is a correct answer; the exact
+    # pick is a scoring tiebreak, so only membership is pinned.
+    assert matched_title(
+        {
+            "date": "2026-07-17",
+            "title": "Building Permits / Housing Starts, Jun — Census",
+            "time": "14:30 CET",
+        }
+    ) in {"Building Permits Prel", "Housing Starts"}
 
 
 def test_country_inference_excludes_foreign_same_title_rows() -> None:
