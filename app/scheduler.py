@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from contextlib import suppress
+from pathlib import Path
 from typing import Any, cast
 
 from fastapi import WebSocket
@@ -14,6 +16,23 @@ from app.services.macro import MACRO_TAPE_GROUP_NAME, macro_payload, with_macro_
 from app.services.quotes import grouped_quotes_payload
 
 logger = logging.getLogger(__name__)
+
+
+def _ui_version() -> str:
+    """Fingerprint of the served index.html (it pins the ?v= asset busters).
+
+    Rides every board payload so a long-lived dashboard tab can notice a
+    deploy and reload itself instead of running weeks-old code against
+    fresh data.
+    """
+    try:
+        index = Path(__file__).resolve().parent / "static" / "index.html"
+        return hashlib.sha1(index.read_bytes()).hexdigest()[:12]
+    except OSError:  # pragma: no cover - the static bundle always ships
+        return ""
+
+
+UI_VERSION = _ui_version()
 
 
 class ConnectionManager:
@@ -257,6 +276,7 @@ def _board_payload(app_state: Any, groups: Any, grouped: Any) -> dict[str, objec
     payload["overview"] = overview
     payload["macro"] = macro_payload(grouped.get(MACRO_TAPE_GROUP_NAME, []))
     payload["crypto_tape"] = tape
+    payload["ui_version"] = UI_VERSION
     return payload
 
 

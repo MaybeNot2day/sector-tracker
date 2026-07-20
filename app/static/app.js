@@ -756,12 +756,36 @@ function updateFeedModeLabel() {
       : "Quotes refresh by HTTP poll every 10 seconds";
 }
 
+let uiVersion = null;
+
+// A deploy bumps index.html's asset pins and restarts the server; its hash
+// rides every board payload. A long-lived tab that sees the hash change
+// reloads itself once instead of running weeks-old code against fresh data.
+function checkUiVersion(version) {
+  if (!version || dataIsCached) return; // restored payloads carry old stamps
+  if (uiVersion === null) {
+    uiVersion = version;
+    return;
+  }
+  if (version === uiVersion) return;
+  let guard = null;
+  try {
+    guard = sessionStorage.getItem("ui-reload-version");
+    sessionStorage.setItem("ui-reload-version", version);
+  } catch {
+    // Storage unavailable: still reload — worst case is one extra reload.
+  }
+  if (guard === version) return; // this version already triggered a reload
+  window.location.reload();
+}
+
 function applyQuotes(payload) {
   // A restored localStorage payload may be hours old: patch it from memory,
   // but never let it SEED the memory as fresh — that defeats the 30-min
   // age cap and re-persists ever-older funding across reload cycles.
   rememberAndPatchFunding(payload, { remember: !dataIsCached });
   latestData = payload;
+  checkUiVersion(payload.ui_version);
   renderBoard(payload);
   renderMacroStrip(payload.macro);
   renderDailyBoard(payload.overview, latestCryptoEtfFlows);
