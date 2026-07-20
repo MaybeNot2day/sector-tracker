@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     # base cache TTL (drops to ~20s around scheduled releases) and the
     # comma-separated country filter sent to the calendar endpoint.
     econ_calendar_cache_seconds: int = Field(default=300, ge=30)
-    econ_calendar_countries: str = "US,EU,DE,GB,JP,CN"
+    econ_calendar_countries: str = "US,EU,DE,GB,JP,CN,CA,AU,NZ"
     # Public Telegram channels for the live news drawer, comma-separated
     # t.me handles. Polled every news_poll_seconds and pushed over the WS.
     news_telegram_channels: str = "marketfeed,RetardFrens,tradehaven,AGGRNEWSWIRE,WalterBloomberg"

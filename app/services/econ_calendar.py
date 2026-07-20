@@ -72,6 +72,7 @@ _SUBSTITUTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bq/q\b"), " qoq "),
     (re.compile(r"\bex[- ]autos?\b"), " ex autos "),
     (re.compile(r"\bphilly\b"), " philadelphia "),
+    (re.compile(r"\bconference board\b"), " cb "),
     (re.compile(r"\b(?:nfp|non[- ]?farm payrolls)\b"), " non farm payrolls "),
     (re.compile(r"\b(?:fomc|fed)(?: rate)? decision\b"), " fed interest rate decision "),
     (re.compile(r"\b(?:umich|u\.? ?of ?michigan|university of michigan)\b"), " michigan "),
@@ -84,13 +85,18 @@ _SUBSTITUTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
 _EVENT_SUBSTITUTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bcore cpi\b"), " core inflation rate "),
     (re.compile(r"\bcpi\b"), " inflation rate "),
+    # Bundle names: the headline series of the UK/CA "labour market report"
+    # is the unemployment rate row on TradingView.
+    (re.compile(r"\blabou?r market(?: report| data)?\b"), " unemployment rate "),
 )
 
 _TOKEN = re.compile(r"[a-z0-9]+")
 _YEAR_TOKEN = re.compile(r"20\d\d")
-_MONTHS = frozenset(
+# Period qualifiers: month and quarter names position a print in time but
+# never appear in TradingView row titles, so they only dilute the overlap.
+_PERIOD_TOKENS = frozenset(
     "january february march april may june july august september october november december "
-    "jan feb mar apr jun jul aug sept sep oct nov dec".split()
+    "jan feb mar apr jun jul aug sept sep oct nov dec q1 q2 q3 q4 h1 h2".split()
 )
 # Grammar glue plus release-cycle qualifiers ("Prel"/"Final" revisions of
 # the same print differ only by these; scoring should see them as equal).
@@ -99,7 +105,8 @@ _STOPWORDS = frozenset("of and the for an sa nsa final prel preliminary flash".s
 # institution cues (fed, ecb, boe...) stay: they appear in row titles too.
 _GEO_TOKENS = frozenset(
     "us usa eurozone euro area germany german uk britain british japan japanese "
-    "china chinese united states america american".split()
+    "china chinese united states america american canada canadian australia "
+    "australian zealand".split()
 )
 
 _COUNTRY_CUES: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -109,6 +116,9 @@ _COUNTRY_CUES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("GB", re.compile(r"\buk\b|\bbritain\b|\bbritish\b|\bboe\b")),
     ("JP", re.compile(r"\bjapan(?:ese)?\b|\bboj\b")),
     ("CN", re.compile(r"\bchina\b|\bchinese\b|\bpboc\b")),
+    ("CA", re.compile(r"\bcanad(?:a|ian)\b|\bbank of canada\b|\bboc\b")),
+    ("AU", re.compile(r"\baustralia(?:n)?\b|\brba\b")),
+    ("NZ", re.compile(r"\bnew zealand\b|\brbnz\b")),
 )
 
 # A title-only match with no country cue must clear a higher bar: with six
@@ -154,7 +164,7 @@ def _tokenize(text: str) -> frozenset[str]:
         token
         for token in _TOKEN.findall(text)
         if len(token) > 1
-        and token not in _MONTHS
+        and token not in _PERIOD_TOKENS
         and token not in _STOPWORDS
         and token not in _GEO_TOKENS
         and not _YEAR_TOKEN.fullmatch(token)
@@ -324,12 +334,18 @@ def _event_moment_utc(event_date: date, event_time: str | None) -> datetime | No
     return local.replace(tzinfo=ZoneInfo(zone_name)).astimezone(UTC)
 
 
+_QUARTER_HINT = re.compile(r"\bq([1-4])\b")
+
+
 def match_release(event: dict[str, object], rows: list[CalendarRow]) -> dict[str, object] | None:
     """Best calendar row for one stored key-date item, as a release dict.
 
-    Hard rule first: only rows within one day of the stored date are
-    candidates. Ties break same-day > adjacent-day, then importance, then
-    time proximity when the stored event has a zoned HH:MM time.
+    Hard rules first: only rows within one day of the stored date are
+    candidates, and an event naming a quarter ("CPI (YoY, Q2)") never
+    pairs with a row whose period says otherwise — a quarterly print
+    must not enrich from some country's monthly row that happens to
+    share a title. Ties break same-day > adjacent-day, then importance,
+    then time proximity when the stored event has a zoned HH:MM time.
     """
     try:
         event_date = date.fromisoformat(str(event.get("date") or ""))
@@ -345,6 +361,8 @@ def match_release(event: dict[str, object], rows: list[CalendarRow]) -> dict[str
     threshold = (
         _SCORE_THRESHOLD_WITH_COUNTRY if country else _SCORE_THRESHOLD_ANY_COUNTRY
     )
+    quarter_match = _QUARTER_HINT.search(title.lower())
+    quarter = f"q{quarter_match.group(1)}" if quarter_match else None
     time_raw = event.get("time")
     moment = _event_moment_utc(event_date, str(time_raw) if time_raw else None)
 
@@ -355,6 +373,9 @@ def match_release(event: dict[str, object], rows: list[CalendarRow]) -> dict[str
             continue
         row_date = row.date.date()
         if abs((row_date - event_date).days) > 1:
+            continue
+        row_period = row.period.lower()
+        if quarter is not None and row_period and quarter not in row_period:
             continue
         score = max(weight * _score(tokens, row) for tokens, weight in variants)
         if score < threshold:
@@ -443,7 +464,9 @@ class EconCalendarService:
 
     FAILURE_RETRY_SECONDS = 60.0
 
-    def __init__(self, *, cache_seconds: int = 300, countries: str = "US,EU,DE,GB,JP,CN") -> None:
+    def __init__(
+        self, *, cache_seconds: int = 300, countries: str = "US,EU,DE,GB,JP,CN,CA,AU,NZ"
+    ) -> None:
         self.cache_seconds = cache_seconds
         self.countries = countries
         self._rows: list[CalendarRow] = []

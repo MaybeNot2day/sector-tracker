@@ -2036,8 +2036,9 @@ function fringeOpenTable(open) {
   if (!open.length) return "";
   return `<div class="fringe-scroll" data-scroll-keep="fringe"><table class="fringe-table">
     <thead><tr>
-      <th>Idea</th>
+      <th class="fringe-cell-ticker">Idea</th>
       <th class="fringe-cell-chip"></th>
+      <th>Thesis</th>
       <th class="fringe-num">Entry</th>
       <th class="fringe-num">Last</th>
       <th class="fringe-num">P&amp;L</th>
@@ -2049,8 +2050,9 @@ function fringeOpenTable(open) {
   </table></div>`;
 }
 
-// Each idea renders as a numbers row plus a full-width thesis row; the
-// pair shares one bottom border so the book keeps the key-dates rhythm.
+// One blotter row per idea: the thesis column absorbs the panel's spare
+// width so the numbers stay clustered instead of drifting to the far
+// right edge on wide screens. The full thesis rides as a native title.
 function fringeOpenRow(idea) {
   const direction = String(idea.direction || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
   const ticker = escapeHtml(idea.ticker || "");
@@ -2070,21 +2072,20 @@ function fringeOpenRow(idea) {
   const target = idea.target
     ? `<span class="fringe-target" title="${escapeHtml(idea.target)}">${escapeHtml(targetPrice === null ? idea.target : formatPrice(targetPrice))}</span>`
     : '<span class="fringe-missing">\u2014</span>';
+  const meta = [idea.opened ? `opened ${idea.opened}` : ""].filter(Boolean).join(" \u00b7 ");
   return `<tr class="fringe-row">
     <td class="fringe-cell-ticker"><button type="button" class="fringe-ticker" data-symbol="${ticker}" title="Open ${ticker} chart">${ticker}</button></td>
     <td class="fringe-cell-chip"><span class="fringe-chip fringe-${direction.toLowerCase()}">${direction}</span></td>
+    <td class="fringe-cell-thesis">
+      <span class="fringe-thesis" title="${escapeHtml(idea.thesis || "")}">${escapeHtml(idea.thesis || "")}</span>
+      <span class="fringe-meta">${escapeHtml(meta)}${idea.stale ? '<em class="fringe-stale">not refreshed</em>' : ""}</span>
+    </td>
     <td class="fringe-num fringe-entry">${entry === null ? "\u2014" : escapeHtml(formatPrice(entry))}</td>
     <td class="fringe-num">${last === null ? "\u2014" : escapeHtml(formatPrice(last))}</td>
     <td class="fringe-num">${pnl}</td>
     <td class="fringe-num">${target}</td>
     <td class="fringe-num fringe-togo">${toGo === null ? "\u2014" : escapeHtml(formatSignedPct(toGo))}</td>
     <td class="fringe-cell-horizon">${escapeHtml(idea.horizon || "\u2014")}</td>
-  </tr>
-  <tr class="fringe-thesis-row">
-    <td colspan="8">
-      <span class="fringe-thesis" title="${escapeHtml(idea.thesis || "")}">${escapeHtml(idea.thesis || "")}</span>
-      <span class="fringe-meta">${escapeHtml(idea.opened ? `opened ${idea.opened}` : "")}${idea.stale ? '<em class="fringe-stale">not refreshed</em>' : ""}</span>
-    </td>
   </tr>`;
 }
 

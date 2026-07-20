@@ -150,7 +150,23 @@ _FIXTURE_JSON = r"""
  {"id": "404103", "title": "Industrial Production MoM",
   "indicator": "Industrial Production MoM", "country": "US", "period": "Jun",
   "actual": null, "previous": 0.1, "forecast": 0.2, "unit": "%",
-  "currency": "USD", "importance": 0, "date": "2026-07-17T13:15:00.000Z"}
+  "currency": "USD", "importance": 0, "date": "2026-07-17T13:15:00.000Z"},
+ {"id": "405501", "title": "CB Leading Index MoM", "indicator": "CB Leading Index",
+  "country": "US", "period": "Jun", "actual": null, "previous": 0.1,
+  "forecast": -0.1, "unit": "%", "currency": "USD", "importance": 0,
+  "date": "2026-07-20T14:00:00.000Z"},
+ {"id": "405502", "title": "Unemployment Rate", "indicator": "Unemployment Rate",
+  "country": "GB", "period": "May", "actual": null, "previous": 4.9,
+  "forecast": 5, "unit": "%", "currency": "GBP", "importance": 1,
+  "date": "2026-07-21T06:00:00.000Z"},
+ {"id": "405503", "title": "Inflation Rate YoY", "indicator": "Inflation Rate",
+  "country": "CA", "period": "Jun", "actual": 2.8, "previous": 3.2,
+  "forecast": 2.9, "unit": "%", "currency": "CAD", "importance": 1,
+  "date": "2026-07-20T12:30:00.000Z"},
+ {"id": "405504", "title": "Inflation Rate YoY", "indicator": "Inflation Rate",
+  "country": "NZ", "period": "Q2", "actual": null, "previous": 2.5,
+  "forecast": 2.3, "unit": "%", "currency": "NZD", "importance": 1,
+  "date": "2026-07-20T22:45:00.000Z"}
 ]
 """
 
@@ -200,6 +216,16 @@ def matched_title(event: dict[str, object]) -> str | None:
             "UMich Consumer Sentiment (July, prel.)",
             "Michigan Consumer Sentiment Prel",
         ),
+        # TradingView abbreviates the Conference Board as "CB".
+        (
+            "2026-07-20",
+            "Conference Board US Leading Economic Index, June",
+            "CB Leading Index MoM",
+        ),
+        # Bundle names resolve to the headline series of the report.
+        ("2026-07-21", "UK labour market, May", "Unemployment Rate"),
+        # Canada is fetched and cued like the majors.
+        ("2026-07-20", "Canada CPI, June", "Inflation Rate YoY"),
         # Non-economic rail entries must stay unenriched.
         ("2026-07-16", "Team offsite", None),
         ("2026-07-16", "TSLA earnings", None),
@@ -207,6 +233,17 @@ def matched_title(event: dict[str, object]) -> str | None:
 )
 def test_matching_acceptance_cases(date: str, title: str, expected: str | None) -> None:
     assert matched_title({"date": date, "title": title, "time": None}) == expected
+
+
+def test_quarterly_cpi_skips_monthly_rows_and_lands_on_the_quarter_print() -> None:
+    # "CPI (YoY, Q2)" must not enrich from Canada's monthly June print that
+    # shares the "Inflation Rate YoY" title; the quarter hint pins it to the
+    # NZ Q2 row (and would return null if no quarterly row existed).
+    release = match_release(
+        {"date": "2026-07-20", "title": "CPI (YoY, Q2)", "time": None}, ROWS
+    )
+    assert release is not None
+    assert release["period"] == "Q2"
 
 
 def test_mislisted_event_beyond_one_day_stays_unenriched() -> None:

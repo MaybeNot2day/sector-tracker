@@ -185,9 +185,9 @@ def test_daily_board_loads_without_page_errors_and_renders_core_sections(
     )
     expect(key_date_rows.nth(2).locator(".key-date-figures")).to_have_count(0)
 
-    # Fringe Corner: Hermes' ideas book table — direction chip, marked P&L,
+    # Fringe Corner: Hermes' ideas blotter — direction chip, marked P&L,
     # target + distance-to-go, a missing price rendering as an em dash, the
-    # stale marker on the thesis row, and the compact closed footer.
+    # in-row thesis and stale marker, and the compact closed footer.
     fringe_rows = page.locator("#daily-board .fringe-row")
     expect(fringe_rows).to_have_count(3)
     expect(fringe_rows.nth(0).locator(".fringe-chip")).to_have_text("LONG")
@@ -198,9 +198,8 @@ def test_daily_board_loads_without_page_errors_and_renders_core_sections(
     expect(fringe_rows.nth(1).locator(".fringe-chip")).to_have_text("SHORT")
     expect(fringe_rows.nth(1).locator(".fringe-pnl")).to_have_text("—")
     expect(fringe_rows.nth(1).locator(".fringe-entry")).to_have_text("—")
-    thesis_rows = page.locator("#daily-board .fringe-thesis-row")
-    expect(thesis_rows.nth(0)).to_contain_text("Miner with HPC optionality")
-    expect(thesis_rows.nth(2).locator(".fringe-stale")).to_have_text("not refreshed")
+    expect(fringe_rows.nth(0)).to_contain_text("Miner with HPC optionality")
+    expect(fringe_rows.nth(2).locator(".fringe-stale")).to_have_text("not refreshed")
     closed_rows = page.locator("#daily-board .fringe-closed-row")
     expect(closed_rows).to_have_count(2)
     expect(closed_rows.nth(0)).to_contain_text("NVDA")

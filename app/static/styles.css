@@ -1240,10 +1240,11 @@ h1 {
 }
 
 /* --- Fringe Corner ------------------------------------------------------ */
-/* Hermes' ideas book as a compact ledger table: a numbers row (entry /
-   mark / P&L / target / distance-to-go / horizon) plus a full-width
-   thesis row per idea, the pair sharing one bottom border. Direction
-   chips reuse the session-chip framing with the existing green/red pair. */
+/* Hermes' ideas book as a one-row-per-idea blotter: ticker and chip on
+   the left, the thesis column absorbs the panel's spare width (so the
+   numbers cluster instead of drifting to the far right on wide screens),
+   then entry / mark / P&L / target / to-go / horizon. Direction chips
+   reuse the session-chip framing with the existing green/red pair. */
 .fringe-scroll {
   max-height: 420px;
   overflow-y: auto;
@@ -1289,6 +1290,10 @@ h1 {
   width: 56px;
 }
 
+.fringe-table th.fringe-cell-ticker {
+  width: 88px;
+}
+
 .fringe-num {
   font-size: 10.5px;
   text-align: right;
@@ -1306,23 +1311,26 @@ h1 {
 }
 
 .fringe-row td {
-  padding-top: 7px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line-soft);
   color: var(--muted-strong);
   vertical-align: middle;
+}
+
+.fringe-table tbody tr:last-child td {
+  border-bottom: 0;
 }
 
 .fringe-togo {
   color: var(--muted);
 }
 
-.fringe-thesis-row td {
-  padding-bottom: 7px;
-  border-bottom: 1px solid var(--line-soft);
-  white-space: normal;
-}
-
-.fringe-table tbody tr:last-child td {
-  border-bottom: 0;
+/* Thesis + meta stack inside one cell; both truncate with ellipsis and
+   the full thesis rides as the native title tooltip. */
+.fringe-cell-thesis {
+  min-width: 0;
+  padding-right: 12px;
 }
 
 .fringe-chip {
@@ -1379,29 +1387,31 @@ h1 {
   font-weight: 400;
 }
 
-/* ~2-line clamp; the full thesis rides as a native title tooltip. */
+/* Single-line ellipsis; the full thesis rides as a native title tooltip. */
 .fringe-thesis {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  display: block;
   overflow: hidden;
-  margin-top: 2px;
   color: var(--muted-strong);
   font-family: var(--font-sans);
   font-size: 11px;
-  line-height: 1.4;
+  line-height: 1.35;
+  text-overflow: ellipsis;
 }
 
 .fringe-meta {
-  display: flex;
-  margin-top: 2px;
-  flex-wrap: wrap;
-  gap: 3px 6px;
+  display: block;
+  overflow: hidden;
+  margin-top: 1px;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: 9px;
   letter-spacing: 0.04em;
+  text-overflow: ellipsis;
   text-transform: uppercase;
+}
+
+.fringe-meta .fringe-stale {
+  margin-left: 6px;
 }
 
 .fringe-stale {
@@ -2923,11 +2933,11 @@ h1 {
   }
 
   /* Phones: the fringe book keeps Idea / Dir / P&L / Target / To go /
-     Hrzn; entry and mark live in the thesis-row tooltip territory. */
-  .fringe-table th:nth-child(3),
-  .fringe-table td:nth-child(3),
+     Hrzn; entry and mark stay reachable via the row's tooltips. */
   .fringe-table th:nth-child(4),
-  .fringe-table td:nth-child(4) {
+  .fringe-table td:nth-child(4),
+  .fringe-table th:nth-child(5),
+  .fringe-table td:nth-child(5) {
     display: none;
   }
 
