@@ -1460,11 +1460,18 @@ function updateHeader(overview) {
 }
 
 let lastDailyRenderKey = "";
+// Per-chunk HTML cache for reconcileDailyPanels: only top-level chunks
+// whose markup actually changed get replaced. The old full innerHTML swap
+// rebuilt every DOM node on each ~10s overview refresh, which killed
+// in-flight scroll momentum (worst when scrolling up through the board)
+// and reset inner scrollers.
+let dailyPanelHtml = new Map();
 
 function renderDailyBoard(overview, cryptoEtfFlows) {
   if (!overview) {
     dailyBoard.innerHTML = '<div class="empty-state">Market read unavailable</div>';
     lastDailyRenderKey = "";
+    dailyPanelHtml = new Map();
     return;
   }
   // The overview timestamp and flow revision are supplied by their producers;
@@ -1494,19 +1501,8 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
   const asOf = new Date(overview.as_of);
   const asOfLabel = Number.isNaN(asOf.getTime()) ? "" : `As of ${formatLocalDate(asOf)}`;
 
-  // Engines without scroll anchoring (Safari) can clamp the page scroll
-  // while a large container is swapped; pin it across the rebuild. Inner
-  // scrollers (key dates, fringe book) are rebuilt from scratch every
-  // render, so their positions are captured and restored by tag — without
-  // this the ~10s overview refresh snaps them back to the top mid-read.
-  const scroller = document.scrollingElement || document.documentElement;
-  const pageScroll = scroller.scrollTop;
-  const innerScroll = {};
-  dailyBoard.querySelectorAll("[data-scroll-keep]").forEach((el) => {
-    if (el.scrollTop > 0) innerScroll[el.dataset.scrollKeep] = el.scrollTop;
-  });
-  dailyBoard.innerHTML = `
-    <section class="analytics-panel">
+  const chunks = [
+    ["regime", `<section class="analytics-panel">
       ${panelHeading(
         "Regime Read",
         asOfLabel,
@@ -1536,9 +1532,9 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
           `${universe.advancers || 0} advancing · ${universe.decliners || 0} declining`
         )}
       </div>
-    </section>
+    </section>`],
 
-    <div class="analytics-grid triple">
+    ["benchmarks", `<div class="analytics-grid triple">
       <section class="analytics-panel">
         ${panelHeading(
           "Benchmarks",
@@ -1570,9 +1566,9 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
       </section>
 
       ${cryptoBreadthPanel(overview.crypto_breadth)}
-    </div>
+    </div>`],
 
-    <div class="analytics-grid equal">
+    ["themes", `<div class="analytics-grid equal">
       <section class="analytics-panel">
         ${panelHeading(
           "Dominant Themes",
@@ -1589,22 +1585,22 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
         )}
         ${themeTable(movers, "momentum")}
       </section>
-    </div>
+    </div>`],
 
-    <section class="analytics-panel">
+    ["flows", `<section class="analytics-panel">
       ${panelHeading(
         "Crypto ETF Flows",
         cryptoEtfFlowNote(cryptoEtfFlows),
         "Daily net money moving into (+) or out of (\u2212) the US spot Bitcoin, Ether and Solana ETFs, from Farside data. Inflows mean investors are buying ETF shares and the funds must buy the coins. 5D/10D = flows summed over the last 5 and 10 trading days."
       )}
       ${cryptoEtfFlowPanel(cryptoEtfFlows)}
-    </section>
+    </section>`],
 
-    ${keyDatesSection(latestKeyDates)}
+    ["key-dates", keyDatesSection(latestKeyDates)],
 
-    ${fringeSection(latestFringe)}
+    ["fringe", fringeSection(latestFringe)],
 
-    <section class="analytics-panel">
+    ["rotation", `<section class="analytics-panel">
       ${panelHeading(
         "Theme Rotation",
         "1D move versus 5D daily pace",
@@ -1614,47 +1610,92 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
         ${rotationColumn("↑ Climbers", rotation.climbers || [])}
         ${rotationColumn("↓ Fallers", rotation.fallers || [])}
       </div>
-    </section>
-  `;
+    </section>`],
+  ].filter(([, html]) => Boolean(html));
+
+  // Engines without scroll anchoring (Safari) can clamp the page scroll
+  // while containers are swapped; pin it across the reconcile. Inner
+  // scrollers of replaced chunks are restored by tag.
+  const scroller = document.scrollingElement || document.documentElement;
+  const pageScroll = scroller.scrollTop;
+  const innerScroll = {};
+  dailyBoard.querySelectorAll("[data-scroll-keep]").forEach((el) => {
+    if (el.scrollTop > 0) innerScroll[el.dataset.scrollKeep] = el.scrollTop;
+  });
+
+  reconcileDailyPanels(chunks);
+
   if (scroller.scrollTop !== pageScroll) scroller.scrollTop = pageScroll;
   Object.entries(innerScroll).forEach(([key, top]) => {
     const el = dailyBoard.querySelector(`[data-scroll-keep="${CSS.escape(key)}"]`);
-    if (el) el.scrollTop = top;
+    if (el && el.scrollTop !== top) el.scrollTop = top;
   });
+}
 
-  dailyBoard.querySelectorAll(".benchmark-card").forEach((card) => {
-    card.addEventListener("click", () => {
-      openChart({
-        symbol: card.dataset.symbol,
-        name: card.dataset.name,
-        type: card.dataset.type || "etf",
-        quote: { provider: card.dataset.provider || "" },
-        summary: findAssetSummary(card.dataset.symbol),
-      });
+function reconcileDailyPanels(chunks) {
+  const previous = dailyPanelHtml;
+  dailyPanelHtml = new Map(chunks);
+  const keep = new Map();
+  for (const child of Array.from(dailyBoard.children)) {
+    const key = child.dataset ? child.dataset.panel : undefined;
+    if (key && dailyPanelHtml.has(key) && !keep.has(key)) keep.set(key, child);
+    else child.remove(); // loading placeholder, removed panel, or duplicate
+  }
+  const template = document.createElement("template");
+  let anchor = null;
+  for (const [key, html] of chunks) {
+    let node = keep.get(key);
+    if (node === undefined || previous.get(key) !== html) {
+      template.innerHTML = html;
+      const fresh = template.content.firstElementChild;
+      if (fresh === null) continue;
+      fresh.dataset.panel = key;
+      if (node) node.replaceWith(fresh);
+      else if (anchor) anchor.after(fresh);
+      else dailyBoard.prepend(fresh);
+      node = fresh;
+    }
+    anchor = node;
+  }
+}
+
+// Chart and filter clicks are delegated once: reconciled panels swap their
+// subtrees, so per-render listener attachment would either leak or miss.
+dailyBoard.addEventListener("click", (event) => {
+  const card = event.target.closest(".benchmark-card");
+  if (card) {
+    openChart({
+      symbol: card.dataset.symbol,
+      name: card.dataset.name,
+      type: card.dataset.type || "etf",
+      quote: { provider: card.dataset.provider || "" },
+      summary: findAssetSummary(card.dataset.symbol),
     });
-  });
-  dailyBoard.querySelectorAll(".theme-link").forEach((button) => {
-    button.addEventListener("click", () => filterMarketsByGroup(button.dataset.group || ""));
-  });
+    return;
+  }
+  const themeLink = event.target.closest(".theme-link");
+  if (themeLink) {
+    filterMarketsByGroup(themeLink.dataset.group || "");
+    return;
+  }
   // Fringe tickers are arbitrary Hermes symbols: resolve through the
   // watchlist first (full asset config), then the crypto tape (perp quote
   // context), else fall back to a bare Yahoo equity — the same resolution
   // order deep links use. A failed chart load already shows chart-error.
-  dailyBoard.querySelectorAll(".fringe-ticker").forEach((button) => {
-    button.addEventListener("click", () => {
-      const symbol = button.dataset.symbol || "";
-      if (!symbol) return;
-      const asset = findAssetConfig(symbol);
-      if (asset) {
-        openChart(asset);
-      } else if ((latestData?.crypto_tape || []).some((row) => row.symbol === symbol)) {
-        openTapeChart(symbol);
-      } else {
-        openChart({ symbol, type: "equity", quote: { provider: "yahoo" } });
-      }
-    });
-  });
-}
+  const fringeButton = event.target.closest(".fringe-ticker");
+  if (fringeButton) {
+    const symbol = fringeButton.dataset.symbol || "";
+    if (!symbol) return;
+    const asset = findAssetConfig(symbol);
+    if (asset) {
+      openChart(asset);
+    } else if ((latestData?.crypto_tape || []).some((row) => row.symbol === symbol)) {
+      openTapeChart(symbol);
+    } else {
+      openChart({ symbol, type: "equity", quote: { provider: "yahoo" } });
+    }
+  }
+});
 
 function panelHeading(title, note, tip = "") {
   // Explanations were invisible native title-tooltips; a visible ? badge
@@ -1957,6 +1998,14 @@ function keyDatesList(items, payload) {
   return `<div class="key-dates-list" data-scroll-keep="key-dates">${items.map((item) => keyDateRow(item, asOf)).join("")}</div>`;
 }
 
+// The whole row deep-links to ForexFactory's calendar for that day, so a
+// print is one click from an independent source with its own history.
+function keyDateCalendarUrl(dateText) {
+  const [year, month, day] = String(dateText || "").split("-").map(Number);
+  if (!year || !month || !day) return "";
+  return `https://www.forexfactory.com/calendar?day=${KEY_DATE_MONTHS[month - 1].toLowerCase()}${day}.${year}`;
+}
+
 function keyDateRow(item, asOf) {
   const [, month, day] = String(item.date || "").split("-").map(Number);
   const diff = keyDateDayDiff(item.date, asOf);
@@ -1968,7 +2017,11 @@ function keyDateRow(item, asOf) {
   // (overflow-y: auto), which would clip the help-tip CSS popover.
   const tooltip = release?.comment ? ` title="${escapeHtml(release.comment)}"` : "";
   const high = release?.importance === 1;
-  return `<div class="key-date-row${diff === 0 ? " is-today" : ""}"${tooltip}>
+  const href = keyDateCalendarUrl(item.date);
+  const [tagOpen, tagClose] = href
+    ? [`<a href="${href}" target="_blank" rel="noopener"`, "</a>"]
+    : ["<div", "</div>"];
+  return `${tagOpen} class="key-date-row${diff === 0 ? " is-today" : ""}"${tooltip}>
     <span class="key-date-chip"><em>${month ? KEY_DATE_MONTHS[month - 1] : "--"}</em><strong>${day || "--"}</strong></span>
     <div class="key-date-main">
       <strong>${escapeHtml(item.title)}</strong>
@@ -1976,7 +2029,7 @@ function keyDateRow(item, asOf) {
       ${release ? keyDateFigures(release) : ""}
     </div>
     <span class="key-date-tags">${high ? '<span class="key-date-tag key-tag-high">HIGH</span>' : ""}<span class="key-date-tag key-tag-${classToken(item.category, "event")}">${escapeHtml(item.category || "EVENT")}</span></span>
-  </div>`;
+  ${tagClose}`;
 }
 
 function keyDateFigures(release) {

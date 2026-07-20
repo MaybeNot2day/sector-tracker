@@ -180,6 +180,9 @@ def test_daily_board_loads_without_page_errors_and_renders_core_sections(
     )
     expect(cpi_row.locator(".key-tag-high")).to_have_text("HIGH")
     expect(cpi_row).to_have_attribute("title", re.compile("Consumer Price Index"))
+    expect(cpi_row).to_have_attribute(
+        "href", re.compile(r"forexfactory\.com/calendar\?day=[a-z]{3}\d{1,2}\.\d{4}")
+    )
     expect(key_date_rows.nth(1).locator(".key-date-figures")).to_have_text(
         "EST 0.3% · PREV 0.4% · ACT —"
     )
@@ -491,17 +494,32 @@ def test_daily_board_rebuild_preserves_page_scroll(page: Page, base_url: str) ->
           const scroller = document.scrollingElement;
           scroller.scrollTop = 400;
           const before = scroller.scrollTop;
-          const marker = document.querySelector('#daily-board').firstElementChild;
+          const board = document.querySelector('#daily-board');
+          const regime = board.querySelector('[data-panel="regime"]');
+          const rotation = board.querySelector('[data-panel="rotation"]');
+          // Identical data: reconcile must keep every panel node (a full
+          // DOM swap here is what used to kill scroll momentum).
           lastDailyRenderKey = "";
           renderDailyBoard(latestData.overview, latestCryptoEtfFlows);
+          const keptAll = board.querySelector('[data-panel="regime"]') === regime
+            && board.querySelector('[data-panel="rotation"]') === rotation;
+          // Changed regime data: only that chunk is replaced.
+          lastDailyRenderKey = "";
+          const overview = structuredClone(latestData.overview);
+          overview.regime = { ...(overview.regime || {}), label: 'SMOKE-REGIME' };
+          renderDailyBoard(overview, latestCryptoEtfFlows);
           return {
             before,
             after: scroller.scrollTop,
-            rebuilt: document.querySelector('#daily-board').firstElementChild !== marker,
+            keptAll,
+            regimeReplaced: board.querySelector('[data-panel="regime"]') !== regime,
+            rotationKept: board.querySelector('[data-panel="rotation"]') === rotation,
           };
         }"""
     )
-    assert result["rebuilt"] is True
+    assert result["keptAll"] is True
+    assert result["regimeReplaced"] is True
+    assert result["rotationKept"] is True
     assert result["after"] == result["before"]
 
 

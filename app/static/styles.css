@@ -1183,10 +1183,12 @@ h1 {
 }
 
 .key-date-tag {
+  min-width: 58px;
   font-family: var(--font-mono);
   font-size: 9px;
   font-weight: 600;
   letter-spacing: 0.04em;
+  text-align: center;
   text-transform: uppercase;
   padding: 2px 7px;
   border-radius: 3px;
@@ -1203,6 +1205,21 @@ h1 {
   flex-direction: column;
   align-items: flex-end;
   gap: 3px;
+}
+
+/* Rows are external links (ForexFactory day view); keep them looking like
+   rows, with a hover wash as the click affordance. */
+a.key-date-row {
+  color: inherit;
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 0.12s ease;
+}
+
+a.key-date-row:hover,
+a.key-date-row:focus-visible {
+  background: var(--surface-soft);
+  outline: none;
 }
 
 .key-tag-macro {
