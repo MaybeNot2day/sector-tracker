@@ -208,6 +208,21 @@ def test_daily_board_loads_without_page_errors_and_renders_core_sections(
     expect(fringe_rows.nth(1).locator(".fringe-entry")).to_have_text("—")
     expect(fringe_rows.nth(0)).to_contain_text("Miner with HPC optionality")
     expect(fringe_rows.nth(2).locator(".fringe-stale")).to_have_text("not refreshed")
+    numeric_column_offsets = page.locator(".fringe-table").evaluate(
+        """table => {
+          const textRight = element => {
+            const range = document.createRange();
+            range.selectNodeContents(element);
+            return range.getBoundingClientRect().right;
+          };
+          const headers = Array.from(table.querySelectorAll('th.fringe-num'));
+          const cells = Array.from(table.querySelectorAll('tbody tr:first-child td.fringe-num'));
+          return headers.map((header, index) =>
+            Math.abs(textRight(header) - textRight(cells[index]))
+          );
+        }"""
+    )
+    assert max(numeric_column_offsets) <= 1
     closed_rows = page.locator("#daily-board .fringe-closed-row")
     expect(closed_rows).to_have_count(2)
     expect(closed_rows.nth(0)).to_contain_text("NVDA")

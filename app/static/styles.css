@@ -1303,6 +1303,7 @@ a.key-date-row:focus-visible {
 
 .fringe-table th.fringe-num {
   width: 56px;
+  text-align: right;
 }
 
 .fringe-table th.fringe-cell-ticker {
