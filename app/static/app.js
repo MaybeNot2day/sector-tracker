@@ -1495,9 +1495,16 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
   const asOfLabel = Number.isNaN(asOf.getTime()) ? "" : `As of ${formatLocalDate(asOf)}`;
 
   // Engines without scroll anchoring (Safari) can clamp the page scroll
-  // while a large container is swapped; pin it across the rebuild.
+  // while a large container is swapped; pin it across the rebuild. Inner
+  // scrollers (key dates, fringe book) are rebuilt from scratch every
+  // render, so their positions are captured and restored by tag — without
+  // this the ~10s overview refresh snaps them back to the top mid-read.
   const scroller = document.scrollingElement || document.documentElement;
   const pageScroll = scroller.scrollTop;
+  const innerScroll = {};
+  dailyBoard.querySelectorAll("[data-scroll-keep]").forEach((el) => {
+    if (el.scrollTop > 0) innerScroll[el.dataset.scrollKeep] = el.scrollTop;
+  });
   dailyBoard.innerHTML = `
     <section class="analytics-panel">
       ${panelHeading(
@@ -1610,6 +1617,10 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
     </section>
   `;
   if (scroller.scrollTop !== pageScroll) scroller.scrollTop = pageScroll;
+  Object.entries(innerScroll).forEach(([key, top]) => {
+    const el = dailyBoard.querySelector(`[data-scroll-keep="${CSS.escape(key)}"]`);
+    if (el) el.scrollTop = top;
+  });
 
   dailyBoard.querySelectorAll(".benchmark-card").forEach((card) => {
     card.addEventListener("click", () => {
@@ -1943,7 +1954,7 @@ function keyDatesList(items, payload) {
     return `<div class="empty-state">${copy}</div>`;
   }
   const asOf = payload?.as_of || "";
-  return `<div class="key-dates-list">${items.map((item) => keyDateRow(item, asOf)).join("")}</div>`;
+  return `<div class="key-dates-list" data-scroll-keep="key-dates">${items.map((item) => keyDateRow(item, asOf)).join("")}</div>`;
 }
 
 function keyDateRow(item, asOf) {
@@ -2023,7 +2034,7 @@ function fringeSection(payload) {
 
 function fringeOpenTable(open) {
   if (!open.length) return "";
-  return `<div class="fringe-scroll"><table class="fringe-table">
+  return `<div class="fringe-scroll" data-scroll-keep="fringe"><table class="fringe-table">
     <thead><tr>
       <th>Idea</th>
       <th class="fringe-cell-chip"></th>
