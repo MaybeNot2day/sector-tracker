@@ -59,6 +59,21 @@ def test_parse_actions_are_case_insensitive_but_tickers_stay_uppercase() -> None
     assert action.horizon == "into Q3"
 
 
+def test_parse_trailing_target_and_horizon_tags_in_any_order() -> None:
+    body = """## Fringe Corner
+
+- OPEN LONG CIFR — miner squeeze [target: $12] [horizon: 2w]
+- OPEN SHORT XLU — crowded defensives [horizon: 1m] [target: 78.50]
+- HOLD LONG BTC — flows turning [target: 75k by opex]
+"""
+    actions = parse_fringe_actions(body)
+    assert actions is not None
+    cifr, xlu, btc = actions
+    assert (cifr.text, cifr.horizon, cifr.target) == ("miner squeeze", "2w", "$12")
+    assert (xlu.text, xlu.horizon, xlu.target) == ("crowded defensives", "1m", "78.50")
+    assert (btc.text, btc.horizon, btc.target) == ("flows turning", None, "75k by opex")
+
+
 def test_parse_skips_malformed_bullets_without_failing() -> None:
     body = """## Fringe Corner
 
@@ -102,9 +117,14 @@ def test_parse_returns_none_without_a_fringe_heading_and_empty_for_empty_section
 
 
 def act(
-    action: str, ticker: str, direction: str, text: str = "t", horizon: str | None = None
-) -> tuple[str, str, str, str, str | None]:
-    return (action, ticker, direction, text, horizon)
+    action: str,
+    ticker: str,
+    direction: str,
+    text: str = "t",
+    horizon: str | None = None,
+    target: str | None = None,
+) -> tuple[str, str, str, str, str | None, str | None]:
+    return (action, ticker, direction, text, horizon, target)
 
 
 def open_ideas(path: Path) -> list[dict[str, object]]:
@@ -152,6 +172,30 @@ def test_reopen_is_idempotent_and_preserves_entry_and_opened_date(tmp_path: Path
     assert (idea["thesis"], idea["horizon"]) == ("v2", "1m")
     assert idea["opened_date"] == "2026-07-15"
     assert idea["entry_price"] == 8.42
+
+
+def test_target_follows_horizon_semantics_on_open_and_hold(tmp_path: Path) -> None:
+    path = tmp_path / "board.sqlite3"
+    db.apply_fringe_actions(
+        path, slug="fringe", report_date="2026-07-15",
+        actions=[act("open", "CIFR", "long", "thesis", "2w", "$12")],
+    )
+
+    # HOLD keeps the target it does not restate.
+    db.apply_fringe_actions(
+        path, slug="fringe", report_date="2026-07-16",
+        actions=[act("hold", "CIFR", "long", "still working")],
+    )
+    (idea,) = open_ideas(path)
+    assert idea["target"] == "$12"
+
+    # OPEN restates the whole idea: a missing target clears it.
+    db.apply_fringe_actions(
+        path, slug="fringe", report_date="2026-07-17",
+        actions=[act("open", "CIFR", "long", "fresh thesis")],
+    )
+    (idea,) = open_ideas(path)
+    assert idea["target"] is None
 
 
 def test_close_stamps_date_and_reason_and_close_without_open_is_ignored(
@@ -348,7 +392,7 @@ FRINGE_REPORT = {
     "date": "2026-07-16",
     "body": """## Fringe Corner
 
-- OPEN LONG CIFR — miner squeeze setup [horizon: 2w]
+- OPEN LONG CIFR — miner squeeze setup [target: $12] [horizon: 2w]
 - OPEN LONG BTC — flows turning
 """,
 }
@@ -386,10 +430,17 @@ def test_fringe_route_stamps_entries_and_routes_lighter_vs_yahoo(
     assert cifr["last"] == 8.77
     assert cifr["unrealized_pct"] == 4.16
     assert cifr["horizon"] == "2w"
+    assert cifr["target"] == "$12"
+    assert cifr["target_price"] == 12.0
+    # (12 - 8.77) / 8.77 — the move still on the table from the mark.
+    assert cifr["to_target_pct"] == 36.83
     assert cifr["opened"] == "2026-07-16"
     assert cifr["stale"] is False
     assert cifr["source_slug"] == "hermes-fringe-corner"
     assert by_ticker["BTC"]["entry_price"] == 60000.0
+    assert by_ticker["BTC"]["target"] is None
+    assert by_ticker["BTC"]["target_price"] is None
+    assert by_ticker["BTC"]["to_target_pct"] is None
     assert payload["closed"] == []
 
 

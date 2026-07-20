@@ -185,21 +185,26 @@ def test_daily_board_loads_without_page_errors_and_renders_core_sections(
     )
     expect(key_date_rows.nth(2).locator(".key-date-figures")).to_have_count(0)
 
-    # Fringe Corner: Hermes' ideas book — direction chip, marked P&L, a
-    # missing price rendering as an em dash, the stale marker, and the
-    # compact closed footer.
+    # Fringe Corner: Hermes' ideas book table — direction chip, marked P&L,
+    # target + distance-to-go, a missing price rendering as an em dash, the
+    # stale marker on the thesis row, and the compact closed footer.
     fringe_rows = page.locator("#daily-board .fringe-row")
     expect(fringe_rows).to_have_count(3)
     expect(fringe_rows.nth(0).locator(".fringe-chip")).to_have_text("LONG")
     expect(fringe_rows.nth(0).locator(".fringe-pnl")).to_have_text("+4.16%")
     expect(fringe_rows.nth(0).locator(".fringe-ticker")).to_have_text("CIFR")
+    expect(fringe_rows.nth(0).locator(".fringe-target")).to_have_text("12.00")
+    expect(fringe_rows.nth(0).locator(".fringe-togo")).to_have_text("+36.83%")
     expect(fringe_rows.nth(1).locator(".fringe-chip")).to_have_text("SHORT")
     expect(fringe_rows.nth(1).locator(".fringe-pnl")).to_have_text("—")
-    expect(fringe_rows.nth(1).locator(".fringe-meta")).to_contain_text("entry —")
-    expect(fringe_rows.nth(2).locator(".fringe-stale")).to_have_text("not refreshed")
+    expect(fringe_rows.nth(1).locator(".fringe-entry")).to_have_text("—")
+    thesis_rows = page.locator("#daily-board .fringe-thesis-row")
+    expect(thesis_rows.nth(0)).to_contain_text("Miner with HPC optionality")
+    expect(thesis_rows.nth(2).locator(".fringe-stale")).to_have_text("not refreshed")
     closed_rows = page.locator("#daily-board .fringe-closed-row")
     expect(closed_rows).to_have_count(2)
     expect(closed_rows.nth(0)).to_contain_text("NVDA")
+    expect(closed_rows.nth(0)).to_contain_text("160.20 \u2192 173.10")
     expect(closed_rows.nth(0)).to_contain_text("+8.05%")
 
 
@@ -1151,6 +1156,9 @@ FRINGE_PAYLOAD: dict[str, Any] = {
             "direction": "long",
             "thesis": "Miner with HPC optionality; base building above 8.",
             "horizon": "2w",
+            "target": "$12",
+            "target_price": 12.0,
+            "to_target_pct": 36.83,
             "opened": "2026-07-08",
             "last_mentioned": "2026-07-09",
             "stale": False,
@@ -1165,6 +1173,9 @@ FRINGE_PAYLOAD: dict[str, Any] = {
             "direction": "short",
             "thesis": "Illiquid name no provider can price yet.",
             "horizon": None,
+            "target": None,
+            "target_price": None,
+            "to_target_pct": None,
             "opened": "2026-07-09",
             "last_mentioned": "2026-07-09",
             "stale": False,
@@ -1179,6 +1190,9 @@ FRINGE_PAYLOAD: dict[str, Any] = {
             "direction": "short",
             "thesis": "Defensive bid fading as yields back up.",
             "horizon": "1m",
+            "target": "78.50",
+            "target_price": 78.5,
+            "to_target_pct": 2.97,
             "opened": "2026-07-01",
             "last_mentioned": "2026-07-05",
             "stale": True,
@@ -1194,6 +1208,7 @@ FRINGE_PAYLOAD: dict[str, Any] = {
             "ticker": "NVDA",
             "direction": "long",
             "thesis": "Blackwell ramp",
+            "target": "$170",
             "opened": "2026-06-20",
             "closed": "2026-07-08",
             "entry_price": 160.2,
@@ -1206,6 +1221,7 @@ FRINGE_PAYLOAD: dict[str, Any] = {
             "ticker": "GME",
             "direction": "short",
             "thesis": "Squeeze exhaustion",
+            "target": None,
             "opened": "2026-06-15",
             "closed": "2026-07-02",
             "entry_price": 28.4,

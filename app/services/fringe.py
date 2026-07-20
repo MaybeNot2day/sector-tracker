@@ -4,15 +4,17 @@ Hermes pushes a markdown report through the normal reports pipeline; any
 section whose heading mentions "fringe" feeds the book, one action per
 bullet::
 
-    - OPEN LONG CIFR — thesis text [horizon: 2w]
+    - OPEN LONG CIFR — thesis text [target: $12] [horizon: 2w]
     - HOLD SHORT XLU — updated note
     - CLOSE LONG NVDA — reason text
 
 ACTION is OPEN/HOLD/CLOSE (case-insensitive), DIRECTION LONG/SHORT, the
 ticker an uppercase [A-Z0-9.-=] token, then an em-dash/colon (or a spaced
 hyphen — tickers like BRK-B own the unspaced one) before the free text,
-with an optional trailing ``[horizon: ...]`` tag. Malformed bullets are
-skipped, never fatal — same forgiveness as key_dates.
+with optional trailing ``[horizon: ...]`` / ``[target: ...]`` tags in any
+order. The target is free text (usually a price); a price-looking number
+inside it is parsed out for the distance-to-target read. Malformed bullets
+are skipped, never fatal — same forgiveness as key_dates.
 
 Unlike the key-dates mirror, the ledger ACCRUES: the agent manages its own
 book with explicit actions, unmentioned ideas stay open (flagged stale),
@@ -45,6 +47,7 @@ logger = logging.getLogger(__name__)
 MAX_ACTIONS = 50
 _MAX_TEXT = 500
 _MAX_HORIZON = 40
+_MAX_TARGET = 40
 
 _HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
 _SECTION_TITLE = re.compile(r"fringe", re.IGNORECASE)
@@ -58,7 +61,14 @@ _ACTION = re.compile(
     r"(?:\s*[—–:]\s*|\s+-+\s+|\s*$)"
     r"(?P<text>.*)$"
 )
-_HORIZON = re.compile(r"\[\s*horizon\s*:\s*([^\]]*?)\s*\]\s*$", re.IGNORECASE)
+# Trailing metadata tags, stripped right-to-left so both may appear in any
+# order; the rightmost occurrence of a duplicated key wins.
+_TRAILING_TAG = re.compile(
+    r"\[\s*(?P<key>horizon|target)\s*:\s*(?P<value>[^\]]*?)\s*\]\s*$", re.IGNORECASE
+)
+# First price-looking number in the target's free text ("$120", "0.55-0.60",
+# "75k"); a k suffix scales by a thousand.
+_TARGET_PRICE = re.compile(r"\$?\s*(\d+(?:,\d{3})*(?:\.\d+)?)\s*([kK])?")
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +78,7 @@ class FringeAction:
     direction: str  # long | short
     text: str  # thesis / updated note / close reason
     horizon: str | None
+    target: str | None
 
 
 def parse_fringe_actions(body: str) -> list[FringeAction] | None:
@@ -109,17 +120,20 @@ def _parse_bullet(text: str) -> FringeAction | None:
     if match is None:
         return None
     remainder = match.group("text").strip()
-    horizon: str | None = None
-    horizon_match = _HORIZON.search(remainder)
-    if horizon_match is not None:
-        horizon = horizon_match.group(1)[:_MAX_HORIZON] or None
-        remainder = remainder[: horizon_match.start()].rstrip()
+    limits = {"horizon": _MAX_HORIZON, "target": _MAX_TARGET}
+    tags: dict[str, str | None] = {"horizon": None, "target": None}
+    while (tag := _TRAILING_TAG.search(remainder)) is not None:
+        key = tag.group("key").lower()
+        if tags[key] is None:
+            tags[key] = tag.group("value")[: limits[key]] or None
+        remainder = remainder[: tag.start()].rstrip()
     return FringeAction(
         action=match.group("action").lower(),
         ticker=match.group("ticker"),
         direction=match.group("direction").lower(),
         text=remainder[:_MAX_TEXT],
-        horizon=horizon,
+        horizon=tags["horizon"],
+        target=tags["target"],
     )
 
 
@@ -255,12 +269,15 @@ def _open_item(
 ) -> dict[str, object]:
     entry = row["entry_price"]
     last_mentioned = str(row["last_mentioned"])
+    target_price = _target_price(row["target"])
     return {
         "id": row["id"],
         "ticker": row["ticker"],
         "direction": row["direction"],
         "thesis": row["thesis"],
         "horizon": row["horizon"],
+        "target": row["target"],
+        "target_price": _round_price(target_price),
         "opened": row["opened_date"],
         "last_mentioned": last_mentioned,
         # Open but not refreshed by the newest report that fed the book.
@@ -268,6 +285,9 @@ def _open_item(
         "entry_price": _round_price(entry),
         "last": _round_price(last),
         "unrealized_pct": _pnl_pct(str(row["direction"]), entry, last),
+        # Signed % from the current mark to the target in the idea's
+        # direction — the move still on the table; null without both.
+        "to_target_pct": _pnl_pct(str(row["direction"]), last, target_price),
         "source_slug": row["source_slug"],
     }
 
@@ -278,6 +298,7 @@ def _closed_item(row: dict[str, object]) -> dict[str, object]:
         "ticker": row["ticker"],
         "direction": row["direction"],
         "thesis": row["thesis"],
+        "target": row["target"],
         "opened": row["opened_date"],
         "closed": row["closed_date"],
         "entry_price": _round_price(row["entry_price"]),
@@ -295,6 +316,20 @@ def _pnl_pct(direction: str, entry: object, exit_: object) -> float | None:
     if direction == "short":
         pct = -pct
     return round(pct, 2)
+
+
+def _target_price(target: object) -> float | None:
+    """Price parsed from the target's free text; None when it names no number."""
+    if not isinstance(target, str):
+        return None
+    match = _TARGET_PRICE.search(target)
+    if match is None:
+        return None
+    try:
+        value = float(match.group(1).replace(",", ""))
+    except ValueError:  # pragma: no cover - the pattern only admits floats
+        return None
+    return value * 1000.0 if match.group(2) else value
 
 
 def _round_price(value: object) -> float | None:

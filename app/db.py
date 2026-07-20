@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS fringe_ideas (
     direction TEXT NOT NULL,
     thesis TEXT NOT NULL,
     horizon TEXT,
+    target TEXT,
     status TEXT NOT NULL DEFAULT 'open',
     opened_date TEXT NOT NULL,
     closed_date TEXT,
@@ -133,6 +134,7 @@ def init_db(path: Path) -> None:
             _ensure_column(conn, "latest_quotes", "volume", "REAL")
             _ensure_column(conn, "latest_quotes", "funding_rate", "REAL")
             _ensure_column(conn, "latest_quotes", "open_interest_usd", "REAL")
+            _ensure_column(conn, "fringe_ideas", "target", "TEXT")
         _initialized_paths.add(resolved)
 
 
@@ -551,22 +553,24 @@ def apply_fringe_actions(
     *,
     slug: str,
     report_date: str,
-    actions: Sequence[tuple[str, str, str, str, str | None]],
+    actions: Sequence[tuple[str, str, str, str, str | None, str | None]],
 ) -> dict[str, int]:
     """Replay one report's fringe actions against the ideas ledger.
 
-    Actions are (action, ticker, direction, text, horizon), action in
-    open/hold/close, applied in report order. Unlike replace_key_dates this
+    Actions are (action, ticker, direction, text, horizon, target), action
+    in open/hold/close, applied in report order. Unlike replace_key_dates this
     is NOT a mirror: the ledger is an accruing book the agent manages
     explicitly, so unmentioned open ideas stay open and deleting a report
     leaves the book intact. The one mirror-like rule is same-day: open
     ideas CREATED by (slug, report_date) that a same-day re-run no longer
     mentions never really existed and are removed. Semantics:
 
-    - OPEN with an existing open (ticker, direction) idea updates thesis
-      and horizon; entry price and opened date are preserved (idempotent).
-    - HOLD updates the note and last_mentioned, keeping horizon unless the
-      bullet restates one; HOLD with no open idea is treated as OPEN.
+    - OPEN with an existing open (ticker, direction) idea updates thesis,
+      horizon, and target; entry price and opened date are preserved
+      (idempotent).
+    - HOLD updates the note and last_mentioned, keeping horizon/target
+      unless the bullet restates them; HOLD with no open idea is treated
+      as OPEN.
     - CLOSE stamps closed_date/close_reason; CLOSE with nothing open is
       ignored (an already-closed idea keeps its original close).
 
@@ -577,7 +581,7 @@ def apply_fringe_actions(
     counts = {"opened": 0, "updated": 0, "closed": 0, "removed": 0}
     mentioned: set[tuple[str, str]] = set()
     with _connect(path) as conn:
-        for action, ticker, direction, text, horizon in actions:
+        for action, ticker, direction, text, horizon, target in actions:
             mentioned.add((ticker, direction))
             row = conn.execute(
                 "SELECT id FROM fringe_ideas"
@@ -598,28 +602,43 @@ def apply_fringe_actions(
                 )
                 counts["closed"] += 1
             elif row is not None:
-                # OPEN restates the idea (horizon replaced, even by nothing);
-                # HOLD only refreshes the note, keeping horizon unless given.
-                horizon_sql = "?" if action == "open" else "COALESCE(?, horizon)"
+                # OPEN restates the idea (horizon/target replaced, even by
+                # nothing); HOLD only refreshes the note, keeping both
+                # unless the bullet restates them.
+                restate = "?" if action == "open" else "COALESCE(?, {})"
+                horizon_sql = restate.format("horizon")
+                target_sql = restate.format("target")
                 conn.execute(
                     f"""
                     UPDATE fringe_ideas
-                    SET thesis = ?, horizon = {horizon_sql},
+                    SET thesis = ?, horizon = {horizon_sql}, target = {target_sql},
                         last_mentioned = ?, updated_at = ?
                     WHERE id = ?
                     """,
-                    (text, horizon, report_date, now, int(row["id"])),
+                    (text, horizon, target, report_date, now, int(row["id"])),
                 )
                 counts["updated"] += 1
             else:
                 conn.execute(
                     """
                     INSERT INTO fringe_ideas (
-                        ticker, direction, thesis, horizon, status, opened_date,
-                        last_mentioned, source_slug, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)
+                        ticker, direction, thesis, horizon, target, status,
+                        opened_date, last_mentioned, source_slug, created_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)
                     """,
-                    (ticker, direction, text, horizon, report_date, report_date, slug, now, now),
+                    (
+                        ticker,
+                        direction,
+                        text,
+                        horizon,
+                        target,
+                        report_date,
+                        report_date,
+                        slug,
+                        now,
+                        now,
+                    ),
                 )
                 counts["opened"] += 1
         # Same-day mirror: a re-run of (slug, report_date) is the authority
@@ -654,9 +673,9 @@ def load_fringe_ideas(
     with _connect(path) as conn:
         rows = conn.execute(
             f"""
-            SELECT id, ticker, direction, thesis, horizon, status, opened_date,
-                   closed_date, close_reason, entry_price, exit_price,
-                   last_mentioned, source_slug
+            SELECT id, ticker, direction, thesis, horizon, target, status,
+                   opened_date, closed_date, close_reason, entry_price,
+                   exit_price, last_mentioned, source_slug
             FROM fringe_ideas
             WHERE status = ?
             ORDER BY {order}
@@ -671,6 +690,7 @@ def load_fringe_ideas(
             "direction": str(row["direction"]),
             "thesis": str(row["thesis"]),
             "horizon": str(row["horizon"]) if row["horizon"] is not None else None,
+            "target": str(row["target"]) if row["target"] is not None else None,
             "status": str(row["status"]),
             "opened_date": str(row["opened_date"]),
             "closed_date": str(row["closed_date"]) if row["closed_date"] is not None else None,

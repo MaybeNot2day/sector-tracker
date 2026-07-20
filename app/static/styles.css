@@ -1240,29 +1240,93 @@ h1 {
 }
 
 /* --- Fringe Corner ------------------------------------------------------ */
-/* Hermes' ideas book. Rows follow the key-dates rhythm; direction chips
-   reuse the session-chip framing with the existing green/red pair. */
-.fringe-list {
+/* Hermes' ideas book as a compact ledger table: a numbers row (entry /
+   mark / P&L / target / distance-to-go / horizon) plus a full-width
+   thesis row per idea, the pair sharing one bottom border. Direction
+   chips reuse the session-chip framing with the existing green/red pair. */
+.fringe-scroll {
   max-height: 420px;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
 
-.fringe-row {
-  display: grid;
-  grid-template-columns: 52px minmax(0, 1fr);
-  align-items: start;
-  gap: 12px;
-  padding: 8px 14px;
-  border-bottom: 1px solid var(--line-soft);
+.fringe-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
 }
 
-.fringe-row:last-child {
+.fringe-table th,
+.fringe-table td {
+  overflow: hidden;
+  padding: 0 3px;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.fringe-table th:first-child,
+.fringe-table td:first-child {
+  padding-left: 14px;
+}
+
+.fringe-table th:last-child,
+.fringe-table td:last-child {
+  padding-right: 14px;
+}
+
+.fringe-table th {
+  height: 26px;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: var(--track-label);
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.fringe-table th.fringe-num {
+  width: 56px;
+}
+
+.fringe-num {
+  font-size: 10.5px;
+  text-align: right;
+}
+
+.fringe-cell-chip {
+  width: 46px;
+}
+
+.fringe-cell-horizon {
+  width: 42px;
+  color: var(--muted);
+  font-size: 9.5px;
+  text-transform: uppercase;
+}
+
+.fringe-row td {
+  padding-top: 7px;
+  color: var(--muted-strong);
+  vertical-align: middle;
+}
+
+.fringe-togo {
+  color: var(--muted);
+}
+
+.fringe-thesis-row td {
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--line-soft);
+  white-space: normal;
+}
+
+.fringe-table tbody tr:last-child td {
   border-bottom: 0;
 }
 
 .fringe-chip {
-  margin-top: 2px;
+  display: block;
   padding: 2px 0;
   border: 1px solid var(--line-strong);
   border-radius: 3px;
@@ -1286,20 +1350,6 @@ h1 {
   color: var(--red);
 }
 
-.fringe-main {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.fringe-top {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-}
-
 .fringe-ticker {
   border: 0;
   background: transparent;
@@ -1307,7 +1357,7 @@ h1 {
   color: var(--text);
   cursor: pointer;
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: 11.5px;
   font-weight: 600;
   letter-spacing: 0.03em;
 }
@@ -1320,7 +1370,7 @@ h1 {
 
 .fringe-pnl {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 10.5px;
   font-weight: 600;
 }
 
@@ -1335,13 +1385,16 @@ h1 {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   overflow: hidden;
+  margin-top: 2px;
   color: var(--muted-strong);
+  font-family: var(--font-sans);
   font-size: 11px;
   line-height: 1.4;
 }
 
 .fringe-meta {
   display: flex;
+  margin-top: 2px;
   flex-wrap: wrap;
   gap: 3px 6px;
   color: var(--muted);
@@ -1377,7 +1430,7 @@ h1 {
 
 .fringe-closed-row {
   display: grid;
-  grid-template-columns: auto 42px 58px minmax(0, 1fr);
+  grid-template-columns: auto 38px auto 54px minmax(0, 1fr);
   align-items: baseline;
   gap: 8px;
   min-height: 20px;
@@ -2867,6 +2920,15 @@ h1 {
   .theme-table th:last-child,
   .theme-table td:last-child {
     width: 88px;
+  }
+
+  /* Phones: the fringe book keeps Idea / Dir / P&L / Target / To go /
+     Hrzn; entry and mark live in the thesis-row tooltip territory. */
+  .fringe-table th:nth-child(3),
+  .fringe-table td:nth-child(3),
+  .fringe-table th:nth-child(4),
+  .fringe-table td:nth-child(4) {
+    display: none;
   }
 
   /* DETERIORATING (13ch) must fit the 88px status cell whole. */

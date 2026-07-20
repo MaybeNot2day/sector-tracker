@@ -2014,13 +2014,32 @@ function fringeSection(payload) {
     ${panelHeading(
       "Fringe Corner",
       note,
-      "Hermes' daily trading-ideas book, fed by uploaded agent reports. Entry prices are stamped when an idea first appears and open ideas mark to market. NOT REFRESHED means the newest report did not mention a still-open idea. Click a ticker to open its chart."
+      "Hermes' daily trading-ideas book, fed by uploaded agent reports. Entry prices are stamped when an idea first appears and open ideas mark to market. TARGET is the agent's stated objective and TO GO the move still left from the current mark. NOT REFRESHED means the newest report did not mention a still-open idea. Click a ticker to open its chart."
     )}
-    ${open.length ? `<div class="fringe-list">${open.map(fringeOpenRow).join("")}</div>` : ""}
+    ${fringeOpenTable(open)}
     ${fringeClosedList(closed)}
   </section>`;
 }
 
+function fringeOpenTable(open) {
+  if (!open.length) return "";
+  return `<div class="fringe-scroll"><table class="fringe-table">
+    <thead><tr>
+      <th>Idea</th>
+      <th class="fringe-cell-chip"></th>
+      <th class="fringe-num">Entry</th>
+      <th class="fringe-num">Last</th>
+      <th class="fringe-num">P&amp;L</th>
+      <th class="fringe-num">Target</th>
+      <th class="fringe-num">To go</th>
+      <th class="fringe-cell-horizon">Hrzn</th>
+    </tr></thead>
+    <tbody>${open.map(fringeOpenRow).join("")}</tbody>
+  </table></div>`;
+}
+
+// Each idea renders as a numbers row plus a full-width thesis row; the
+// pair shares one bottom border so the book keeps the key-dates rhythm.
 function fringeOpenRow(idea) {
   const direction = String(idea.direction || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
   const ticker = escapeHtml(idea.ticker || "");
@@ -2032,24 +2051,30 @@ function fringeOpenRow(idea) {
       ? '<strong class="fringe-pnl fringe-missing">\u2014</strong>'
       : `<strong class="fringe-pnl ${pct > 0 ? "tone-positive" : pct < 0 ? "tone-negative" : ""}">${escapeHtml(formatSignedPct(pct))}</strong>`;
   const entry = numericOrNull(idea.entry_price);
-  const meta = [
-    idea.opened ? `opened ${idea.opened}` : "",
-    idea.horizon || "",
-    `entry ${entry === null ? "\u2014" : formatPrice(entry)}`,
-  ]
-    .filter(Boolean)
-    .join(" \u00b7 ");
-  return `<div class="fringe-row">
-    <span class="fringe-chip fringe-${direction.toLowerCase()}">${direction}</span>
-    <div class="fringe-main">
-      <div class="fringe-top">
-        <button type="button" class="fringe-ticker" data-symbol="${ticker}" title="Open ${ticker} chart">${ticker}</button>
-        ${pnl}
-      </div>
+  const last = numericOrNull(idea.last);
+  const targetPrice = numericOrNull(idea.target_price);
+  const toGo = numericOrNull(idea.to_target_pct);
+  // A free-text target without a parseable price still shows verbatim;
+  // the raw text always rides as the title.
+  const target = idea.target
+    ? `<span class="fringe-target" title="${escapeHtml(idea.target)}">${escapeHtml(targetPrice === null ? idea.target : formatPrice(targetPrice))}</span>`
+    : '<span class="fringe-missing">\u2014</span>';
+  return `<tr class="fringe-row">
+    <td class="fringe-cell-ticker"><button type="button" class="fringe-ticker" data-symbol="${ticker}" title="Open ${ticker} chart">${ticker}</button></td>
+    <td class="fringe-cell-chip"><span class="fringe-chip fringe-${direction.toLowerCase()}">${direction}</span></td>
+    <td class="fringe-num fringe-entry">${entry === null ? "\u2014" : escapeHtml(formatPrice(entry))}</td>
+    <td class="fringe-num">${last === null ? "\u2014" : escapeHtml(formatPrice(last))}</td>
+    <td class="fringe-num">${pnl}</td>
+    <td class="fringe-num">${target}</td>
+    <td class="fringe-num fringe-togo">${toGo === null ? "\u2014" : escapeHtml(formatSignedPct(toGo))}</td>
+    <td class="fringe-cell-horizon">${escapeHtml(idea.horizon || "\u2014")}</td>
+  </tr>
+  <tr class="fringe-thesis-row">
+    <td colspan="8">
       <span class="fringe-thesis" title="${escapeHtml(idea.thesis || "")}">${escapeHtml(idea.thesis || "")}</span>
-      <span class="fringe-meta">${escapeHtml(meta)}${idea.stale ? '<em class="fringe-stale">not refreshed</em>' : ""}</span>
-    </div>
-  </div>`;
+      <span class="fringe-meta">${escapeHtml(idea.opened ? `opened ${idea.opened}` : "")}${idea.stale ? '<em class="fringe-stale">not refreshed</em>' : ""}</span>
+    </td>
+  </tr>`;
 }
 
 // Compact realized-P&L footer: only the freshest 5 of the payload's 10
@@ -2060,9 +2085,13 @@ function fringeClosedList(closed) {
   const rows = closed.slice(0, 5).map((idea) => {
     const pct = numericOrNull(idea.realized_pct);
     const tone = pct === null ? "" : pct > 0 ? "tone-positive" : pct < 0 ? "tone-negative" : "";
+    const entry = numericOrNull(idea.entry_price);
+    const exit = numericOrNull(idea.exit_price);
+    const trip = `${entry === null ? "\u2014" : formatPrice(entry)} \u2192 ${exit === null ? "\u2014" : formatPrice(exit)}`;
     return `<div class="fringe-closed-row" title="${escapeHtml(idea.close_reason || "")}">
       <strong>${escapeHtml(idea.ticker || "")}</strong>
       <span>${escapeHtml(String(idea.direction || "").toUpperCase())}</span>
+      <span class="fringe-closed-trip">${escapeHtml(trip)}</span>
       <em class="${tone}">${pct === null ? "\u2014" : escapeHtml(formatSignedPct(pct))}</em>
       <span class="fringe-closed-reason">${escapeHtml(idea.close_reason || "")}</span>
     </div>`;

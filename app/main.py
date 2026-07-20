@@ -497,7 +497,10 @@ async def create_report(request: ReportRequest) -> dict[str, object]:
                 path,
                 slug=slug,
                 report_date=report_date,
-                actions=[(a.action, a.ticker, a.direction, a.text, a.horizon) for a in actions],
+                actions=[
+                    (a.action, a.ticker, a.direction, a.text, a.horizon, a.target)
+                    for a in actions
+                ],
             )
         return report_id
 
