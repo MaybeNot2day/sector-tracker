@@ -523,6 +523,23 @@ def test_daily_board_rebuild_preserves_page_scroll(page: Page, base_url: str) ->
     assert result["after"] == result["before"]
 
 
+
+@pytest.mark.parametrize("selector", [".key-dates-list", ".fringe-scroll"])
+def test_daily_board_inner_panels_chain_upward_wheel_to_page(
+    page: Page, base_url: str, selector: str
+) -> None:
+    _goto_board(page, base_url)
+    expect(page.locator("#daily-view")).to_be_visible()
+
+    page.evaluate("() => window.scrollTo(0, document.scrollingElement.scrollHeight)")
+    target = page.locator(f"#daily-board {selector}")
+    target.hover()
+    before = page.evaluate("() => window.scrollY")
+    page.mouse.wheel(0, -300)
+    page.wait_for_timeout(100)
+
+    assert page.evaluate("() => window.scrollY") < before
+
 def test_tape_deep_link_restores_crypto_chart_when_tape_row_exists(
     page: Page,
     base_url: str,

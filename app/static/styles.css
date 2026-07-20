@@ -1093,7 +1093,6 @@ h1 {
 .key-dates-list {
   max-height: 420px;
   overflow-y: auto;
-  overscroll-behavior: contain;
 }
 
 .key-date-row {
@@ -1265,7 +1264,6 @@ a.key-date-row:focus-visible {
 .fringe-scroll {
   max-height: 420px;
   overflow-y: auto;
-  overscroll-behavior: contain;
 }
 
 .fringe-table {
