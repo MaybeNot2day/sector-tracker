@@ -1988,7 +1988,7 @@ function keyDatesSection(payload) {
     ${panelHeading(
       "Key Dates",
       keyDatesNote(items),
-      'Upcoming market events fed by agent reports: economic-calendar tables and "Key Dates" bullets in uploaded briefs land here automatically. Times show the timezone the agent wrote; days count on the US Eastern trading date.'
+      'Upcoming market events fed by agent reports. Live figures are matched at runtime to TradingView economic-calendar series; each enriched row links to the exact series. Times show the timezone the agent wrote; days count on the US Eastern trading date.'
     )}
     ${keyDatesList(items, payload)}
   </section>`;
@@ -2022,8 +2022,8 @@ function keyDatesList(items, payload) {
   return `<div class="key-dates-list" data-scroll-keep="key-dates">${items.map((item) => keyDateRow(item, asOf)).join("")}</div>`;
 }
 
-// The whole row deep-links to ForexFactory's calendar for that day, so a
-// print is one click from an independent source with its own history.
+// Unmatched events fall back to ForexFactory's day view. Enriched releases
+// instead link to their exact TradingView series (the source of the figures).
 function keyDateCalendarUrl(dateText) {
   const [year, month, day] = String(dateText || "").split("-").map(Number);
   if (!year || !month || !day) return "";
@@ -2035,15 +2035,20 @@ function keyDateRow(item, asOf) {
   const diff = keyDateDayDiff(item.date, asOf);
   const relative =
     diff === 0 ? "today" : diff === 1 ? "tomorrow" : diff > 1 ? `in ${diff} days` : "";
-  const meta = [relative, item.time].filter(Boolean).join(" \u00b7 ");
   const release = item.release || null;
+  const series = [release?.country, release?.matched_title].filter(Boolean).join(" \u00b7 ");
+  const meta = [relative, item.time, series].filter(Boolean).join(" \u00b7 ");
   // The indicator description rides as a native title: the list scrolls
   // (overflow-y: auto), which would clip the help-tip CSS popover.
-  const tooltip = release?.comment ? ` title="${escapeHtml(release.comment)}"` : "";
+  const tooltipText = [
+    release?.comment,
+    release?.source ? `Data source: ${release.source}` : "",
+  ].filter(Boolean).join(" \u00b7 ");
+  const tooltip = tooltipText ? ` title="${escapeHtml(tooltipText)}"` : "";
   const high = release?.importance === 1;
-  const href = keyDateCalendarUrl(item.date);
+  const href = release?.series_url || keyDateCalendarUrl(item.date);
   const [tagOpen, tagClose] = href
-    ? [`<a href="${href}" target="_blank" rel="noopener"`, "</a>"]
+    ? [`<a href="${escapeHtml(href)}" target="_blank" rel="noopener"`, "</a>"]
     : ["<div", "</div>"];
   return `${tagOpen} class="key-date-row${diff === 0 ? " is-today" : ""}"${tooltip}>
     <span class="key-date-chip"><em>${month ? KEY_DATE_MONTHS[month - 1] : "--"}</em><strong>${day || "--"}</strong></span>

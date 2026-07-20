@@ -179,9 +179,14 @@ def test_daily_board_loads_without_page_errors_and_renders_core_sections(
         "EST -0.1% · PREV 1% · ACT -0.2% -0.10"
     )
     expect(cpi_row.locator(".key-tag-high")).to_have_text("HIGH")
-    expect(cpi_row).to_have_attribute("title", re.compile("Consumer Price Index"))
+    expect(cpi_row.locator(".key-date-main > span:not(.key-date-figures)")).to_have_text(
+        "today · 14:30 CET · US · Consumer Price Index MoM"
+    )
     expect(cpi_row).to_have_attribute(
-        "href", re.compile(r"forexfactory\.com/calendar\?day=[a-z]{3}\d{1,2}\.\d{4}")
+        "title", re.compile(r"Consumer Price Index.*Data source: U\.S\. Bureau")
+    )
+    expect(cpi_row).to_have_attribute(
+        "href", "https://www.tradingview.com/symbols/ECONOMICS-USCPI/"
     )
     expect(key_date_rows.nth(1).locator(".key-date-figures")).to_have_text(
         "EST 0.3% · PREV 0.4% · ACT —"
@@ -1149,6 +1154,9 @@ KEY_DATES_PAYLOAD: dict[str, Any] = {
                 "comment": "Consumer Price Index measures the change in prices "
                 "paid by consumers for a representative basket of goods.",
                 "matched_title": "Consumer Price Index MoM",
+                "country": "US",
+                "source": "U.S. Bureau of Labor Statistics",
+                "series_url": "https://www.tradingview.com/symbols/ECONOMICS-USCPI/",
             },
         },
         {

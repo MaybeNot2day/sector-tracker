@@ -229,6 +229,8 @@ def _normalize_row_title(title: str) -> frozenset[str]:
 class CalendarRow:
     title: str
     country: str
+    ticker: str
+    source: str | None
     period: str
     date: datetime  # aware UTC release moment
     actual: float | None
@@ -255,6 +257,8 @@ def normalize_calendar_rows(raw: list[dict[str, Any]]) -> list[CalendarRow]:
             CalendarRow(
                 title=title,
                 country=str(entry.get("country") or ""),
+                ticker=str(entry.get("ticker") or ""),
+                source=entry.get("source") or None,
                 period=str(entry.get("period") or ""),
                 date=when,
                 actual=_as_number(entry.get("actual")),
@@ -390,6 +394,13 @@ def match_release(event: dict[str, object], rows: list[CalendarRow]) -> dict[str
     return _release_payload(best_row)
 
 
+def _series_url(ticker: str) -> str | None:
+    clean = ticker.strip()
+    if not clean or ":" not in clean:
+        return None
+    return f"https://www.tradingview.com/symbols/{clean.replace(':', '-')}/"
+
+
 def _release_payload(row: CalendarRow) -> dict[str, object]:
     surprise: float | None = None
     if row.actual is not None and row.forecast is not None:
@@ -397,6 +408,7 @@ def _release_payload(row: CalendarRow) -> dict[str, object]:
     return {
         "time_utc": row.date.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "period": row.period or None,
+        "country": row.country or None,
         "actual": format_display(row.actual, unit=row.unit, scale=row.scale),
         "forecast": format_display(row.forecast, unit=row.unit, scale=row.scale),
         "previous": format_display(row.previous, unit=row.unit, scale=row.scale),
@@ -404,6 +416,8 @@ def _release_payload(row: CalendarRow) -> dict[str, object]:
         "importance": row.importance,
         "comment": row.comment,
         "matched_title": row.title,
+        "source": row.source,
+        "series_url": _series_url(row.ticker),
     }
 
 

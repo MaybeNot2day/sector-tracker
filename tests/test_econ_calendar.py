@@ -162,6 +162,12 @@ _FIXTURE_JSON = r"""
  {"id": "405503", "title": "Inflation Rate YoY", "indicator": "Inflation Rate",
   "country": "CA", "period": "Jun", "actual": 2.8, "previous": 3.2,
   "forecast": 2.9, "unit": "%", "currency": "CAD", "importance": 1,
+  "ticker": "ECONOMICS:CAIRYY", "source": "Statistics Canada",
+  "date": "2026-07-20T12:30:00.000Z"},
+ {"id": "405505", "title": "Inflation Rate MoM", "indicator": "Inflation Rate",
+  "country": "CA", "period": "Jun", "actual": -0.4, "previous": 1.0,
+  "forecast": -0.2, "unit": "%", "currency": "CAD", "importance": 0,
+  "ticker": "ECONOMICS:CAIRMM", "source": "Statistics Canada",
   "date": "2026-07-20T12:30:00.000Z"},
  {"id": "405504", "title": "Inflation Rate YoY", "indicator": "Inflation Rate",
   "country": "NZ", "period": "Q2", "actual": null, "previous": 2.5,
@@ -330,6 +336,41 @@ def test_plain_retail_sales_mom_beats_ex_autos_and_yoy_variants() -> None:
     assert release["importance"] == 1
 
 
+
+def test_explicit_cpi_frequency_exposes_exact_series_and_source() -> None:
+    yearly = match_release(
+        {
+            "date": "2026-07-20",
+            "title": "CPI (YoY, June)",
+            "time": "14:30 CET",
+        },
+        ROWS,
+    )
+    monthly = match_release(
+        {
+            "date": "2026-07-20",
+            "title": "Canada CPI (MoM, June)",
+            "time": "14:30 CET",
+        },
+        ROWS,
+    )
+
+    assert yearly is not None
+    assert yearly["matched_title"] == "Inflation Rate YoY"
+    assert yearly["country"] == "CA"
+    assert yearly["actual"] == "2.8%"
+    assert yearly["forecast"] == "2.9%"
+    assert yearly["previous"] == "3.2%"
+    assert yearly["source"] == "Statistics Canada"
+    assert yearly["series_url"] == (
+        "https://www.tradingview.com/symbols/ECONOMICS-CAIRYY/"
+    )
+    assert monthly is not None
+    assert monthly["matched_title"] == "Inflation Rate MoM"
+    assert monthly["actual"] == "-0.4%"
+    assert monthly["forecast"] == "-0.2%"
+    assert monthly["previous"] == "1%"
+
 # --- release payload: contract fields, display strings, surprise ---
 
 
@@ -340,6 +381,7 @@ def test_release_payload_contract_fields() -> None:
     assert release == {
         "time_utc": "2026-07-16T12:30:00Z",
         "period": "Jun",
+        "country": "US",
         "actual": "-0.2%",
         "forecast": "-0.1%",
         "previous": "1%",
@@ -347,6 +389,8 @@ def test_release_payload_contract_fields() -> None:
         "importance": 0,
         "comment": "Sales of retail goods and services excluding the automobile sector.",
         "matched_title": "Retail Sales Ex Autos MoM",
+        "source": None,
+        "series_url": None,
     }
 
 
