@@ -7,6 +7,7 @@ const connectionState = document.querySelector("#connection-state");
 const liveFreshness = document.querySelector("#live-freshness");
 const feedModeLabel = document.querySelector("#feed-mode");
 const refreshButton = document.querySelector("#refresh-button");
+const themeToggle = document.querySelector("#theme-toggle");
 const viewButtons = Array.from(document.querySelectorAll(".view-tabs button"));
 const dailyView = document.querySelector("#daily-view");
 const marketsView = document.querySelector("#markets-view");
@@ -99,6 +100,7 @@ let knownNewsIds = new Set();
 const NEWS_OPEN_KEY = "news-open";
 // Muted news channels, persisted per browser.
 const NEWS_MUTED_KEY = "news-muted-channels-v1";
+const THEME_STORAGE_KEY = "board-theme";
 let mutedNewsChannels = new Set();
 try {
   mutedNewsChannels = new Set(JSON.parse(localStorage.getItem(NEWS_MUTED_KEY) || "[]"));
@@ -298,6 +300,22 @@ function quoteAge(quote) {
   return `${Math.round(seconds / 86400)}d ago`;
 }
 
+function setTheme(theme, persist = false) {
+  const nextTheme = theme === "light" ? "light" : "dark";
+  const light = nextTheme === "light";
+  document.documentElement.dataset.theme = nextTheme;
+  themeToggle.setAttribute("aria-pressed", String(light));
+  themeToggle.setAttribute("aria-label", light ? "Switch to dark theme" : "Switch to light theme");
+  themeToggle.title = light ? "Switch to dark theme" : "Switch to light theme";
+  if (!persist) return;
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+  } catch (error) {
+    // Private browsing can deny storage; the active theme still applies.
+  }
+}
+
+
 init();
 
 // --- URL state ------------------------------------------------------------
@@ -392,6 +410,7 @@ function openPendingChartFromUrl() {
 
 
 function init() {
+  setTheme(document.documentElement.dataset.theme === "light" ? "light" : "dark");
   // icons are inline SVG; no icon library needed
   setConnection("connecting");
   restoreUrlState();
@@ -461,6 +480,9 @@ function init() {
   window.addEventListener("pagehide", flushBoardCache);
   newsToggle.addEventListener("click", () => setNewsOpen(!document.body.classList.contains("news-open")));
   newsClose.addEventListener("click", () => setNewsOpen(false));
+  themeToggle.addEventListener("click", () => {
+    setTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light", true);
+  });
   newsChannelsBar.addEventListener("click", (event) => {
     const chip = event.target.closest("button[data-channel]");
     if (!chip) return;
@@ -3519,10 +3541,28 @@ function chartSubtitleText(symbol, range, interval, rawBars, barCount) {
 }
 
 const MA_OVERLAYS = [
-  { period: 20, color: "#b8a06a" },
-  { period: 50, color: "#5b8dbf" },
-  { period: 200, color: "#9a6dbf" },
+  { period: 20, colorToken: "--chart-ma-20" },
+  { period: 50, colorToken: "--chart-ma-50" },
+  { period: 200, colorToken: "--chart-ma-200" },
 ];
+
+function themeColor(token) {
+  return getComputedStyle(document.documentElement).getPropertyValue(token).trim();
+}
+
+function chartThemeColors() {
+  return {
+    background: themeColor("--chart-bg"),
+    text: themeColor("--chart-text"),
+    grid: themeColor("--chart-grid"),
+    border: themeColor("--chart-border"),
+    previous: themeColor("--chart-previous"),
+    up: themeColor("--chart-up"),
+    down: themeColor("--chart-down"),
+    volumeUp: themeColor("--chart-volume-up"),
+    volumeDown: themeColor("--chart-volume-down"),
+  };
+}
 
 function renderChart(bars, interval) {
   if (!window.LightweightCharts) throw new Error("Chart library unavailable");
@@ -3530,28 +3570,29 @@ function renderChart(bars, interval) {
   // 260 matches the phone CSS minimum (.chart min-height); a 320 floor
   // inside a 260px container clipped the time axis off-screen.
   const chartHeight = Math.max(chartElement.clientHeight, 260);
+  const colors = chartThemeColors();
   chart = window.LightweightCharts.createChart(chartElement, {
     width: chartWidth,
     height: chartHeight,
-    layout: { background: { color: "#0a0b0c" }, textColor: "#a4abb3" },
-    grid: { vertLines: { color: "#181a1d" }, horzLines: { color: "#181a1d" } },
-    rightPriceScale: { borderColor: "#23262a", scaleMargins: { top: 0.05, bottom: 0.22 } },
-    timeScale: { borderColor: "#23262a", timeVisible: !DATE_ONLY_INTERVALS.has(interval) },
+    layout: { background: { color: colors.background }, textColor: colors.text },
+    grid: { vertLines: { color: colors.grid }, horzLines: { color: colors.grid } },
+    rightPriceScale: { borderColor: colors.border, scaleMargins: { top: 0.05, bottom: 0.22 } },
+    timeScale: { borderColor: colors.border, timeVisible: !DATE_ONLY_INTERVALS.has(interval) },
     crosshair: { mode: window.LightweightCharts.CrosshairMode.Normal },
   });
   const series = chart.addCandlestickSeries({
-    upColor: "#4db38a",
-    downColor: "#e0635f",
-    borderUpColor: "#4db38a",
-    borderDownColor: "#e0635f",
-    wickUpColor: "#4db38a",
-    wickDownColor: "#e0635f",
+    upColor: colors.up,
+    downColor: colors.down,
+    borderUpColor: colors.up,
+    borderDownColor: colors.down,
+    wickUpColor: colors.up,
+    wickDownColor: colors.down,
   });
   series.setData(bars);
 
   const drawnMas = drawMovingAverages(bars);
-  drawVolumePane(bars);
-  drawPreviousCloseLine(series, interval);
+  drawVolumePane(bars, colors);
+  drawPreviousCloseLine(series, interval, colors);
   renderChartLegend(drawnMas);
 
   chart.timeScale().fitContent();
@@ -3561,7 +3602,8 @@ function renderChart(bars, interval) {
 function drawMovingAverages(bars) {
   const closes = bars.map((bar) => bar.close);
   const drawn = [];
-  MA_OVERLAYS.forEach(({ period, color }) => {
+  MA_OVERLAYS.forEach(({ period, colorToken }) => {
+    const color = themeColor(colorToken);
     if (closes.length < period) return;
     const points = [];
     let sum = 0;
@@ -3585,7 +3627,7 @@ function drawMovingAverages(bars) {
   return drawn;
 }
 
-function drawVolumePane(bars) {
+function drawVolumePane(bars, colors) {
   if (!bars.some((bar) => typeof bar.volume === "number" && bar.volume > 0)) return;
   const volumeSeries = chart.addHistogramSeries({
     priceScaleId: "volume",
@@ -3600,12 +3642,12 @@ function drawVolumePane(bars) {
       .map((bar) => ({
         time: bar.time,
         value: bar.volume,
-        color: bar.close >= bar.open ? "rgba(77, 179, 138, 0.35)" : "rgba(224, 99, 95, 0.35)",
+        color: bar.close >= bar.open ? colors.volumeUp : colors.volumeDown,
       }))
   );
 }
 
-function drawPreviousCloseLine(series, interval) {
+function drawPreviousCloseLine(series, interval, colors) {
   if (!INTRADAY_INTERVALS.has(interval)) return;
   const quote = activeAsset?.quote || {};
   const prevClose = numericOrNull(
@@ -3614,7 +3656,7 @@ function drawPreviousCloseLine(series, interval) {
   if (prevClose === null || prevClose <= 0) return;
   series.createPriceLine({
     price: prevClose,
-    color: "#8a9098",
+    color: colors.previous,
     lineWidth: 1,
     lineStyle: window.LightweightCharts.LineStyle.Dashed,
     axisLabelVisible: true,

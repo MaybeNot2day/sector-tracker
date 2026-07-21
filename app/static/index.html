@@ -12,7 +12,14 @@
     />
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=20260710-1" />
     <link rel="apple-touch-icon" href="/static/apple-touch-icon.png?v=20260710-1" />
-    <link rel="stylesheet" href="/static/styles.css?v=20260720-6" />
+    <script>
+      try {
+        if (localStorage.getItem("board-theme") === "light") {
+          document.documentElement.dataset.theme = "light";
+        }
+      } catch {}
+    </script>
+    <link rel="stylesheet" href="/static/styles.css?v=20260720-8" />
   </head>
   <body>
     <aside id="news-panel" class="news-panel" aria-label="Live Telegram news">
@@ -65,6 +72,17 @@
           <span id="feed-mode">Connecting</span>
           <span id="live-freshness" class="live-freshness">Updated --</span>
         </div>
+        <button
+          id="theme-toggle"
+          class="icon-button"
+          type="button"
+          aria-label="Switch to light theme"
+          aria-pressed="false"
+          title="Switch to light theme"
+        >
+          <svg class="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41"/></svg>
+          <svg class="theme-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/></svg>
+        </button>
         <button
           id="news-toggle"
           class="icon-button"
@@ -313,6 +331,6 @@
       </div>
     </div>
 
-    <script src="/static/app.js?v=20260720-7" defer></script>
+    <script src="/static/app.js?v=20260720-8" defer></script>
   </body>
 </html>

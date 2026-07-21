@@ -19,11 +19,82 @@
   --red: #e0635f;
   --red-bg: #1c1413;
   --neutral: #aab0b6;
+  --input-bg: #0c0d0f;
+  --skeleton-mid: #22262a;
+  --row-stripe: rgba(255, 255, 255, 0.012);
+  --modal-overlay: rgba(0, 0, 0, 0.72);
+  --modal-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+  --panel-shadow: none;
+  --header-shadow: none;
+  --chart-legend-bg: rgba(10, 11, 12, 0.72);
+  --crypto-tag: #5fb3c9;
+  --crypto-tag-bg: #101a1d;
+  --opex-tag: #a58fd4;
+  --opex-tag-bg: #16121d;
+  --chart-bg: #0a0b0c;
+  --chart-text: #a4abb3;
+  --chart-grid: #181a1d;
+  --chart-border: #23262a;
+  --chart-previous: #8a9098;
+  --chart-up: #4db38a;
+  --chart-down: #e0635f;
+  --chart-volume-up: rgba(77, 179, 138, 0.35);
+  --chart-volume-down: rgba(224, 99, 95, 0.35);
+  --chart-ma-20: #b8a06a;
+  --chart-ma-50: #5b8dbf;
+  --chart-ma-200: #9a6dbf;
   --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   /* Tracking for the small uppercase labels that carry the institutional feel */
   --track-label: 0.07em;
   --track-tab: 0.09em;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f3f4f2;
+  --surface: #ffffff;
+  --surface-raised: #f8f9f7;
+  --surface-soft: #eef0ed;
+  --surface-selected: #e9ebe7;
+  --line: #dcdeda;
+  --line-soft: #eceeeb;
+  --line-strong: #bfc3bd;
+  --text: #20242a;
+  --muted: #68717a;
+  --muted-strong: #505860;
+  --accent: #80672f;
+  --accent-dim: #aa925b;
+  --accent-soft: #f5f0e3;
+  --green: #147552;
+  --green-bg: #e9f5ef;
+  --red: #b33d3a;
+  --red-bg: #faeceb;
+  --neutral: #5f6871;
+  --input-bg: #ffffff;
+  --skeleton-mid: #dde1dc;
+  --row-stripe: rgba(32, 36, 42, 0.018);
+  --modal-overlay: rgba(35, 40, 46, 0.42);
+  --modal-shadow: 0 20px 60px rgba(35, 40, 46, 0.2);
+  --panel-shadow: 0 1px 2px rgba(35, 40, 46, 0.045);
+  --header-shadow: 0 1px 8px rgba(35, 40, 46, 0.06);
+  --chart-legend-bg: rgba(255, 255, 255, 0.88);
+  --crypto-tag: #186f84;
+  --crypto-tag-bg: #eaf5f7;
+  --opex-tag: #7052a0;
+  --opex-tag-bg: #f2eef9;
+  --chart-bg: #ffffff;
+  --chart-text: #59616a;
+  --chart-grid: #eceeeb;
+  --chart-border: #d5d8d3;
+  --chart-previous: #737b84;
+  --chart-up: #147552;
+  --chart-down: #b33d3a;
+  --chart-volume-up: rgba(20, 117, 82, 0.25);
+  --chart-volume-down: rgba(179, 61, 58, 0.25);
+  --chart-ma-20: #8b6a20;
+  --chart-ma-50: #2f6f9f;
+  --chart-ma-200: #73519a;
 }
 
 * {
@@ -231,6 +302,7 @@ p {
   align-items: stretch;
   border-bottom: 1px solid var(--line);
   background: var(--surface);
+  box-shadow: var(--header-shadow);
 }
 
 .brand {
@@ -409,6 +481,18 @@ h1 {
   stroke-width: 1.75;
 }
 
+.theme-icon-moon {
+  display: none;
+}
+
+:root[data-theme="light"] .theme-icon-sun {
+  display: none;
+}
+
+:root[data-theme="light"] .theme-icon-moon {
+  display: block;
+}
+
 .toolbar-button:hover,
 .toolbar-button:focus-visible,
 .icon-button:hover,
@@ -508,6 +592,7 @@ h1 {
   min-width: 0;
   border: 1px solid var(--line);
   background: var(--surface);
+  box-shadow: var(--panel-shadow);
 }
 
 .panel-heading {
@@ -1228,9 +1313,9 @@ a.key-date-row:focus-visible {
 }
 
 .key-tag-crypto {
-  color: #5fb3c9;
+  color: var(--crypto-tag);
   border-color: rgba(95, 179, 201, 0.35);
-  background: #101a1d;
+  background: var(--crypto-tag-bg);
 }
 
 .key-tag-earnings {
@@ -1240,9 +1325,9 @@ a.key-date-row:focus-visible {
 }
 
 .key-tag-opex {
-  color: #a58fd4;
+  color: var(--opex-tag);
   border-color: rgba(165, 143, 212, 0.35);
-  background: #16121d;
+  background: var(--opex-tag-bg);
 }
 
 .key-tag-holiday {
@@ -1858,7 +1943,7 @@ a.key-date-row:focus-visible {
 }
 
 .asset-row:nth-child(odd) {
-  background: rgba(255, 255, 255, 0.012);
+  background: var(--row-stripe);
 }
 
 .asset-row:hover,
@@ -1979,7 +2064,7 @@ a.key-date-row:focus-visible {
 .board-loading .group-title span {
   display: block;
   overflow: hidden;
-  background: linear-gradient(90deg, var(--surface-soft), #22262a, var(--surface-soft));
+  background: linear-gradient(90deg, var(--surface-soft), var(--skeleton-mid), var(--surface-soft));
   background-size: 220% 100%;
   animation: skeleton 1.4s ease-in-out infinite;
 }
@@ -2077,7 +2162,7 @@ a.key-date-row:focus-visible {
   align-items: center;
   justify-content: center;
   padding: 18px;
-  background: rgba(0, 0, 0, 0.72);
+  background: var(--modal-overlay);
 }
 
 .modal.open {
@@ -2089,7 +2174,7 @@ a.key-date-row:focus-visible {
   width: min(1180px, 100%);
   border: 1px solid var(--line-strong);
   background: var(--bg);
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+  box-shadow: var(--modal-shadow);
 }
 
 .modal-shell {
@@ -2182,7 +2267,7 @@ a.key-date-row:focus-visible {
   width: 100%;
   min-height: 31px;
   border: 1px solid var(--line);
-  background: #0c0d0f;
+  background: var(--input-bg);
   color: var(--text);
   padding: 0 9px;
   font-family: var(--font-mono);
@@ -2362,7 +2447,7 @@ a.key-date-row:focus-visible {
   display: flex;
   gap: 10px;
   padding: 3px 7px;
-  background: rgba(10, 11, 12, 0.72);
+  background: var(--chart-legend-bg);
   border: 1px solid var(--line-soft);
   color: var(--muted-strong);
   font-family: var(--font-mono);
@@ -3097,7 +3182,7 @@ a.key-date-row:focus-visible {
     "reports-content";
   border: 1px solid var(--line-strong);
   background: var(--bg);
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+  box-shadow: var(--modal-shadow);
 }
 
 .reports-header-actions {

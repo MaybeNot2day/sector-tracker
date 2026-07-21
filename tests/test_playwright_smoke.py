@@ -234,6 +234,47 @@ def test_daily_board_loads_without_page_errors_and_renders_core_sections(
     expect(closed_rows.nth(0)).to_contain_text("+8.05%")
 
 
+def test_theme_toggle_persists_light_mode(page: Page, base_url: str) -> None:
+    _goto_board(page, base_url)
+    root = page.locator("html")
+    toggle = page.locator("#theme-toggle")
+
+    expect(root).to_have_attribute("data-theme", "dark")
+    expect(toggle).to_have_attribute("aria-label", "Switch to light theme")
+    toggle.click()
+
+    expect(root).to_have_attribute("data-theme", "light")
+    expect(toggle).to_have_attribute("aria-pressed", "true")
+    expect(toggle).to_have_attribute("aria-label", "Switch to dark theme")
+    colors = page.evaluate(
+        """() => {
+          const panel = document.querySelector('.analytics-panel');
+          return {
+            scheme: getComputedStyle(document.documentElement).colorScheme,
+            body: getComputedStyle(document.body).backgroundColor,
+            panel: getComputedStyle(panel).backgroundColor,
+            text: getComputedStyle(document.body).color,
+            stored: localStorage.getItem('board-theme'),
+          };
+        }"""
+    )
+    assert colors == {
+        "scheme": "light",
+        "body": "rgb(243, 244, 242)",
+        "panel": "rgb(255, 255, 255)",
+        "text": "rgb(32, 36, 42)",
+        "stored": "light",
+    }
+
+    page.reload(wait_until="domcontentloaded")
+    expect(page.locator("html")).to_have_attribute("data-theme", "light")
+    expect(page.locator("#theme-toggle")).to_have_attribute("aria-label", "Switch to dark theme")
+
+    page.locator("#theme-toggle").click()
+    expect(page.locator("html")).to_have_attribute("data-theme", "dark")
+    expect(page.locator("#theme-toggle")).to_have_attribute("aria-pressed", "false")
+
+
 def test_daily_board_hides_fringe_panel_when_book_is_empty(page: Page, base_url: str) -> None:
     # Routes registered later win in Playwright, so this overrides only the
     # fixture's /api/fringe stub; every other endpoint keeps its data.
