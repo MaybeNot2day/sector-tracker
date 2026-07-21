@@ -1,5 +1,5 @@
 :root {
-  /* Cool neutral graphite — flat surfaces, hairline borders, no glow */
+  /* Cool neutral graphite — layered surfaces, hairline borders, restrained glow */
   --bg: #0a0b0c;
   --surface: #101113;
   --surface-raised: #15171a;
@@ -24,8 +24,16 @@
   --row-stripe: rgba(255, 255, 255, 0.012);
   --modal-overlay: rgba(0, 0, 0, 0.72);
   --modal-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
-  --panel-shadow: none;
+  --panel-shadow: 0 14px 34px -26px rgba(0, 0, 0, 0.9);
   --header-shadow: none;
+  --panel-top-light: rgba(255, 255, 255, 0.028);
+  --lift-shadow: 0 8px 22px -14px rgba(0, 0, 0, 0.85);
+  --glow-live: 0 0 8px rgba(77, 179, 138, 0.55);
+  --glow-hero-positive: 0 0 22px rgba(77, 179, 138, 0.3);
+  --glow-hero-negative: 0 0 22px rgba(224, 99, 95, 0.3);
+  --glow-brand: 0 0 18px -4px rgba(184, 160, 106, 0.55);
+  --earnings-tag: #6ca7dd;
+  --earnings-tag-bg: #101722;
   --chart-legend-bg: rgba(10, 11, 12, 0.72);
   --crypto-tag: #5fb3c9;
   --crypto-tag-bg: #101a1d;
@@ -78,6 +86,14 @@
   --modal-shadow: 0 20px 60px rgba(35, 40, 46, 0.2);
   --panel-shadow: 0 1px 2px rgba(35, 40, 46, 0.045);
   --header-shadow: 0 1px 8px rgba(35, 40, 46, 0.06);
+  --panel-top-light: rgba(255, 255, 255, 0.6);
+  --lift-shadow: 0 6px 16px -10px rgba(35, 40, 46, 0.25);
+  --glow-live: 0 0 6px rgba(20, 117, 82, 0.35);
+  --glow-hero-positive: none;
+  --glow-hero-negative: none;
+  --glow-brand: none;
+  --earnings-tag: #2f6f9f;
+  --earnings-tag-bg: #eaf1f7;
   --chart-legend-bg: rgba(255, 255, 255, 0.88);
   --crypto-tag: #186f84;
   --crypto-tag-bg: #eaf5f7;
@@ -316,18 +332,31 @@ p {
 }
 
 .brand-mark {
+  position: relative;
   width: 34px;
   height: 34px;
   display: grid;
   place-items: center;
+  overflow: hidden;
   flex: 0 0 auto;
   border: 1px solid var(--accent-dim);
-  background: transparent;
+  background: linear-gradient(135deg, rgba(184, 160, 106, 0.16), rgba(184, 160, 106, 0.02) 62%);
+  box-shadow: var(--glow-brand);
   color: var(--accent);
   font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.04em;
+}
+
+/* One shimmer sweep on load — a heartbeat, not a marquee. */
+.brand-mark::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(115deg, transparent 40%, rgba(255, 255, 255, 0.16) 50%, transparent 60%);
+  transform: translateX(-130%);
+  animation: brand-sweep 1.4s ease 0.6s forwards;
 }
 
 .brand-copy {
@@ -441,6 +470,8 @@ h1 {
 .state-dot.live,
 .status-strip.live .status-pulse {
   background: var(--green);
+  box-shadow: var(--glow-live);
+  animation: breathe 2.8s ease-in-out infinite;
 }
 
 .state-dot.error,
@@ -451,6 +482,38 @@ h1 {
 .status-strip.connecting .status-pulse {
   animation: pulse 1.4s ease-in-out infinite;
   background: var(--muted);
+}
+
+/* Terminal boot cursor while the first market payload loads. */
+.status-strip.connecting #status-copy::after {
+  content: "▍";
+  margin-left: 6px;
+  color: var(--accent);
+  animation: cursor-blink 1.1s steps(2, start) infinite;
+}
+
+@keyframes breathe {
+  0%, 100% { box-shadow: var(--glow-live); }
+  50% { box-shadow: 0 0 2px rgba(77, 179, 138, 0.18); }
+}
+
+@keyframes cursor-blink {
+  50% { opacity: 0; }
+}
+
+@keyframes spark-draw {
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(7px);
+  }
+}
+
+@keyframes brand-sweep {
+  to { transform: translateX(130%); }
 }
 
 .toolbar-button,
@@ -574,6 +637,14 @@ h1 {
   opacity: 0.55;
 }
 
+.macro-item.flash-up {
+  animation: flash-up 0.9s ease-out;
+}
+
+.macro-item.flash-down {
+  animation: flash-down 0.9s ease-out;
+}
+
 .workspace {
   width: min(1780px, 100%);
   margin: 0 auto;
@@ -589,12 +660,24 @@ h1 {
   gap: 14px;
 }
 
+/* One-time boot: panels rise in staggered on the first data paint. */
+.daily-board.board-boot > * {
+  animation: rise-in 0.5s ease-out backwards;
+}
+
+.daily-board.board-boot > :nth-child(2) { animation-delay: 0.06s; }
+.daily-board.board-boot > :nth-child(3) { animation-delay: 0.12s; }
+.daily-board.board-boot > :nth-child(4) { animation-delay: 0.18s; }
+.daily-board.board-boot > :nth-child(5) { animation-delay: 0.24s; }
+.daily-board.board-boot > :nth-child(6) { animation-delay: 0.3s; }
+.daily-board.board-boot > :nth-child(7) { animation-delay: 0.36s; }
+
 .analytics-panel {
   min-width: 0;
   container-type: inline-size;
   border: 1px solid var(--line);
   background: var(--surface);
-  box-shadow: var(--panel-shadow);
+  box-shadow: inset 0 1px 0 var(--panel-top-light), var(--panel-shadow);
 }
 
 .panel-heading {
@@ -605,7 +688,7 @@ h1 {
   gap: 12px;
   padding: 0 14px;
   border-bottom: 1px solid var(--line);
-  background: var(--surface-raised);
+  background: linear-gradient(180deg, var(--surface-soft), var(--surface-raised));
 }
 
 .panel-heading h2 {
@@ -620,6 +703,15 @@ h1 {
 .panel-heading h2 {
   display: flex;
   align-items: center;
+}
+
+.panel-heading h2::before {
+  content: "";
+  width: 3px;
+  height: 11px;
+  margin-right: 9px;
+  flex: 0 0 auto;
+  background: linear-gradient(180deg, var(--accent), var(--accent-dim));
 }
 
 .help-tip {
@@ -764,10 +856,21 @@ h1 {
 }
 
 .regime-cell:first-child .metric-value {
-  font-size: 18px;
-  line-height: 1.15;
+  font-size: 23px;
+  letter-spacing: -0.02em;
+  line-height: 1.12;
   text-overflow: clip;
   white-space: normal;
+}
+
+/* Hero values bloom faintly in the dark theme (vars collapse to none in
+   light) — the tape's mood reads across the room. */
+.regime-grid .metric-value.tone-positive {
+  text-shadow: var(--glow-hero-positive);
+}
+
+.regime-grid .metric-value.tone-negative {
+  text-shadow: var(--glow-hero-negative);
 }
 
 .metric-detail {
@@ -834,7 +937,7 @@ h1 {
   cursor: pointer;
   padding: 13px 14px;
   text-align: left;
-  transition: background 0.12s ease;
+  transition: background 0.12s ease, transform 0.16s ease, box-shadow 0.16s ease;
 }
 
 .benchmark-card:nth-child(3n) {
@@ -863,6 +966,8 @@ h1 {
 .benchmark-card:focus-visible {
   background: var(--surface-soft);
   outline: none;
+  transform: translateY(-1px);
+  box-shadow: var(--lift-shadow);
 }
 
 .benchmark-symbol {
@@ -1356,9 +1461,9 @@ a.key-date-row:focus-visible {
 }
 
 .key-tag-earnings {
-  color: var(--green);
-  border-color: rgba(77, 179, 138, 0.35);
-  background: var(--green-bg);
+  color: var(--earnings-tag);
+  border-color: rgba(108, 167, 221, 0.35);
+  background: var(--earnings-tag-bg);
 }
 
 .key-tag-opex {
@@ -1822,6 +1927,7 @@ a.key-date-row:focus-visible {
   margin: 0 0 12px;
   border: 1px solid var(--line);
   background: var(--surface);
+  box-shadow: inset 0 1px 0 var(--panel-top-light), var(--panel-shadow);
   break-inside: avoid;
   vertical-align: top;
 }
@@ -2072,6 +2178,12 @@ a.key-date-row:focus-visible {
   stroke: var(--red);
 }
 
+.sparkline.spark-draw polyline {
+  stroke-dasharray: 220;
+  stroke-dashoffset: 220;
+  animation: spark-draw 0.9s ease-out forwards;
+}
+
 .sparkline-empty {
   color: var(--muted);
 }
@@ -2088,6 +2200,12 @@ a.key-date-row:focus-visible {
   font-size: 11px;
   letter-spacing: 0.03em;
   text-transform: uppercase;
+}
+
+.empty-state::before {
+  content: "> ";
+  color: var(--accent);
+  font-family: var(--font-mono);
 }
 
 .skeleton-line,
@@ -2200,6 +2318,8 @@ a.key-date-row:focus-visible {
   justify-content: center;
   padding: 18px;
   background: var(--modal-overlay);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
 }
 
 .modal.open {
@@ -3444,6 +3564,8 @@ a.key-date-row:focus-visible {
   border-color: var(--accent-dim);
   background: var(--surface-raised);
   outline: none;
+  transform: translateY(-1px);
+  box-shadow: var(--lift-shadow);
 }
 
 .report-card strong {
@@ -3628,5 +3750,22 @@ a.key-date-row:focus-visible {
 
   .report-reader {
     padding: 14px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .daily-board.board-boot > *,
+  .brand-mark::after,
+  .state-dot.live,
+  .status-strip.live .status-pulse,
+  .status-strip.connecting #status-copy::after,
+  .sparkline.spark-draw polyline,
+  .macro-item.flash-up,
+  .macro-item.flash-down {
+    animation: none !important;
+  }
+
+  .sparkline.spark-draw polyline {
+    stroke-dashoffset: 0;
   }
 }

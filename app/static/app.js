@@ -1492,11 +1492,24 @@ function renderMacroStrip(items) {
     macroStrip.hidden = true;
     return;
   }
-  macroStrip.innerHTML = items.map(macroItem).join("");
+  macroStrip.innerHTML = items.map((item) => macroItem(item, macroFlashClass(item))).join("");
   macroStrip.hidden = false;
 }
 
-function macroItem(item) {
+// The macro strip is innerHTML-swapped each poll, so a flash class on the
+// fresh node replays the CSS animation exactly when the value moved.
+const prevMacroLasts = new Map();
+
+function macroFlashClass(item) {
+  const key = item.label || "";
+  const previous = prevMacroLasts.get(key);
+  const current = typeof item.last === "number" ? item.last : null;
+  if (current !== null) prevMacroLasts.set(key, current);
+  if (typeof previous !== "number" || current === null || current === previous) return "";
+  return current > previous ? " flash-up" : " flash-down";
+}
+
+function macroItem(item, flashClass = "") {
   const isYield = item.unit === "yield";
   const value =
     typeof item.last === "number"
@@ -1520,7 +1533,7 @@ function macroItem(item) {
           : tone;
   }
   const title = isYield ? `${item.label} yield · 1D change in bp` : `${item.label} · 1D change`;
-  return `<span class="macro-item${item.is_stale ? " stale" : ""}" title="${escapeHtml(title)}"><label>${escapeHtml(item.label)}</label><strong>${escapeHtml(value)}</strong><em class="${tone}">${escapeHtml(change)}</em></span>`;
+  return `<span class="macro-item${item.is_stale ? " stale" : ""}${flashClass}" title="${escapeHtml(title)}"><label>${escapeHtml(item.label)}</label><strong>${escapeHtml(value)}</strong><em class="${tone}">${escapeHtml(change)}</em></span>`;
 }
 
 function updateHeader(overview) {
@@ -1543,6 +1556,9 @@ function updateHeader(overview) {
 }
 
 let lastDailyRenderKey = "";
+// First data paint gets a one-time staggered rise-in; every later reconcile
+// must stay motionless so 10s refreshes never pulse the board.
+let dailyBoardBooted = false;
 // Per-chunk HTML cache for reconcileDailyPanels: only top-level chunks
 // whose markup actually changed get replaced. The old full innerHTML swap
 // rebuilt every DOM node on each ~10s overview refresh, which killed
@@ -1707,6 +1723,12 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
   });
 
   reconcileDailyPanels(chunks);
+
+  if (!dailyBoardBooted) {
+    dailyBoardBooted = true;
+    dailyBoard.classList.add("board-boot");
+    window.setTimeout(() => dailyBoard.classList.remove("board-boot"), 1400);
+  }
 
   if (scroller.scrollTop !== pageScroll) scroller.scrollTop = pageScroll;
   Object.entries(innerScroll).forEach(([key, top]) => {
@@ -1921,12 +1943,18 @@ function cryptoBreadthPanel(breadth) {
   </section>`;
 }
 
+// The breadth sparkline draws itself in once; chunk reconciles must not
+// replay the stroke animation on every overview refresh.
+let breadthSparkDrawn = false;
+
 function breadthTrendRow() {
   const series = (latestSnapshots || [])
     .map((snap) => numericOrNull(snap.universe?.above_50dma_pct))
     .filter((value) => value !== null);
   if (series.length < 2) return "";
-  return `<div class="breadth-row" title="% of universe above 50DMA across the last ${series.length} daily snapshots"><span>50DMA trend</span><span class="breadth-spark">${sparklineSvg(series)}</span></div>`;
+  const animate = !breadthSparkDrawn;
+  breadthSparkDrawn = true;
+  return `<div class="breadth-row" title="% of universe above 50DMA across the last ${series.length} daily snapshots"><span>50DMA trend</span><span class="breadth-spark">${sparklineSvg(series, animate)}</span></div>`;
 }
 
 function previousThemeScores() {
@@ -2618,9 +2646,15 @@ function updateTapeRow(row, data) {
   row.setAttribute("aria-label", `${data.symbol} chart`);
   cells[0].className = "symbol-cell";
   cells[0].querySelector("strong").textContent = data.symbol;
+  const previousLast = numericOrNull(cells[1].dataset.value);
   cells[1].className = "last-cell";
   cells[1].title = "Last trade";
   cells[1].textContent = formatPrice(data.last);
+  if (typeof data.last === "number") cells[1].dataset.value = String(data.last);
+  else delete cells[1].dataset.value;
+  if (previousLast !== null && typeof data.last === "number" && data.last !== previousLast) {
+    flashCell(cells[1], data.last - previousLast);
+  }
   cells[2].className = changeClass(data.change_pct);
   cells[2].textContent = formatSignedPct(data.change_pct);
   cells[3].className = `tape-funding ${aprClass}`;
@@ -3294,7 +3328,11 @@ function updateRow(row, asset, options = {}) {
     rvolClass(rvol),
     false
   );
-  updateSparklineCell(ensureRowCell(row, "trend", "sparkline-cell"), asset.summary?.sparkline || []);
+  updateSparklineCell(
+    ensureRowCell(row, "trend", "sparkline-cell"),
+    asset.summary?.sparkline || [],
+    Boolean(options.initial)
+  );
 }
 
 function ensureRowCell(row, key, className = "") {
@@ -3337,13 +3375,13 @@ function updateValueCell(cell, text, value, className, shouldFlash) {
   }
 }
 
-function updateSparklineCell(cell, values) {
+function updateSparklineCell(cell, values, animate = false) {
   const key = values.join(",");
   if (cell.dataset.sparkKey === key) return;
   cell.dataset.sparkKey = key;
   cell.className = "sparkline-cell";
   cell.title = values.length ? "Recent trend" : "No trend history";
-  cell.innerHTML = sparklineSvg(values);
+  cell.innerHTML = sparklineSvg(values, animate);
 }
 
 function formatRvol(value) {
@@ -3389,7 +3427,7 @@ function flashCell(cell, delta) {
   window.setTimeout(() => cell.classList.remove("flash-up", "flash-down"), 450);
 }
 
-function sparklineSvg(values) {
+function sparklineSvg(values, animate = false) {
   const points = Array.isArray(values) ? values.map(Number).filter((value) => Number.isFinite(value)) : [];
   if (points.length < 2) return '<span class="sparkline-empty">--</span>';
   const width = 64;
@@ -3405,7 +3443,7 @@ function sparklineSvg(values) {
     })
     .join(" ");
   const tone = points[points.length - 1] >= points[0] ? "positive" : "negative";
-  return `<svg class="sparkline sparkline-${tone}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true"><polyline points="${path}"></polyline></svg>`;
+  return `<svg class="sparkline sparkline-${tone}${animate ? " spark-draw" : ""}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true"><polyline points="${path}"></polyline></svg>`;
 }
 
 function filterMarketsByGroup(groupName) {
