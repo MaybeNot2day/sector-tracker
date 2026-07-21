@@ -298,7 +298,7 @@ curl -fsSL https://raw.githubusercontent.com/MaybeNot2day/sector-tracker/main/de
 ```
 
 The idempotent installer puts the app under `/opt/sector-tracker`, binds Uvicorn
-to loopback, and publishes it only through Tailscale Serve HTTPS. The systemd
+to loopback, and publishes it publicly through Tailscale Funnel HTTPS. The systemd
 unit runs as a dedicated, sandboxed user. Runtime installs use the hashed,
 fully pinned `requirements.txt`; the auto-deploy timer polls `origin/main`,
 restarts only after installing that lock, and rolls back any revision whose
@@ -319,7 +319,7 @@ sudo sed -i 's/^EDIT_TOKEN=.*/EDIT_TOKEN=NEW_RANDOM_VALUE/' /opt/sector-tracker/
 sudo systemctl restart sector-tracker
 ```
 
-Read access is private to the tailnet. Mutation endpoints additionally require
+Read access is public through Tailscale Funnel. Mutation endpoints still require
 `X-Edit-Token`; the browser keeps that token only for the current tab session.
 
 ### Vercel

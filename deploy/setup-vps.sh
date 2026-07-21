@@ -6,7 +6,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/MaybeNot2day/sector-tracker/main/deploy/setup-vps.sh | sudo bash
 #
 # Installs the app under /opt/sector-tracker with a dedicated system user,
-# binds it to loopback, and publishes it only through Tailscale Serve HTTPS.
+# binds it to loopback, and publishes it publicly through Tailscale Funnel HTTPS.
 # A timer polls origin/main every 2 minutes and health-gates each deployment.
 # Re-running the script is safe (idempotent).
 set -euo pipefail
@@ -79,7 +79,7 @@ sudo -u "$APP_USER" bash -ec "
 "
 
 # First setup only: ship .env with a random EDIT_TOKEN. The token still guards
-# mutation endpoints if the tailnet URL is shared with another device/user.
+# mutation endpoints even though the dashboard itself is publicly readable.
 if [ ! -f "$APP_DIR/.env" ]; then
   if command -v openssl >/dev/null 2>&1; then
     EDIT_TOKEN="$(openssl rand -hex 24)"
@@ -160,8 +160,10 @@ if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
   ufw --force delete allow "$PORT/tcp" >/dev/null 2>&1 || true
 fi
 
-echo "==> Publishing private HTTPS endpoint through Tailscale Serve"
-tailscale serve --bg "http://127.0.0.1:$PORT"
+echo "==> Publishing public HTTPS endpoint through Tailscale Funnel"
+# Migrate an older private Serve configuration before enabling public access.
+tailscale serve --https=443 off >/dev/null 2>&1 || true
+tailscale funnel --bg "http://127.0.0.1:$PORT"
 DNS_NAME="$(tailscale status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')"
 echo
 echo "Done. Board:   https://$DNS_NAME"
