@@ -261,8 +261,12 @@ def test_closed_news_panel_is_inert_until_opened(page: Page, base_url: str) -> N
 
     expect(panel).to_have_attribute("aria-hidden", "false")
     assert panel.get_attribute("inert") is None
-    close.focus()
     expect(close).to_be_focused()
+
+    page.keyboard.press("Escape")
+    expect(panel).to_have_attribute("aria-hidden", "true")
+    expect(panel).to_have_attribute("inert", "")
+    expect(page.locator("#news-toggle")).to_be_focused()
 
 
 def test_theme_toggle_persists_light_mode(page: Page, base_url: str) -> None:
@@ -332,7 +336,7 @@ def test_markets_tabs_render_rows_and_open_canvas_chart(page: Page, base_url: st
     for category in ("tradfi", "crypto", "commodities"):
         button = page.locator(f'.category-tabs button[data-category="{category}"]')
         button.click()
-        expect(button).to_have_attribute("aria-selected", "true")
+        expect(button).to_have_attribute("aria-pressed", "true")
         _wait_for_visible_market_row(page)
         assert _visible_market_row_count(page) >= 1, (
             f"{category} should render at least one visible row"
@@ -698,6 +702,7 @@ def test_reports_modal_lists_reports_and_renders_escaped_markdown_reader(
     reader = page.locator("#report-reader")
     expect(reader).to_be_visible()
     body = reader.locator(".report-body")
+    expect(reader.locator(".report-head h2")).to_be_focused()
     expect(body.locator("h2")).to_have_text("Flow Summary")
     expect(body.locator("table th").first).to_have_text("Asset")
     expect(body.locator("table td").first).to_have_text("ZEC")
@@ -738,9 +743,138 @@ def test_reports_modal_lists_reports_and_renders_escaped_markdown_reader(
     )
 
     page.locator("#reports-back").click()
+    expect(cards.first).to_be_focused()
     expect(page.locator("#report-reader")).to_be_hidden()
     expect(page.locator("#reports-back")).to_be_hidden()
     expect(page.locator("#reports-list .report-card")).to_have_count(3)
+
+
+@pytest.mark.parametrize(
+    ("width", "height"),
+    [(390, 844), (768, 900), (800, 900), (1440, 1100)],
+)
+def test_viewport_portals_and_modals_never_expand_the_document(
+    page: Page,
+    base_url: str,
+    width: int,
+    height: int,
+) -> None:
+    page.set_viewport_size({"width": width, "height": height})
+    _goto_board(page, base_url)
+
+    help_button = page.locator(".help-tip").first
+    help_button.focus()
+    tooltip = page.get_by_role("tooltip")
+    expect(tooltip).to_be_visible()
+    expect(help_button).to_have_attribute("aria-describedby", "help-tooltip")
+    tooltip_box = tooltip.bounding_box()
+    assert tooltip_box is not None
+    assert tooltip_box["x"] >= 0
+    assert tooltip_box["x"] + tooltip_box["width"] <= width
+    assert tooltip_box["y"] >= 0
+    assert tooltip_box["y"] + tooltip_box["height"] <= height
+    assert page.evaluate("() => document.documentElement.scrollWidth") == width
+
+    page.keyboard.press("Escape")
+    expect(tooltip).to_be_hidden()
+    expect(help_button).not_to_have_attribute("aria-describedby", "help-tooltip")
+
+    page.locator("#news-toggle").click()
+    expect(page.locator("#news-close")).to_be_focused()
+    assert page.evaluate("() => document.documentElement.scrollWidth") == width
+    header_box = page.locator(".app-header").bounding_box()
+    assert header_box is not None
+    assert header_box["x"] >= 0
+    assert header_box["x"] + header_box["width"] <= width
+    page.keyboard.press("Escape")
+
+    page.locator("#editor-open").click()
+    shell_box = page.locator(".editor-shell").bounding_box()
+    modal_header_box = page.locator("#editor-modal .modal-header").bounding_box()
+    assert shell_box is not None
+    assert modal_header_box is not None
+    assert abs(modal_header_box["y"] - shell_box["y"]) <= 2
+    assert shell_box["x"] >= 0
+    assert shell_box["x"] + shell_box["width"] <= width
+    assert page.evaluate("() => document.documentElement.scrollWidth") == width
+    page.locator("#editor-close").click()
+
+
+def test_tablet_market_toolbar_and_category_group_fit_viewport(
+    page: Page,
+    base_url: str,
+) -> None:
+    page.set_viewport_size({"width": 800, "height": 900})
+    _goto_board(page, base_url)
+    page.locator("#markets-tab").click()
+
+    category_group = page.get_by_role("group", name="Market category")
+    expect(category_group).to_be_visible()
+    crypto = category_group.get_by_role("button", name="Crypto")
+    crypto.click()
+    expect(crypto).to_have_attribute("aria-pressed", "true")
+    expect(category_group.get_by_role("button", name="TradFi")).to_have_attribute(
+        "aria-pressed", "false"
+    )
+    expect(page.get_by_role("button", name="Refresh market data")).to_be_visible()
+
+    tools_box = page.locator(".market-tools").bounding_box()
+    filter_box = page.locator("#market-filter-status").bounding_box()
+    assert tools_box is not None
+    assert filter_box is not None
+    assert tools_box["x"] >= 0
+    assert tools_box["x"] + tools_box["width"] <= 800
+    assert filter_box["x"] + filter_box["width"] <= 800
+    assert page.evaluate("() => document.documentElement.scrollWidth") == 800
+
+
+def test_mobile_fringe_cards_prioritize_full_thesis_and_touch_targets(
+    page: Page,
+    base_url: str,
+) -> None:
+    page.set_viewport_size({"width": 390, "height": 844})
+    _goto_board(page, base_url)
+
+    thesis = page.locator(".fringe-row").first.locator(".fringe-thesis")
+    thesis_box = thesis.bounding_box()
+    assert thesis_box is not None
+    assert thesis_box["width"] >= 220
+    assert thesis.evaluate("(node) => getComputedStyle(node).whiteSpace") == "normal"
+    expect(thesis).to_have_text("Miner with HPC optionality; base building above 8.")
+    expect(page.locator(".fringe-row").first.locator(".fringe-entry")).to_be_hidden()
+    expect(page.locator(".fringe-row").first.locator(".fringe-last")).to_be_hidden()
+
+    page.locator("#markets-tab").click()
+    category_buttons = page.locator(".category-tabs button")
+    for index in range(category_buttons.count()):
+        box = category_buttons.nth(index).bounding_box()
+        assert box is not None
+        assert box["height"] >= 44
+    for control_id in (
+        "theme-toggle",
+        "news-toggle",
+        "reports-open",
+        "refresh-button",
+        "editor-open",
+    ):
+        box = page.locator(f"#{control_id}").bounding_box()
+        assert box is not None
+        assert box["width"] >= 44
+        assert box["height"] >= 44
+    assert page.evaluate("() => document.documentElement.scrollWidth") == 390
+
+
+def test_benchmark_grid_uses_balanced_explicit_columns(
+    page: Page,
+    base_url: str,
+) -> None:
+    _goto_board(page, base_url)
+    grid = page.locator(".benchmark-grid")
+    expect(grid.locator(".benchmark-card")).to_have_count(2)
+    column_tracks = grid.evaluate(
+        "(node) => getComputedStyle(node).gridTemplateColumns.split(' ').filter(Boolean)"
+    )
+    assert len(column_tracks) == 3
 
 
 def _goto_board(page: Page, base_url: str, fragment: str = "") -> None:

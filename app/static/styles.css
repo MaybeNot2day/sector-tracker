@@ -121,12 +121,8 @@ body.modal-open {
 }
 
 /* --- Live news drawer ---------------------------------------------------- */
-/* Desktop: the open drawer shifts all in-flow content right via body
-   padding, so no layout rewiring is needed; fixed modals are unaffected.
-   Phones: it overlays the full width instead. */
-body.news-open {
-  padding-left: 340px;
-}
+/* The drawer is always a fixed overlay. Opening it must not mutate the
+   dashboard's layout width or push header controls outside the viewport. */
 
 .news-panel {
   position: fixed;
@@ -134,13 +130,14 @@ body.news-open {
   left: 0;
   bottom: 0;
   z-index: 40;
-  width: 340px;
+  width: min(340px, 100vw);
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--line);
   background: var(--surface);
   transform: translateX(-100%);
   transition: transform 0.16s ease;
+  box-shadow: var(--modal-shadow);
 }
 
 body.news-open .news-panel {
@@ -594,6 +591,7 @@ h1 {
 
 .analytics-panel {
   min-width: 0;
+  container-type: inline-size;
   border: 1px solid var(--line);
   background: var(--surface);
   box-shadow: var(--panel-shadow);
@@ -625,39 +623,52 @@ h1 {
 }
 
 .help-tip {
-  position: relative;
-  width: 15px;
-  height: 15px;
-  margin-left: 8px;
+  width: 24px;
+  height: 24px;
+  margin-left: 4px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   padding: 0;
-  border: 1px solid var(--line);
-  border-radius: 50%;
+  border: 0;
   background: transparent;
   color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 9px;
-  line-height: 1;
   cursor: help;
   flex: 0 0 auto;
 }
 
+.help-tip-mark {
+  width: 15px;
+  height: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  line-height: 1;
+}
+
 .help-tip:hover,
-.help-tip:focus {
-  border-color: var(--accent);
+.help-tip:focus-visible,
+.help-tip.tooltip-active {
   color: var(--accent);
   outline: none;
 }
 
-.help-tip::after {
-  content: attr(data-tip);
-  position: absolute;
-  top: calc(100% + 9px);
-  left: -10px;
+.help-tip:hover .help-tip-mark,
+.help-tip:focus-visible .help-tip-mark,
+.help-tip.tooltip-active .help-tip-mark {
+  border-color: var(--accent);
+}
+
+.help-tooltip {
+  position: fixed;
   z-index: 80;
-  width: min(330px, 78vw);
+  left: 50%;
+  bottom: 16px;
+  width: min(330px, calc(100vw - 24px));
   padding: 10px 12px;
   border: 1px solid var(--line);
   background: var(--surface-raised);
@@ -671,16 +682,32 @@ h1 {
   text-align: left;
   text-transform: none;
   white-space: normal;
-  opacity: 0;
-  visibility: hidden;
-  transition: opacity 0.12s ease;
+  transform: translateX(-50%);
   pointer-events: none;
 }
 
-.help-tip:hover::after,
-.help-tip:focus::after {
-  opacity: 1;
-  visibility: visible;
+.help-tooltip[hidden] {
+  display: none;
+}
+
+@supports (anchor-name: --help-trigger) {
+  .help-tip.tooltip-active {
+    anchor-name: --help-trigger;
+  }
+
+  .help-tooltip {
+    position-anchor: --help-trigger;
+    top: calc(anchor(bottom) + 9px);
+    right: auto;
+    bottom: auto;
+    left: clamp(
+      12px,
+      anchor(left),
+      calc(100vw - min(330px, calc(100vw - 24px)) - 12px)
+    );
+    transform: none;
+    position-try-fallbacks: flip-block;
+  }
 }
 
 .panel-heading span {
@@ -793,21 +820,9 @@ h1 {
   grid-template-columns: 1.3fr 0.85fr 0.85fr;
 }
 
-/* The open news drawer removes 340px of content width, which viewport
-   media queries cannot see; stack the analytics grids one breakpoint
-   earlier when it is open. */
-@media (max-width: 1440px) {
-  body.news-open .analytics-grid,
-  body.news-open .analytics-grid.equal,
-  body.news-open .analytics-grid.triple {
-    grid-template-columns: 1fr;
-  }
-}
-
 .benchmark-grid {
   display: grid;
-  /* 122px: "SEMICONDUCTORS" must fit unbroken at 10px mono. */
-  grid-template-columns: repeat(auto-fit, minmax(122px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .benchmark-card {
@@ -820,6 +835,24 @@ h1 {
   padding: 13px 14px;
   text-align: left;
   transition: background 0.12s ease;
+}
+
+.benchmark-card:nth-child(3n) {
+  border-right: 0;
+}
+
+@container (min-width: 760px) {
+  .benchmark-grid {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+
+  .benchmark-card:nth-child(3n) {
+    border-right: 1px solid var(--line);
+  }
+
+  .benchmark-card:last-child {
+    border-right: 0;
+  }
 }
 
 .benchmark-card:last-child {
@@ -1431,8 +1464,8 @@ a.key-date-row:focus-visible {
   color: var(--muted);
 }
 
-/* Thesis + meta stack inside one cell; both truncate with ellipsis and
-   the full thesis rides as the native title tooltip. */
+
+/* Thesis + meta stack inside one desktop cell; phone cards expand both. */
 .fringe-cell-thesis {
   min-width: 0;
   padding-right: 12px;
@@ -1492,7 +1525,7 @@ a.key-date-row:focus-visible {
   font-weight: 400;
 }
 
-/* Single-line ellipsis; the full thesis rides as a native title tooltip. */
+/* Desktop blotters keep one line; the phone card override restores wrapping. */
 .fringe-thesis {
   display: block;
   overflow: hidden;
@@ -1628,16 +1661,16 @@ a.key-date-row:focus-visible {
 
 .board {
   column-gap: 12px;
-  columns: 460px;
+  columns: 540px;
 }
 
 .board.board-crypto {
-  columns: 500px;
+  columns: 560px;
 }
 
 .board.flat {
   columns: auto;
-  max-width: 860px;
+  max-width: 1100px;
 }
 
 .market-tools {
@@ -2208,6 +2241,9 @@ a.key-date-row:focus-visible {
   height: min(780px, calc(100vh - 36px));
   display: grid;
   grid-template-rows: auto 1fr;
+  grid-template-areas:
+    "modal-header"
+    "editor-content";
 }
 
 .modal-header {
@@ -2232,6 +2268,7 @@ a.key-date-row:focus-visible {
 
 .editor-grid {
   min-height: 0;
+  grid-area: editor-content;
   display: grid;
   grid-template-columns: 240px minmax(360px, 1fr);
   grid-template-rows: auto 1fr;
@@ -2848,7 +2885,11 @@ a.key-date-row:focus-visible {
 
 @media (max-width: 1050px) {
   .app-header {
-    grid-template-columns: minmax(270px, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .topbar-actions .live-badge {
+    display: none;
   }
 
   .view-tabs {
@@ -2859,6 +2900,20 @@ a.key-date-row:focus-visible {
 
   .view-tabs button {
     min-height: 34px;
+  }
+
+  .market-tools {
+    flex-wrap: wrap;
+  }
+
+  .market-search {
+    min-width: min(280px, 100%);
+    flex: 1 1 360px;
+  }
+
+  #market-filter-status {
+    margin-left: auto;
+    white-space: nowrap;
   }
 
   .analytics-grid,
@@ -2907,10 +2962,14 @@ a.key-date-row:focus-visible {
     grid-template-columns: minmax(0, 1fr) auto;
   }
 
-  /* Phones: the drawer overlays instead of pushing content. */
-  body.news-open {
-    padding-left: 0;
+  .status-strip,
+  .macro-strip {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    white-space: nowrap;
+    scrollbar-width: none;
   }
+
 
   .news-panel {
     width: 100%;
@@ -2931,8 +2990,13 @@ a.key-date-row:focus-visible {
     font-size: 11px;
   }
 
+  .brand-copy p {
+    display: none;
+  }
+
   .topbar-actions {
-    padding: 7px 10px;
+    gap: 4px;
+    padding: 7px 5px;
   }
 
   .toolbar-button span,
@@ -2940,9 +3004,18 @@ a.key-date-row:focus-visible {
     display: none;
   }
 
-  .toolbar-button {
-    width: 32px;
+  .toolbar-button,
+  .icon-button {
+    width: 44px;
+    min-width: 44px;
+    min-height: 44px;
     padding: 0;
+  }
+
+  .help-tip {
+    width: 44px;
+    height: 44px;
+    margin-left: 0;
   }
 
   /* Text-only button: the 32px icon squeeze would wrap its label. */
@@ -3037,13 +3110,121 @@ a.key-date-row:focus-visible {
     width: 88px;
   }
 
-  /* Phones: the fringe book keeps Idea / Dir / P&L / Target / To go /
-     Hrzn; entry and mark stay reachable via the row's tooltips. */
-  .fringe-table th:nth-child(4),
-  .fringe-table td:nth-child(4),
-  .fringe-table th:nth-child(5),
-  .fringe-table td:nth-child(5) {
+  /* Phone cards retain the semantic table while prioritizing each thesis. */
+  .fringe-scroll {
+    max-height: none;
+    overflow: visible;
+  }
+
+  .fringe-table,
+  .fringe-table tbody {
+    display: block;
+  }
+
+  .fringe-table thead {
     display: none;
+  }
+
+  .fringe-table tbody {
+    padding: 8px;
+  }
+
+  .fringe-row {
+    display: grid;
+    grid-template-columns: minmax(48px, auto) 44px minmax(60px, 1fr) auto;
+    grid-template-areas:
+      "ticker direction pnl horizon"
+      "thesis thesis thesis thesis"
+      "target target togo togo";
+    gap: 8px;
+    margin-bottom: 8px;
+    padding: 10px;
+    border: 1px solid var(--line-soft);
+    background: var(--surface-soft);
+  }
+
+  .fringe-row:last-child {
+    margin-bottom: 0;
+  }
+
+  .fringe-table .fringe-row td {
+    width: auto;
+    display: flex;
+    align-items: center;
+    overflow: visible;
+    padding: 0;
+    border-bottom: 0;
+    white-space: normal;
+  }
+
+  .fringe-row .fringe-cell-ticker {
+    grid-area: ticker;
+  }
+
+  .fringe-row .fringe-cell-chip {
+    grid-area: direction;
+  }
+
+  .fringe-row .fringe-cell-thesis {
+    grid-area: thesis;
+    display: block;
+    width: 100%;
+    min-width: 0;
+    padding: 2px 0 4px;
+  }
+
+  .fringe-table .fringe-row .fringe-entry,
+  .fringe-table .fringe-row .fringe-last {
+    display: none;
+  }
+
+  .fringe-row .fringe-pnl-cell {
+    grid-area: pnl;
+    justify-content: flex-end;
+    gap: 5px;
+  }
+
+  .fringe-row .fringe-target-cell {
+    grid-area: target;
+    gap: 6px;
+    padding-top: 8px;
+    border-top: 1px solid var(--line-soft);
+  }
+
+  .fringe-row .fringe-togo {
+    grid-area: togo;
+    justify-content: flex-end;
+    gap: 6px;
+    padding-top: 8px;
+    border-top: 1px solid var(--line-soft);
+  }
+
+  .fringe-row .fringe-cell-horizon {
+    grid-area: horizon;
+    justify-content: flex-end;
+  }
+
+  .fringe-pnl-cell::before,
+  .fringe-target-cell::before,
+  .fringe-togo::before {
+    content: attr(data-mobile-label);
+    color: var(--muted);
+    font-size: 8px;
+    font-weight: 600;
+    letter-spacing: var(--track-label);
+    text-transform: uppercase;
+  }
+
+  .fringe-thesis,
+  .fringe-meta {
+    overflow: visible;
+    white-space: normal;
+    text-overflow: clip;
+  }
+
+  .fringe-thesis {
+    font-size: 12px;
+    line-height: 1.45;
   }
 
   /* DETERIORATING (13ch) must fit the 88px status cell whole. */
@@ -3057,12 +3238,32 @@ a.key-date-row:focus-visible {
   }
 
   .market-tools {
+    position: sticky;
+    top: 102px;
+    z-index: 18;
     align-items: stretch;
     flex-wrap: wrap;
+    margin: 0 -4px 10px;
+    padding: 8px 4px;
+    background: var(--bg);
+  }
+
+  .category-tabs {
+    width: 100%;
+  }
+
+  .category-tabs button {
+    min-height: 44px;
+    flex: 1;
   }
 
   .market-search {
     min-width: 100%;
+    min-height: 44px;
+  }
+
+  .toolbar-button.compact {
+    min-height: 44px;
   }
 
   /* Phones: six data columns cannot fit, so secondary ones drop out.
@@ -3267,6 +3468,9 @@ a.key-date-row:focus-visible {
   margin-bottom: 14px;
   padding-bottom: 10px;
   border-bottom: 1px solid var(--line);
+  max-width: 74ch;
+  margin-right: auto;
+  margin-left: auto;
 }
 
 .report-head h2 {
@@ -3284,10 +3488,13 @@ a.key-date-row:focus-visible {
 }
 
 .report-body {
+  width: 100%;
+  max-width: 74ch;
+  margin-right: auto;
+  margin-left: auto;
   color: var(--text);
   font-size: 13px;
   line-height: 1.62;
-  max-width: 74ch;
 }
 
 .report-body h1,

@@ -54,6 +54,8 @@ const reportsBackButton = document.querySelector("#reports-back");
 const reportsBadge = document.querySelector("#reports-badge");
 const reportsListElement = document.querySelector("#reports-list");
 const reportReaderElement = document.querySelector("#report-reader");
+const helpTooltip = document.querySelector("#help-tooltip");
+let activeHelpTip = null;
 
 let latestData = null;
 let latestCryptoEtfFlows = null;
@@ -412,6 +414,7 @@ function openPendingChartFromUrl() {
 
 function init() {
   setTheme(document.documentElement.dataset.theme === "light" ? "light" : "dark");
+  setupHelpTooltips();
   // icons are inline SVG; no icon library needed
   setConnection("connecting");
   restoreUrlState();
@@ -421,7 +424,7 @@ function init() {
   fetchKeyDates();
   fetchSnapshots();
   fetchFringe();
-  setNewsOpen(localStorage.getItem(NEWS_OPEN_KEY) === "1");
+  setNewsOpen(localStorage.getItem(NEWS_OPEN_KEY) === "1", { focus: false });
   fetchNews();
   refreshReportsBadge();
   // Stay in "poll" until the socket's open handler flips to "ws" — assigning
@@ -533,7 +536,7 @@ function init() {
   });
   reportsOpenButton.addEventListener("click", openReports);
   reportsCloseButton.addEventListener("click", closeReports);
-  reportsBackButton.addEventListener("click", showReportsList);
+  reportsBackButton.addEventListener("click", () => showReportsList({ focus: true }));
   reportsModal.addEventListener("click", (event) => {
     if (event.target === reportsModal) closeReports();
   });
@@ -549,9 +552,17 @@ function init() {
       return;
     }
     if (event.key === "Escape") {
-      closeModal();
-      closeEditor();
-      closeReports();
+      if (activeHelpTip) {
+        hideHelpTooltip();
+        return;
+      }
+      if (activeDialog) {
+        closeModal();
+        closeEditor();
+        closeReports();
+        return;
+      }
+      if (document.body.classList.contains("news-open")) setNewsOpen(false);
       return;
     }
     if (
@@ -591,7 +602,7 @@ function updateCategoryButtons() {
   categoryButtons.forEach((button) => {
     const active = (button.dataset.category || "tradfi") === marketCategory;
     button.classList.toggle("active", active);
-    button.setAttribute("aria-selected", String(active));
+    button.setAttribute("aria-pressed", String(active));
   });
 }
 
@@ -868,13 +879,17 @@ function rememberAndPatchFunding(payload, { remember = true } = {}) {
 // Merged feed of public Telegram channels, scraped server-side from their
 // t.me previews. New posts arrive over the quotes WebSocket within one poll
 // interval; HTTP polling covers hosts without a socket.
-function setNewsOpen(open) {
+function setNewsOpen(open, { focus = true } = {}) {
   document.body.classList.toggle("news-open", open);
   newsPanel.inert = !open;
   newsPanel.setAttribute("aria-hidden", String(!open));
   newsToggle.setAttribute("aria-pressed", String(open));
   localStorage.setItem(NEWS_OPEN_KEY, open ? "1" : "0");
-  if (!open && newsPanel.contains(document.activeElement)) newsToggle.focus();
+  if (open && focus) {
+    window.requestAnimationFrame(() => newsClose.focus());
+  } else if (!open && newsPanel.contains(document.activeElement)) {
+    newsToggle.focus();
+  }
 }
 
 // --- Agent reports -----------------------------------------------------
@@ -891,10 +906,14 @@ function closeReports() {
   closeDialog(reportsModal);
 }
 
-function showReportsList() {
+function showReportsList({ focus = false } = {}) {
   reportReaderElement.hidden = true;
+  reportReaderElement.removeAttribute("aria-busy");
   reportsListElement.hidden = false;
   reportsBackButton.hidden = true;
+  if (focus) {
+    window.requestAnimationFrame(() => reportsListElement.querySelector(".report-card")?.focus());
+  }
 }
 
 async function fetchReports() {
@@ -945,7 +964,10 @@ async function openReport(reportId) {
   reportsListElement.hidden = true;
   reportsBackButton.hidden = false;
   reportReaderElement.hidden = false;
+  reportReaderElement.setAttribute("aria-busy", "true");
+  reportReaderElement.tabIndex = -1;
   reportReaderElement.innerHTML = '<div class="empty-state">Loading report</div>';
+  reportReaderElement.focus();
   try {
     const response = await fetch(`/api/reports/${reportId}`);
     if (!response.ok) throw new Error("report_failed");
@@ -953,14 +975,18 @@ async function openReport(reportId) {
     if (token !== reportOpenToken) return;
     reportReaderElement.innerHTML = `
       <header class="report-head">
-        <h2>${escapeHtml(item.title)}</h2>
+        <h2 tabindex="-1">${escapeHtml(item.title)}</h2>
         <p>${escapeHtml(formatReportDate(item.date))} · ${escapeHtml(item.slug)}</p>
       </header>
       <div class="report-body">${renderMarkdown(item.body)}</div>`;
+    reportReaderElement.removeAttribute("aria-busy");
     reportReaderElement.scrollTop = 0;
+    reportReaderElement.querySelector(".report-head h2")?.focus();
   } catch (error) {
     if (token !== reportOpenToken) return;
-    reportReaderElement.innerHTML = '<div class="empty-state">Report unavailable</div>';
+    reportReaderElement.removeAttribute("aria-busy");
+    reportReaderElement.innerHTML = '<div class="empty-state" tabindex="-1">Report unavailable</div>';
+    reportReaderElement.querySelector(".empty-state")?.focus();
   }
 }
 
@@ -1755,13 +1781,55 @@ dailyBoard.addEventListener("click", (event) => {
 });
 
 function panelHeading(title, note, tip = "") {
-  // Explanations were invisible native title-tooltips; a visible ? badge
-  // with a styled popover makes them discoverable (hover, or tap on phones
-  // via tabindex focus).
   const help = tip
-    ? `<button type="button" class="help-tip" aria-label="What is ${escapeHtml(title)}?" data-tip="${escapeHtml(tip)}">?</button>`
+    ? `<button type="button" class="help-tip" aria-label="What is ${escapeHtml(title)}?" data-tip="${escapeHtml(tip)}"><span class="help-tip-mark" aria-hidden="true">?</span></button>`
     : "";
   return `<header class="panel-heading"><h2>${escapeHtml(title)}${help}</h2><span>${escapeHtml(note || "")}</span></header>`;
+}
+
+function setupHelpTooltips() {
+  document.addEventListener("pointerover", (event) => {
+    const trigger = event.target.closest?.(".help-tip");
+    if (trigger) showHelpTooltip(trigger);
+  });
+  document.addEventListener("pointerout", (event) => {
+    const trigger = event.target.closest?.(".help-tip");
+    if (
+      trigger &&
+      !trigger.contains(event.relatedTarget) &&
+      document.activeElement !== trigger
+    ) {
+      hideHelpTooltip(trigger);
+    }
+  });
+  document.addEventListener("focusin", (event) => {
+    const trigger = event.target.closest?.(".help-tip");
+    if (trigger) showHelpTooltip(trigger);
+  });
+  document.addEventListener("focusout", (event) => {
+    const trigger = event.target.closest?.(".help-tip");
+    if (trigger && !trigger.matches(":hover")) hideHelpTooltip(trigger);
+  });
+  document.addEventListener("scroll", () => hideHelpTooltip(), true);
+  window.addEventListener("resize", () => hideHelpTooltip());
+}
+
+function showHelpTooltip(trigger) {
+  if (!trigger.dataset.tip) return;
+  if (activeHelpTip !== trigger) hideHelpTooltip();
+  activeHelpTip = trigger;
+  trigger.classList.add("tooltip-active");
+  trigger.setAttribute("aria-describedby", helpTooltip.id);
+  helpTooltip.textContent = trigger.dataset.tip;
+  helpTooltip.hidden = false;
+}
+
+function hideHelpTooltip(trigger = activeHelpTip) {
+  if (!trigger || trigger !== activeHelpTip) return;
+  trigger.classList.remove("tooltip-active");
+  trigger.removeAttribute("aria-describedby");
+  activeHelpTip = null;
+  helpTooltip.hidden = true;
 }
 
 function regimeCell(label, value, detail, tone = "") {
@@ -2187,9 +2255,8 @@ function fringeOpenTable(open) {
   </table></div>`;
 }
 
-// One blotter row per idea: the thesis column absorbs the panel's spare
-// width so the numbers stay clustered instead of drifting to the far
-// right edge on wide screens. The full thesis rides as a native title.
+// One desktop blotter row per idea; phone CSS turns the same semantic table
+// into a compact card so the thesis remains the primary content.
 function fringeOpenRow(idea) {
   const direction = String(idea.direction || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
   const ticker = escapeHtml(idea.ticker || "");
@@ -2214,14 +2281,14 @@ function fringeOpenRow(idea) {
     <td class="fringe-cell-ticker"><button type="button" class="fringe-ticker" data-symbol="${ticker}" title="Open ${ticker} chart">${ticker}</button></td>
     <td class="fringe-cell-chip"><span class="fringe-chip fringe-${direction.toLowerCase()}">${direction}</span></td>
     <td class="fringe-cell-thesis">
-      <span class="fringe-thesis" title="${escapeHtml(idea.thesis || "")}">${escapeHtml(idea.thesis || "")}</span>
+      <span class="fringe-thesis">${escapeHtml(idea.thesis || "")}</span>
       <span class="fringe-meta">${escapeHtml(meta)}${idea.stale ? '<em class="fringe-stale">not refreshed</em>' : ""}</span>
     </td>
     <td class="fringe-num fringe-entry">${entry === null ? "\u2014" : escapeHtml(formatPrice(entry))}</td>
-    <td class="fringe-num">${last === null ? "\u2014" : escapeHtml(formatPrice(last))}</td>
-    <td class="fringe-num">${pnl}</td>
-    <td class="fringe-num">${target}</td>
-    <td class="fringe-num fringe-togo">${toGo === null ? "\u2014" : escapeHtml(formatSignedPct(toGo))}</td>
+    <td class="fringe-num fringe-last">${last === null ? "\u2014" : escapeHtml(formatPrice(last))}</td>
+    <td class="fringe-num fringe-pnl-cell" data-mobile-label="P&amp;L">${pnl}</td>
+    <td class="fringe-num fringe-target-cell" data-mobile-label="Target">${target}</td>
+    <td class="fringe-num fringe-togo" data-mobile-label="To go">${toGo === null ? "\u2014" : escapeHtml(formatSignedPct(toGo))}</td>
     <td class="fringe-cell-horizon">${escapeHtml(idea.horizon || "\u2014")}</td>
   </tr>`;
 }
