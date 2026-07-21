@@ -1,6 +1,6 @@
 import asyncio
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -19,7 +19,7 @@ class StubNewsService:
         result = self._results.pop(0)
         if isinstance(result, Exception):
             raise result
-        return result
+        return cast(int, result)
 
     def feed_payload(self) -> dict[str, object]:
         self.payload_calls += 1
@@ -58,7 +58,7 @@ async def run_loop(
         if sleeps >= max_sleeps:
             raise asyncio.CancelledError
 
-    monkeypatch.setattr(scheduler.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
     with pytest.raises(asyncio.CancelledError):
         await scheduler.news_poll_loop(state)
     return manager

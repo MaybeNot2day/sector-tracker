@@ -39,6 +39,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -169,9 +170,18 @@ def save_state(state: dict[str, str], path: Path = STATE_PATH) -> None:
     os.replace(tmp.name, path)
 
 
+def _is_secure_board_url(base_url: str) -> bool:
+    parsed = urllib.parse.urlparse(base_url)
+    return parsed.scheme == "https" or (
+        parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "::1", "localhost"}
+    )
+
+
 def post_report(
     base_url: str, token: str, title: str, date_text: str, body: str
 ) -> dict[str, Any]:
+    if not _is_secure_board_url(base_url):
+        raise ValueError("BOARD_URL must use HTTPS (HTTP is allowed only for localhost)")
     payload = json.dumps({"title": title, "date": date_text, "body": body}).encode("utf-8")
     request = urllib.request.Request(
         base_url.rstrip("/") + "/api/reports",
@@ -179,7 +189,7 @@ def post_report(
         headers={"Content-Type": "application/json", "X-Edit-Token": token},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
+    with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:  # nosec B310
         return cast(dict[str, Any], json.loads(response.read().decode("utf-8")))
 
 
@@ -202,6 +212,9 @@ def run(argv: list[str] | None = None) -> int:
 
     if not base_url or not token:
         log(f"missing BOARD_URL/EDIT_TOKEN in {CONFIG_PATH}; nothing to do")
+        return 2
+    if not _is_secure_board_url(base_url):
+        log("BOARD_URL must use HTTPS (HTTP is allowed only for localhost)")
         return 2
     if not vault.is_dir():
         log(f"vault directory not found: {vault}")

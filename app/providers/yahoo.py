@@ -14,9 +14,9 @@ from typing import Any, cast
 from urllib.parse import quote as url_quote
 from urllib.parse import urlencode
 
-from app.models import AssetConfig, Bar, Quote
+from app.models import AssetConfig, Bar, Quote, is_valid_bar
 from app.providers.aggregate import aggregate_bars
-from app.providers.base import QuoteProvider
+from app.providers.base import QuoteProvider, ValidationStatus
 
 YAHOO_SPARK_URLS = (
     "https://query1.finance.yahoo.com/v7/finance/spark",
@@ -64,6 +64,29 @@ class YahooProvider(QuoteProvider):
                     if quote is not None:
                         quotes_by_symbol[quote.symbol] = quote
         return list(self._with_usd_display_quotes(quotes_by_symbol).values())
+
+    async def validate_asset(self, asset: AssetConfig) -> ValidationStatus:
+        try:
+            payload = await asyncio.to_thread(
+                _get_json_with_retry,
+                YAHOO_SPARK_URLS,
+                params={"symbols": asset.symbol, "interval": "1m", "range": "1d"},
+            )
+        except Exception:
+            return "unavailable"
+        spark = payload.get("spark")
+        results = spark.get("result") if isinstance(spark, dict) else None
+        if not isinstance(results, list):
+            return "unavailable"
+        return (
+            "valid"
+            if any(
+                isinstance(item, dict)
+                and str(item.get("symbol", "")).upper() == asset.symbol.upper()
+                for item in results
+            )
+            else "not_found"
+        )
 
     async def get_history(self, asset: AssetConfig, *, interval: str, range_: str) -> list[Bar]:
         return await asyncio.to_thread(self._get_history_sync, asset, interval, range_)
@@ -221,19 +244,19 @@ def _bars_from_chart_result(
         close = _number(closes[index]) if index < len(closes) else None
         if open_ is None or high is None or low is None or close is None:
             continue
-        bars.append(
-            Bar(
-                symbol=asset.symbol,
-                provider="yahoo",
-                interval=interval,
-                timestamp=datetime.fromtimestamp(int(ts_number), UTC),
-                open=open_,
-                high=high,
-                low=low,
-                close=close,
-                volume=_number(volumes[index]) if index < len(volumes) else None,
-            )
+        bar = Bar(
+            symbol=asset.symbol,
+            provider="yahoo",
+            interval=interval,
+            timestamp=datetime.fromtimestamp(int(ts_number), UTC),
+            open=open_,
+            high=high,
+            low=low,
+            close=close,
+            volume=_number(volumes[index]) if index < len(volumes) else None,
         )
+        if is_valid_bar(bar):
+            bars.append(bar)
     return _drop_off_grid_tail(bars, interval)
 
 
@@ -282,7 +305,8 @@ def _bars_with_usd_display(
     fx_rates = _fx_rates(fx_bars)
     if not fx_rates:
         return bars
-    return [_bar_to_usd(bar, _matching_fx_rate(bar.timestamp, fx_rates)) for bar in bars]
+    converted = [_bar_to_usd(bar, _matching_fx_rate(bar.timestamp, fx_rates)) for bar in bars]
+    return [bar for bar in converted if is_valid_bar(bar)]
 
 
 def _asset_listing_currency(asset: AssetConfig) -> str | None:

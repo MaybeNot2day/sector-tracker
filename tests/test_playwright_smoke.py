@@ -10,34 +10,30 @@ import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.error import URLError
 from urllib.parse import unquote, urlparse
 from urllib.request import urlopen
 
 import pytest
 
+if TYPE_CHECKING:
+    from playwright.sync_api import Browser, Page
+
+
 E2E_ENABLED = bool(os.environ.get("RUN_PLAYWRIGHT") or os.environ.get("BOARD_E2E_BASE_URL"))
 
 if E2E_ENABLED:
     try:
         from playwright.sync_api import (
-            Browser,
-            Page,
-            expect,
-            sync_playwright,
-        )
-        from playwright.sync_api import (
             Error as PlaywrightError,
         )
+        from playwright.sync_api import expect, sync_playwright
     except ModuleNotFoundError:
         pytest.skip(
             "Python Playwright smoke tests require the 'playwright' package",
             allow_module_level=True,
         )
-else:
-    Browser = Any  # type: ignore[assignment]
-    Page = Any  # type: ignore[assignment]
 
 pytestmark = [
     pytest.mark.e2e,
@@ -232,6 +228,41 @@ def test_daily_board_loads_without_page_errors_and_renders_core_sections(
     expect(closed_rows.nth(0)).to_contain_text("NVDA")
     expect(closed_rows.nth(0)).to_contain_text("160.20 \u2192 173.10")
     expect(closed_rows.nth(0)).to_contain_text("+8.05%")
+
+
+def test_closed_news_panel_is_inert_until_opened(page: Page, base_url: str) -> None:
+    _goto_board(page, base_url)
+    panel = page.locator("#news-panel")
+    close = page.locator("#news-close")
+
+    expect(panel).to_have_attribute("aria-hidden", "true")
+    expect(panel).to_have_attribute("inert", "")
+    page.evaluate(
+        """() => {
+          if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+        }"""
+    )
+    page.keyboard.press("Tab")
+    focused_id = cast(str, page.evaluate("() => document.activeElement?.id || ''"))
+    assert focused_id != "news-close"
+    close_was_focused = cast(
+        bool,
+        page.evaluate(
+            """() => {
+              const close = document.querySelector('#news-close');
+              close.focus();
+              return document.activeElement === close;
+            }"""
+        ),
+    )
+    assert close_was_focused is False
+
+    page.locator("#news-toggle").click()
+
+    expect(panel).to_have_attribute("aria-hidden", "false")
+    assert panel.get_attribute("inert") is None
+    close.focus()
+    expect(close).to_be_focused()
 
 
 def test_theme_toggle_persists_light_mode(page: Page, base_url: str) -> None:
@@ -752,7 +783,9 @@ def _wait_for_visible_market_row(page: Page) -> None:
 
 
 def _visible_market_row_count(page: Page) -> int:
-    return page.locator("#markets-view .asset-row").evaluate_all(
+    return cast(
+        int,
+        page.locator("#markets-view .asset-row").evaluate_all(
         """
         (rows) => rows.filter((row) => {
           const style = window.getComputedStyle(row);
@@ -763,6 +796,7 @@ def _visible_market_row_count(page: Page) -> int:
             && rect.height > 0;
         }).length
         """
+        ),
     )
 
 

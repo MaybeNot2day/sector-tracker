@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import monotonic
 from types import SimpleNamespace
+from typing import cast
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -611,9 +612,10 @@ async def test_flow_service_survives_history_persist_failure(
     monkeypatch.setattr(db, "upsert_etf_flow_history", explode)
 
     payload = await service.get_flows()
+    assets = cast(list[dict[str, object]], payload["assets"])
 
     assert payload["status"] == "ok"
-    assert [entry["asset"] for entry in payload["assets"]] == ["BTC"]
+    assert [entry["asset"] for entry in assets] == ["BTC"]
 
 
 # --- /api/market-context ---------------------------------------------------------

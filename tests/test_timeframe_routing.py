@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from time import monotonic
 from typing import Any
 
+import httpx
 import pytest
 
 from app.models import AssetConfig, Bar
@@ -167,7 +168,7 @@ def _install_candles(
             requests.append(dict(params or {}))
             return _FakeResponse(payload)
 
-    monkeypatch.setattr(lighter_module.httpx, "AsyncClient", _Client)
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
     return requests
 
 

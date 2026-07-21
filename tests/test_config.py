@@ -63,3 +63,39 @@ def test_default_watchlist_has_unique_symbols() -> None:
     symbols = [asset.symbol for group in groups for asset in group.assets]
 
     assert len(symbols) == len(set(symbols))
+
+
+def test_save_watchlists_rejects_conflicting_duplicate_symbol_identities(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "watchlists.yaml"
+    groups = [
+        GroupConfig(
+            name="EQUITIES",
+            assets=[AssetConfig(symbol="ROBO", type="etf", source="yahoo")],
+        ),
+        GroupConfig(
+            name="CRYPTO",
+            assets=[AssetConfig(symbol="ROBO", type="crypto_perp", source="lighter")],
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="conflicting type/source/exchange"):
+        save_watchlists(path, groups)
+
+    assert not path.exists()
+
+
+def test_save_watchlists_allows_identical_symbol_identity_across_groups(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "watchlists.yaml"
+    shared = AssetConfig(symbol="SPY", type="etf", source="yahoo", exchange="NYSEARCA")
+    groups = [
+        GroupConfig(name="BENCHMARKS", assets=[shared]),
+        GroupConfig(name="CORE", assets=[shared]),
+    ]
+
+    save_watchlists(path, groups)
+
+    assert load_watchlists(path) == groups

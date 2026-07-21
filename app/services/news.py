@@ -46,6 +46,9 @@ class NewsService:
         # which would otherwise read as a live cache window and skip the
         # first refresh on a fresh microVM.
         self._fetched: float | None = None
+        self._last_attempt_at: datetime | None = None
+        self._last_success_at: datetime | None = None
+        self._failed_channels: list[str] = []
         self._lock = asyncio.Lock()
         self._client: httpx.AsyncClient | None = None
         self._fetch_semaphore = asyncio.Semaphore(MAX_FETCH_CONCURRENCY)
@@ -67,10 +70,15 @@ class NewsService:
                 *(self._fetch_channel(channel) for channel in self.channels),
                 return_exceptions=True,
             )
+            attempted_at = datetime.now(UTC)
+            successful_channels: list[str] = []
+            failed_channels: list[str] = []
             new_items = 0
             for channel, page in zip(self.channels, pages, strict=True):
                 if not isinstance(page, str) or not page:
+                    failed_channels.append(channel)
                     continue
+                successful_channels.append(channel)
                 title = _TITLE_RE.search(page)
                 if title:
                     self._titles[channel] = html.unescape(title.group(1))
@@ -80,6 +88,10 @@ class NewsService:
                     self._items[item["id"]] = item
             self._trim()
             self._fetched = monotonic()
+            self._last_attempt_at = attempted_at
+            self._failed_channels = failed_channels
+            if successful_channels:
+                self._last_success_at = attempted_at
             return new_items
 
     def feed_payload(self) -> dict[str, object]:
@@ -90,7 +102,15 @@ class NewsService:
                 for item in items
             ],
             "channels": self.channels,
-            "updated_at": datetime.now(UTC).isoformat(),
+            "updated_at": (
+                self._last_success_at.isoformat() if self._last_success_at is not None else None
+            ),
+            "attempted_at": (
+                self._last_attempt_at.isoformat() if self._last_attempt_at is not None else None
+            ),
+            "is_stale": bool(self.channels)
+            and (self._last_success_at is None or bool(self._failed_channels)),
+            "failed_channels": self._failed_channels,
         }
 
     def _trim(self) -> None:

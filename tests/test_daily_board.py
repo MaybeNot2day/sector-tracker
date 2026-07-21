@@ -1,6 +1,8 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from app import db
 from app.models import AssetConfig, Bar, GroupConfig, Quote
 from app.services import daily_board
@@ -110,7 +112,7 @@ def test_market_summaries_convert_cached_foreign_bars_to_display_currency(
 
 def test_build_board_prepares_each_symbol_once_and_reuses_fallback(
     tmp_path: Path,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "board.sqlite3"
     groups = [
@@ -191,6 +193,34 @@ def test_ytd_ignores_stale_quote_timestamp_from_prior_year() -> None:
 
     # Off the Dec 31 close (100), not the first prior-year bar (90).
     assert summary["performance"]["YTD"] == 5.0  # type: ignore[index]
+
+
+def test_snapshot_save_failure_is_reported_without_raising(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = DailyBoardService(tmp_path / "board.sqlite3")
+    service._last_snapshot_write = -1e9
+
+    def fail_save(
+        path: Path,
+        snapshot_date: str,
+        payload: dict[str, object],
+    ) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(db, "save_board_snapshot", fail_save)
+    overview: dict[str, object] = {
+        "as_of": datetime.now(UTC).isoformat(),
+        "universe": {"quoted": 1},
+    }
+
+    service._maybe_snapshot(overview)
+
+    assert service.snapshot_status() == {
+        "last_success_at": None,
+        "last_error": "OSError",
+    }
 
 
 

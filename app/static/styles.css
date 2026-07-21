@@ -175,6 +175,10 @@ body.news-open .news-panel {
   text-align: right;
 }
 
+.news-status.stale {
+  color: var(--red);
+}
+
 /* --- News channel mute chips ------------------------------------------ */
 .news-channels {
   display: flex;

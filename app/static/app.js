@@ -41,6 +41,7 @@ const assetExchangeInput = document.querySelector("#asset-exchange");
 const assetNameInput = document.querySelector("#asset-name");
 const editorList = document.querySelector("#editor-list");
 const macroStrip = document.querySelector("#macro-strip");
+const newsPanel = document.querySelector("#news-panel");
 const newsList = document.querySelector("#news-list");
 const newsStatus = document.querySelector("#news-status");
 const newsToggle = document.querySelector("#news-toggle");
@@ -869,8 +870,11 @@ function rememberAndPatchFunding(payload, { remember = true } = {}) {
 // interval; HTTP polling covers hosts without a socket.
 function setNewsOpen(open) {
   document.body.classList.toggle("news-open", open);
+  newsPanel.inert = !open;
+  newsPanel.setAttribute("aria-hidden", String(!open));
   newsToggle.setAttribute("aria-pressed", String(open));
   localStorage.setItem(NEWS_OPEN_KEY, open ? "1" : "0");
+  if (!open && newsPanel.contains(document.activeElement)) newsToggle.focus();
 }
 
 // --- Agent reports -----------------------------------------------------
@@ -1206,8 +1210,15 @@ async function fetchNews() {
 function renderNews(payload) {
   const items = payload?.items || [];
   latestNews = payload;
-  const updated = new Date(payload?.updated_at || Date.now());
-  newsStatus.textContent = Number.isNaN(updated.getTime()) ? "" : formatClock(updated);
+  const updated = payload?.updated_at ? new Date(payload.updated_at) : null;
+  const updatedText = updated && !Number.isNaN(updated.getTime()) ? formatClock(updated) : "";
+  const stale = Boolean(payload?.is_stale);
+  newsStatus.textContent = [updatedText, stale ? "STALE" : ""].filter(Boolean).join(" · ");
+  newsStatus.classList.toggle("stale", stale);
+  const failedChannels = Array.isArray(payload?.failed_channels) ? payload.failed_channels : [];
+  newsStatus.title = failedChannels.length
+    ? `Unavailable: ${failedChannels.map((channel) => `@${channel}`).join(", ")}`
+    : "";
   const renderKey = newsRenderKey(payload);
   if (renderKey === lastNewsRenderKey) {
     updateNewsAges();
@@ -3094,8 +3105,8 @@ async function mutateWatchlists(url, options) {
       ...options,
       headers: {
         "Content-Type": "application/json",
-        ...(localStorage.getItem(EDIT_TOKEN_KEY)
-          ? { "X-Edit-Token": localStorage.getItem(EDIT_TOKEN_KEY) }
+        ...(sessionStorage.getItem(EDIT_TOKEN_KEY)
+          ? { "X-Edit-Token": sessionStorage.getItem(EDIT_TOKEN_KEY) }
           : {}),
       },
     });
@@ -3105,12 +3116,12 @@ async function mutateWatchlists(url, options) {
       // The server has an EDIT_TOKEN configured; ask once and retry.
       const token = window.prompt("This board is protected. Enter the edit token:");
       if (token) {
-        localStorage.setItem(EDIT_TOKEN_KEY, token.trim());
+        sessionStorage.setItem(EDIT_TOKEN_KEY, token.trim());
         response = await send();
       }
     }
     if (!response.ok) {
-      if (response.status === 401) localStorage.removeItem(EDIT_TOKEN_KEY);
+      if (response.status === 401) sessionStorage.removeItem(EDIT_TOKEN_KEY);
       const payload = await response.json().catch(() => ({}));
       setEditorStatus(editorErrorCopy(payload.detail));
       return false;

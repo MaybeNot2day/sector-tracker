@@ -6,7 +6,7 @@ t.me previews only serve ~20 posts, a slow channel's items never came back.
 The fixed trim keeps each channel's newest max(MAX // n_channels, 20) items.
 """
 
-from typing import Any
+from typing import Any, cast
 
 from app.services.news import NewsService
 
@@ -86,7 +86,7 @@ def test_feed_payload_orders_newest_first_after_trim() -> None:
     service._trim()
     payload = service.feed_payload()
 
-    items = payload["items"]
+    items = cast(list[dict[str, Any]], payload["items"])
     assert len(items) == 100
     timestamps = [item["timestamp"] for item in items]
     assert timestamps == sorted(timestamps, reverse=True)

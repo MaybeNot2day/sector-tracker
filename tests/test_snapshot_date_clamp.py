@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 from app import db
 from app.services.daily_board import DailyBoardService
@@ -46,9 +47,10 @@ def test_current_as_of_writes_condensed_snapshot_under_today(tmp_path: Path) -> 
     snapshots = db.load_board_snapshots(database, limit=10)
     assert len(snapshots) == 1
     row = snapshots[0]
+    universe = cast(dict[str, object], row["universe"])
     assert row["date"] == now.date().isoformat()
     assert row["as_of"] == now.isoformat()
     assert row["regime"] == {"label": "RISK-ON / BROAD", "tone": "risk_on"}
-    assert row["universe"]["quoted"] == 5
-    assert row["universe"]["advance_pct"] == 80.0
+    assert universe["quoted"] == 5
+    assert universe["advance_pct"] == 80.0
     assert row["themes"] == []

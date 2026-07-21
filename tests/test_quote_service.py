@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -170,7 +171,7 @@ async def test_quote_service_loads_cache_once_for_prioritization_and_fallback(
     original_batch_load = db.load_latest_quotes
     batch_calls: list[set[str]] = []
 
-    def counted_batch_load(path: Path, symbols: set[str]) -> dict[str, Quote]:
+    def counted_batch_load(path: Path, symbols: Sequence[str]) -> dict[str, Quote]:
         batch_calls.append(set(symbols))
         return original_batch_load(path, symbols)
 

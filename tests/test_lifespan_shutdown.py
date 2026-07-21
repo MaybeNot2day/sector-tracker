@@ -2,10 +2,12 @@ import asyncio
 from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
+from fastapi import FastAPI
 
+from app import db
 from app import main as main_module
 
 
@@ -75,7 +77,7 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
     monkeypatch.setattr(main_module, "ensure_runtime_watchlist", lambda settings: None)
     monkeypatch.setattr(main_module, "ensure_runtime_database", lambda settings: None)
     monkeypatch.setattr(main_module, "load_watchlists", lambda path: [])
-    monkeypatch.setattr(main_module.db, "init_db", lambda path: None)
+    monkeypatch.setattr(db, "init_db", lambda path: None)
     monkeypatch.setattr(main_module, "YahooProvider", lambda: probes["yahoo"])
     monkeypatch.setattr(main_module, "LighterProvider", lambda: probes["lighter"])
     monkeypatch.setattr(main_module, "StooqProvider", lambda: probes["stooq"])
@@ -95,7 +97,7 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
     test_app = SimpleNamespace(state=SimpleNamespace())
 
     async def run_lifespan() -> None:
-        async with main_module.lifespan(test_app):
+        async with main_module.lifespan(cast(FastAPI, test_app)):
             assert tracker.started == []
 
     await asyncio.wait_for(run_lifespan(), timeout=1.0)

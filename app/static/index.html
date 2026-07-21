@@ -19,10 +19,10 @@
         }
       } catch {}
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260720-8" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260721-1" />
   </head>
   <body>
-    <aside id="news-panel" class="news-panel" aria-label="Live Telegram news">
+    <aside id="news-panel" class="news-panel" aria-label="Live Telegram news" aria-hidden="true" inert>
       <div class="news-header">
         <span class="news-title">Live News</span>
         <span id="news-status" class="news-status"></span>
@@ -310,7 +310,7 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
           </button>
         </div>
-        <div class="intervals" role="tablist" aria-label="Chart timeframe">
+        <div class="intervals" role="group" aria-label="Chart timeframe">
           <span class="interval-group" aria-hidden="true">Intraday</span>
           <button type="button" data-interval="1m" data-range="1d" data-intraday>1m</button>
           <button type="button" data-interval="5m" data-range="1w" data-intraday>5m</button>
@@ -331,6 +331,6 @@
       </div>
     </div>
 
-    <script src="/static/app.js?v=20260720-8" defer></script>
+    <script src="/static/app.js?v=20260721-1" defer></script>
   </body>
 </html>

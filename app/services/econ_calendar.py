@@ -21,6 +21,7 @@ import asyncio
 import logging
 import re
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -341,7 +342,7 @@ def _event_moment_utc(event_date: date, event_time: str | None) -> datetime | No
 _QUARTER_HINT = re.compile(r"\bq([1-4])\b")
 
 
-def match_release(event: dict[str, object], rows: list[CalendarRow]) -> dict[str, object] | None:
+def match_release(event: Mapping[str, object], rows: list[CalendarRow]) -> dict[str, object] | None:
     """Best calendar row for one stored key-date item, as a release dict.
 
     Hard rules first: only rows within one day of the stored date are
@@ -451,7 +452,9 @@ def _is_hot(release_time: datetime, actual: object, now: datetime) -> bool:
     return actual is None and release_time - HOT_BEFORE <= now <= release_time + HOT_AFTER
 
 
-def any_hot_release(items: list[dict[str, object]], now: datetime | None = None) -> bool:
+def any_hot_release(
+    items: Sequence[Mapping[str, object]], now: datetime | None = None
+) -> bool:
     """True when any *matched* item is inside its hot window awaiting a print."""
     now = now or datetime.now(UTC)
     for item in items:

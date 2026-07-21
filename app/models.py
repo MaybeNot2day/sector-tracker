@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from math import isfinite
 from typing import Literal
 
 AssetType = Literal["equity", "etf", "future", "crypto_perp", "crypto_spot", "index_proxy"]
@@ -103,6 +104,17 @@ class Bar:
     low: float
     close: float
     volume: float | None = None
+
+
+def is_valid_bar(bar: Bar) -> bool:
+    """Whether a candle is finite, positive, and internally consistent."""
+    prices = (bar.open, bar.high, bar.low, bar.close)
+    return (
+        all(isfinite(value) and value > 0 for value in prices)
+        and bar.high >= max(bar.open, bar.close)
+        and bar.low <= min(bar.open, bar.close)
+        and bar.low <= bar.high
+    )
 
 
 @dataclass(frozen=True)

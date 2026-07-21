@@ -27,7 +27,7 @@ def _ui_version() -> str:
     """
     try:
         index = Path(__file__).resolve().parent / "static" / "index.html"
-        return hashlib.sha1(index.read_bytes()).hexdigest()[:12]
+        return hashlib.sha256(index.read_bytes()).hexdigest()[:12]
     except OSError:  # pragma: no cover - the static bundle always ships
         return ""
 
