@@ -1,0 +1,8 @@
+[Unit]
+Description=Verify Hermes reports reached the vault, dashboard, and Fringe ledger
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/ds/.local/bin/report_pipeline_watchdog.py

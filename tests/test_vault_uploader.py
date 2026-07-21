@@ -507,7 +507,12 @@ def test_run_defaults_allowlist_to_known_cron_titles(env: SimpleNamespace) -> No
         if not ln.startswith("REPORT_TITLES")
     ]
     env.config.write_text("".join(line + "\n" for line in kept), encoding="utf-8")
-    _write_report(env.vault, f"{_TODAY_TEXT} Biotech Pharma Brief.md", "cron output")
+    body = (
+        f"---\ndate: {_TODAY_TEXT}\ntype: research\ntags: [biotech]\n"
+        "status: draft\n---\n## Biotech Pharma Brief\n"
+        "---FEED-STATUS---\n## Feed Status\n"
+    )
+    _write_report(env.vault, f"{_TODAY_TEXT} Biotech Pharma Brief.md", body)
     _write_report(env.vault, f"{_TODAY_TEXT} Morning Brief.md", "not a known cron title")
 
     assert uploader.run([]) == 0
@@ -541,3 +546,73 @@ def test_run_malformed_max_age_days_falls_back_to_30(env: SimpleNamespace) -> No
     assert uploader.run([]) == 0
     assert [call[2] for call in env.post.calls] == ["Morning Brief"]
     assert set(_read_state(env)) == {f"{_TODAY_TEXT} Morning Brief.md"}
+
+
+@pytest.mark.parametrize(
+    ("title", "date_text", "body", "expected"),
+    [
+        (
+            "Macro Tape Brief",
+            "2026-07-21",
+            "legacy body without a contract",
+            None,
+        ),
+        ("Manual Note", "2026-07-22", "anything", None),
+        (
+            "Macro Tape Brief",
+            "2026-07-22",
+            "Now save to the Obsidian vault",
+            "missing YAML frontmatter",
+        ),
+        (
+            "US Asia Close",
+            "2026-07-22",
+            "---\ndate: 2026-07-22\ntype: research\ntags: [macro]\n"
+            "status: draft\n---\n## Executive Tape Read\n## Feed Status\n",
+            "report missing \"Today's Calendar\"",
+        ),
+        (
+            "AI Semis Morning Brief",
+            "2026-07-22",
+            "---\ndate: 2026-07-22\ntype: research\ntags: [ai]\n"
+            "status: draft\n---\n---FEED-STATUS---\n## Feed Status\n"
+            "---FEED-STATUS---\n",
+            "report must contain exactly one FEED-STATUS delimiter",
+        ),
+        (
+            "Macro Tape Brief",
+            "2026-07-22",
+            "---\ndate: 2026-07-22\ntype: research\ntags: [macro]\n"
+            "status: draft\n---\n## Macro Tape Brief\n## Feed Status\n",
+            None,
+        ),
+        (
+            "Fringe Corner",
+            "2026-07-22",
+            "---\ndate: 2026-07-22\ntype: research\ntags: [fringe]\n"
+            "status: draft\n---\n## Fringe Corner\n"
+            "- HOLD LONG AMD - thesis [horizon: 2w]\n## Rationale\nEvidence.\n",
+            None,
+        ),
+    ],
+)
+def test_validate_report_body_contract(
+    title: str, date_text: str, body: str, expected: str | None
+) -> None:
+    assert uploader.validate_report_body(title, date_text, body) == expected
+
+
+def test_invalid_current_cron_report_is_not_uploaded(env: SimpleNamespace) -> None:
+    env.config.write_text(
+        env.config.read_text(encoding="utf-8").replace(
+            "REPORT_TITLES=Morning Brief, Empty Shell, Wrap",
+            "REPORT_TITLES=Macro Tape Brief",
+        ),
+        encoding="utf-8",
+    )
+    name = "2026-07-22 Macro Tape Brief.md"
+    _write_report(env.vault, name, "Now save to the Obsidian vault")
+
+    assert uploader.run([]) == 1
+    assert env.post.calls == []
+    assert _read_state(env) == {}

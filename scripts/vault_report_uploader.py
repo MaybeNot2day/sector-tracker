@@ -50,7 +50,8 @@ STATE_PATH = Path.home() / ".local/state/sector-tracker/vault-uploads.json"
 DATED_NAME = re.compile(r"^(\d{4}-\d{2}-\d{2}) (.+)\.md$")
 # Vault-writing cron jobs; extend via REPORT_TITLES instead of editing this.
 DEFAULT_REPORT_TITLES = (
-    "Biotech Pharma Brief, AI Semis Morning Brief, Macro Tape Brief, US Asia Close"
+    "Biotech Pharma Brief, AI Semis Morning Brief, Macro Tape Brief, "
+    "US Asia Close, Fringe Corner"
 )
 # A file whose mtime is this fresh may still be mid-write; settle briefly.
 SETTLE_SECONDS = 3.0
@@ -131,6 +132,64 @@ def scan_vault(
 
 def content_hash(body: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+KNOWN_REPORT_TITLES = {
+    "ai semis morning brief",
+    "biotech pharma brief",
+    "macro tape brief",
+    "us asia close",
+    "fringe corner",
+}
+
+REPORT_CONTRACT_EFFECTIVE_DATE = date(2026, 7, 22)
+
+
+def validate_report_body(title: str, date_text: str, body: str) -> str | None:
+    """Return a contract violation for a current known cron report, otherwise None."""
+    title_key = title.casefold()
+    if (
+        title_key not in KNOWN_REPORT_TITLES
+        or date.fromisoformat(date_text) < REPORT_CONTRACT_EFFECTIVE_DATE
+    ):
+        return None
+    if not body.startswith("---\n"):
+        return "missing YAML frontmatter"
+    frontmatter_end = body.find("\n---\n", 4)
+    if frontmatter_end < 0:
+        return "unterminated YAML frontmatter"
+    frontmatter = {
+        line.strip() for line in body[4:frontmatter_end].splitlines() if line.strip()
+    }
+    for required in (f"date: {date_text}", "type: research", "status: draft"):
+        if required not in frontmatter:
+            return f"frontmatter missing {required!r}"
+    if not any(line.startswith("tags:") for line in frontmatter):
+        return "frontmatter missing 'tags:'"
+
+    report = body[frontmatter_end + 5 :]
+    required_markers = {
+        "ai semis morning brief": ("---FEED-STATUS---", "Feed Status"),
+        "biotech pharma brief": ("---FEED-STATUS---", "Feed Status"),
+        "macro tape brief": ("Feed Status",),
+        "us asia close": (
+            "Executive Tape Read",
+            "Today's Calendar",
+            "---FEED-STATUS---",
+            "Feed Status",
+        ),
+        "fringe corner": ("## Fringe Corner", "## Rationale"),
+    }
+    for marker in required_markers[title_key]:
+        if marker not in report:
+            return f"report missing {marker!r}"
+    if title_key in {
+        "ai semis morning brief",
+        "biotech pharma brief",
+        "us asia close",
+    } and report.count("---FEED-STATUS---") != 1:
+        return "report must contain exactly one FEED-STATUS delimiter"
+    return None
 
 
 def load_state(path: Path = STATE_PATH) -> dict[str, str]:
@@ -241,6 +300,11 @@ def run(argv: list[str] | None = None) -> int:
             continue  # empty shells re-check on the next pass
         digest = content_hash(body)
         if state.get(path.name) == digest:
+            continue
+        validation_error = validate_report_body(title, date_text, body)
+        if validation_error:
+            failed += 1
+            log(f"skip invalid {path.name}: {validation_error}")
             continue
         if args.baseline:
             state[path.name] = digest

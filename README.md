@@ -222,9 +222,12 @@ directory for files named `YYYY-MM-DD <Title>.md` (the Hermes cron convention), 
 new or changed ones, and remembers content hashes in
 `~/.local/state/sector-tracker/vault-uploads.json` so nothing uploads twice. Only titles
 on the cron-report allowlist upload — ad-hoc dated research notes in the vault stay off
-the board. Config lives in `~/.config/sector-tracker/uploader.env` (`BOARD_URL`,
-`EDIT_TOKEN`, `VAULT_DIR`, `MAX_AGE_DAYS`, `REPORT_TITLES` — comma-separated cron report
-titles, case-insensitive; defaults to the known cron jobs, `*` disables the filter).
+the board. Known daily reports are contract-checked before upload (dated YAML plus
+report-specific structural markers), so incomplete cron output is retried instead of
+replacing the dashboard report. Config lives in
+`~/.config/sector-tracker/uploader.env` (`BOARD_URL`, `EDIT_TOKEN`, `VAULT_DIR`,
+`MAX_AGE_DAYS`, `REPORT_TITLES`, `ALERT_TARGET` — report titles are comma-separated and
+case-insensitive; defaults cover the known cron jobs, `*` disables the filter).
 Run `--baseline` once at install to mark existing files as seen, and `--dry-run` to
 preview.
 
@@ -236,7 +239,12 @@ units in `deploy/` (lingering is enabled, so they run unattended):
 
 - `sector-tracker-uploader.path` — fires the moment Syncthing writes a report file
 - `sector-tracker-uploader.timer` — 30-minute sweep that catches in-place edits
-- `sector-tracker-uploader.service` — one upload pass posting to the droplet board
+- `sector-tracker-uploader.service` — one upload pass posting to the HTTPS board
+- `sector-tracker-report-watchdog.timer` — checks each weekday delivery every 10 minutes
+  from 07:00–13:50 UTC, after staged per-report deadlines
+- `sector-tracker-report-watchdog.service` — validates vault files, repairs missed
+  uploads, compares dashboard bodies, checks the Fringe ledger, and sends edge-triggered
+  failure/recovery alerts through Hermes
 
 ## Configuration
 

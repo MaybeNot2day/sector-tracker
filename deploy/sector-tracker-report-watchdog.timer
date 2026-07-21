@@ -1,0 +1,10 @@
+[Unit]
+Description=Check each weekday Hermes report after its delivery deadline
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 07..13:00/10:00
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
