@@ -1,9 +1,9 @@
 from time import monotonic
 from typing import Any
 
+import httpx
 import pytest
 
-from app.providers import lighter as lighter_module
 from app.providers.lighter import LighterProvider, _is_crypto_detail
 from app.services.daily_board import crypto_breadth_metrics
 
@@ -15,7 +15,7 @@ def forbid_http(monkeypatch: pytest.MonkeyPatch) -> None:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             raise AssertionError("HTTP client constructed during a cached call")
 
-    monkeypatch.setattr(lighter_module.httpx, "AsyncClient", _Boom)
+    monkeypatch.setattr(httpx, "AsyncClient", _Boom)
 
 
 def seeded_provider(details: dict[str, dict[str, Any]]) -> LighterProvider:
@@ -205,7 +205,7 @@ def test_is_crypto_market_answers_from_cache_without_refresh(
 
 
 def test_crypto_breadth_metrics_counts_boundaries_and_ignores_non_numeric() -> None:
-    tape = [
+    tape: list[dict[str, object]] = [
         {"symbol": "UP10", "change_pct": 10.0, "funding_rate": 0.0001, "day_volume_usd": 1000.13},
         {"symbol": "UP3", "change_pct": 3.0, "funding_rate": -0.0002, "day_volume_usd": 250.12},
         {"symbol": "UPNEAR3", "change_pct": 2.9, "funding_rate": 0.0, "day_volume_usd": None},
@@ -252,7 +252,7 @@ def test_crypto_breadth_metrics_empty_tape() -> None:
 
 def test_crypto_breadth_metrics_volume_without_quotes() -> None:
     """None means "no data", never conflated with a zero count."""
-    tape = [
+    tape: list[dict[str, object]] = [
         {"symbol": "A", "change_pct": None, "day_volume_usd": 40.0},
         {"symbol": "B", "day_volume_usd": 2.5},
     ]

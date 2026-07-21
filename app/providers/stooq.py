@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from app.models import AssetConfig, Bar, Quote
+from app.models import AssetConfig, Bar, Quote, is_valid_bar
 from app.providers.base import QuoteProvider
 
 
@@ -83,19 +83,19 @@ class StooqProvider(QuoteProvider):
             close = _number(row.get("Close"))
             if open_ is None or high is None or low is None or close is None:
                 continue
-            bars.append(
-                Bar(
-                    symbol=asset.symbol,
-                    provider="stooq",
-                    interval=interval,
-                    timestamp=timestamp,
-                    open=open_,
-                    high=high,
-                    low=low,
-                    close=close,
-                    volume=_number(row.get("Volume")),
-                )
+            bar = Bar(
+                symbol=asset.symbol,
+                provider="stooq",
+                interval=interval,
+                timestamp=timestamp,
+                open=open_,
+                high=high,
+                low=low,
+                close=close,
+                volume=_number(row.get("Volume")),
             )
+            if is_valid_bar(bar):
+                bars.append(bar)
         return _range_filter(bars, range_)
 
 

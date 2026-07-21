@@ -479,6 +479,31 @@ def test_delete_removes_report_and_unknown_delete_404s(
     assert again.json()["detail"] == "report_not_found"
 
 
+def test_report_ingest_rolls_back_when_a_projection_fails(
+    configure_app: Callable[[str], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure_app("")
+
+    def fail_projection(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("forced calendar projection failure")
+
+    monkeypatch.setattr(db, "_replace_key_dates", fail_projection)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = client.post(
+        "/api/reports",
+        json={
+            "title": "Macro Tape Brief",
+            "date": "2026-07-21",
+            "body": "## Key Dates\n- 2026-07-22 08:30 ET — CPI [MACRO]",
+        },
+    )
+
+    assert response.status_code == 500
+    assert db.load_reports(app.state.settings.database_path, 10) == []
+
+
 # --- db helper: the 40-line frontmatter scan window ---
 
 

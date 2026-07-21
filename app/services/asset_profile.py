@@ -58,7 +58,7 @@ class AssetProfileService:
             return payload
 
         try:
-            import yfinance as yf  # type: ignore[import-untyped]
+            import yfinance as yf
 
             info = yf.Ticker(asset.symbol).get_info()
             if isinstance(info, dict):

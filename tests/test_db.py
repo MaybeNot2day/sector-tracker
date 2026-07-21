@@ -1,12 +1,14 @@
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
+from typing import cast
 
 import pytest
 
 from app import db
-from app.models import Bar, Quote
+from app.models import Bar, ProviderName, Quote
 
 
 def test_save_and_load_latest_quote(tmp_path: Path) -> None:
@@ -99,6 +101,45 @@ def test_save_and_load_bars(tmp_path: Path) -> None:
     assert loaded == [bar]
 
 
+def test_save_bars_quarantines_all_invalid_batch(tmp_path: Path) -> None:
+    database = tmp_path / "board.sqlite3"
+    invalid_bar = Bar(
+        symbol="NVDA",
+        provider="yahoo",
+        interval="1d",
+        timestamp=datetime(2026, 1, 2, tzinfo=UTC),
+        open=100.0,
+        high=105.0,
+        low=95.0,
+        close=108.0,
+        volume=1_000_000.0,
+    )
+
+    db.save_bars(database, [invalid_bar])
+
+    assert db.load_bars(database, "NVDA", "1d", "yahoo") == []
+    with db._connect(database) as conn:
+        quarantined = conn.execute(
+            """
+            SELECT symbol, provider, interval, timestamp, open, high, low, close, volume, reason
+            FROM invalid_bars
+            """
+        ).fetchone()
+    assert quarantined is not None
+    assert tuple(quarantined) == (
+        "NVDA",
+        "yahoo",
+        "1d",
+        "2026-01-02T00:00:00+00:00",
+        100.0,
+        105.0,
+        95.0,
+        108.0,
+        1_000_000.0,
+        "invalid_ohlc",
+    )
+
+
 def test_init_db_runs_schema_once_per_path_and_reinitializes_deleted_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -107,11 +148,16 @@ def test_init_db_runs_schema_once_per_path_and_reinitializes_deleted_file(
     probe_count = 0
     count_lock = Lock()
 
-    def counted_ensure_column(*args: object, **kwargs: object) -> None:
+    def counted_ensure_column(
+        conn: sqlite3.Connection,
+        table: str,
+        column: str,
+        definition: str,
+    ) -> None:
         nonlocal probe_count
         with count_lock:
             probe_count += 1
-        original_ensure_column(*args, **kwargs)
+        original_ensure_column(conn, table, column, definition)
 
     monkeypatch.setattr(db, "_ensure_column", counted_ensure_column)
     with ThreadPoolExecutor(max_workers=8) as executor:
@@ -160,7 +206,7 @@ def test_load_bars_by_symbol_limits_each_partition_in_sql(tmp_path: Path) -> Non
     bars = [
         Bar(
             symbol=symbol,
-            provider=provider,
+            provider=cast(ProviderName, provider),
             interval="1d",
             timestamp=start + timedelta(days=day),
             open=float(day),

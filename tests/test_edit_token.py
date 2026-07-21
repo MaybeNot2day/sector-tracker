@@ -9,6 +9,7 @@ dependency is exercised directly and over HTTP via a TestClient that is not
 entered as a context manager (which is what triggers lifespan).
 """
 
+import asyncio
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,7 +19,10 @@ from fastapi import HTTPException
 from fastapi.routing import APIRoute
 from starlette.testclient import TestClient
 
+from app.config import load_watchlists, save_watchlists
 from app.main import app, require_edit_token
+from app.models import AssetConfig, GroupConfig
+from app.providers.base import ValidationStatus
 
 TOKEN = "s3cret-edit-token"
 
@@ -47,6 +51,41 @@ def configure_edit_token(tmp_path: Path) -> Iterator[Callable[[str], None]]:
         del app.state.settings
 
 
+class StubValidationProvider:
+    def __init__(self, status: ValidationStatus) -> None:
+        self.status = status
+
+    async def validate_asset(self, asset: AssetConfig) -> ValidationStatus:
+        return self.status
+
+
+@pytest.fixture
+def configure_asset_mutation(
+    configure_edit_token: Callable[[str], None],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[list[GroupConfig], ValidationStatus], tuple[TestClient, Path]]:
+    def _configure(
+        groups: list[GroupConfig],
+        validation_status: ValidationStatus,
+    ) -> tuple[TestClient, Path]:
+        configure_edit_token("")
+        watchlist_path = tmp_path / "watchlists.yaml"
+        save_watchlists(watchlist_path, groups)
+        provider = StubValidationProvider(validation_status)
+        monkeypatch.setattr(app.state, "watchlist_lock", asyncio.Lock(), raising=False)
+        monkeypatch.setattr(
+            app.state,
+            "quote_service",
+            SimpleNamespace(providers={"yahoo": provider, "stooq": provider}),
+            raising=False,
+        )
+        monkeypatch.setattr(app.state, "groups", groups, raising=False)
+        return TestClient(app), watchlist_path
+
+    return _configure
+
+
 # --- require_edit_token: allow/deny matrix ---
 
 
@@ -65,7 +104,7 @@ def test_require_edit_token_allows(
 ) -> None:
     configure_edit_token(edit_token)
 
-    assert require_edit_token(header) is None
+    require_edit_token(header)
 
 
 @pytest.mark.parametrize(
@@ -146,7 +185,7 @@ def test_gate_is_wired_to_exactly_the_mutation_routes() -> None:
         for route in app.routes
         if isinstance(route, APIRoute)
         and any(dep.call is require_edit_token for dep in route.dependant.dependencies)
-        for method in route.methods
+        for method in route.methods or set()
     }
 
     assert gated == {
@@ -196,3 +235,74 @@ def test_create_group_rejects_blank_name(
     response = client.post("/api/groups", json={"name": "   "})
 
     assert response.status_code == 422
+
+
+def test_create_asset_accepts_unavailable_provider_validation(
+    configure_asset_mutation: Callable[
+        [list[GroupConfig], ValidationStatus], tuple[TestClient, Path]
+    ],
+) -> None:
+    client, watchlist_path = configure_asset_mutation(
+        [GroupConfig(name="TEST", assets=[])],
+        "unavailable",
+    )
+
+    response = client.post("/api/groups/TEST/assets", json={"symbol": "AAPL"})
+
+    assert response.status_code == 200
+    saved = load_watchlists(watchlist_path)
+    assert [asset.symbol for asset in saved[0].assets] == ["AAPL"]
+
+
+def test_create_asset_rejects_definitive_provider_not_found(
+    configure_asset_mutation: Callable[
+        [list[GroupConfig], ValidationStatus], tuple[TestClient, Path]
+    ],
+) -> None:
+    client, watchlist_path = configure_asset_mutation(
+        [GroupConfig(name="TEST", assets=[])],
+        "not_found",
+    )
+
+    response = client.post("/api/groups/TEST/assets", json={"symbol": "MISSING"})
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "symbol_not_found"
+    assert load_watchlists(watchlist_path)[0].assets == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(
+            {"symbol": "AAPL", "type": "etf", "source": "yahoo"},
+            id="conflicting-type",
+        ),
+        pytest.param(
+            {"symbol": "AAPL", "type": "equity", "source": "stooq"},
+            id="conflicting-source",
+        ),
+    ],
+)
+def test_create_asset_rejects_cross_group_symbol_configuration_conflict(
+    configure_asset_mutation: Callable[
+        [list[GroupConfig], ValidationStatus], tuple[TestClient, Path]
+    ],
+    payload: dict[str, str],
+) -> None:
+    client, watchlist_path = configure_asset_mutation(
+        [
+            GroupConfig(
+                name="ONE",
+                assets=[AssetConfig(symbol="AAPL", type="equity", source="yahoo")],
+            ),
+            GroupConfig(name="TWO", assets=[]),
+        ],
+        "valid",
+    )
+
+    response = client.post("/api/groups/TWO/assets", json=payload)
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "symbol_configuration_conflict"
+    assert load_watchlists(watchlist_path)[1].assets == []

@@ -1,6 +1,7 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
+import httpx
 import pytest
 
 from app.config import Settings
@@ -75,7 +76,7 @@ class FakeHTTP:
                     raise result
                 return result if isinstance(result, FakeResponse) else FakeResponse(result)
 
-        monkeypatch.setattr(news_module.httpx, "AsyncClient", _Client)
+        monkeypatch.setattr(httpx, "AsyncClient", _Client)
 
 
 # ---------------------------------------------------------------------------
@@ -269,8 +270,40 @@ async def test_refresh_skips_failing_channel_but_keeps_others(
 
     assert await service.refresh() == 1
 
-    ids = [item["id"] for item in service.feed_payload()["items"]]
+    items = cast(list[dict[str, Any]], service.feed_payload()["items"])
+    ids = [item["id"] for item in items]
     assert ids == ["good/1"]
+
+
+@pytest.mark.asyncio
+async def test_failed_refresh_preserves_last_success_timestamp_and_marks_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeHTTP(
+        {
+            "alpha": page(post_block("alpha/1", "A1", "2026-07-07T08:00:00+00:00")),
+            "beta": page(post_block("beta/1", "B1", "2026-07-07T08:01:00+00:00")),
+        }
+    )
+    fake.install(monkeypatch)
+    service = NewsService(["alpha", "beta"], cache_seconds=0)
+
+    assert await service.refresh() == 2
+    successful_payload = service.feed_payload()
+    successful_updated_at = cast(str, successful_payload["updated_at"])
+    assert successful_payload["is_stale"] is False
+    assert successful_payload["failed_channels"] == []
+
+    fake.routes["alpha"] = RuntimeError("connection refused")
+    fake.routes["beta"] = ""
+    assert await service.refresh() == 0
+
+    failed_payload = service.feed_payload()
+    assert failed_payload["updated_at"] == successful_updated_at
+    assert failed_payload["is_stale"] is True
+    assert failed_payload["failed_channels"] == ["alpha", "beta"]
+    items = cast(list[dict[str, Any]], failed_payload["items"])
+    assert [item["id"] for item in items] == ["beta/1", "alpha/1"]
 
 
 @pytest.mark.asyncio
@@ -311,14 +344,15 @@ async def test_feed_payload_sorts_newest_first_with_title_fallback(
     await service.refresh()
 
     payload = service.feed_payload()
+    items = cast(list[dict[str, Any]], payload["items"])
 
-    assert [(item["id"], item["channel_title"]) for item in payload["items"]] == [
+    assert [(item["id"], item["channel_title"]) for item in items] == [
         ("alpha/2", "Chan & Title"),
         ("beta/1", "beta"),
         ("alpha/1", "Chan & Title"),
     ]
     assert payload["channels"] == ["alpha", "beta"]
-    assert datetime.fromisoformat(payload["updated_at"]).tzinfo is not None
+    assert datetime.fromisoformat(cast(str, payload["updated_at"])).tzinfo is not None
 
 
 # ---------------------------------------------------------------------------
@@ -340,7 +374,8 @@ async def test_feed_trims_to_100_newest_items(
 
     assert await service.refresh() == 120
 
-    ids = [item["id"] for item in service.feed_payload()["items"]]
+    items = cast(list[dict[str, Any]], service.feed_payload()["items"])
+    ids = [item["id"] for item in items]
     assert len(ids) == 100
     assert ids[0] == "alpha/120"
     assert ids[-1] == "alpha/21"
@@ -364,6 +399,6 @@ async def test_feed_trims_to_100_newest_items(
 def test_news_channels_parses_comma_separated_handles(
     name: str, raw: str, expected: list[str]
 ) -> None:
-    settings = Settings(news_telegram_channels=raw, _env_file=None)
+    settings = Settings(news_telegram_channels=raw, _env_file=None)  # type: ignore[call-arg]
 
     assert settings.news_channels == expected, name

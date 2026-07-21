@@ -8,9 +8,9 @@ from typing import Any, cast
 
 import httpx
 
-from app.models import AssetConfig, Bar, Quote
+from app.models import AssetConfig, Bar, Quote, is_valid_bar
 from app.providers.aggregate import aggregate_bars
-from app.providers.base import QuoteProvider
+from app.providers.base import QuoteProvider, ValidationStatus
 
 BASE_URL = "https://mainnet.zklighter.elliot.ai/api/v1"
 
@@ -157,6 +157,12 @@ class LighterProvider(QuoteProvider):
             # pages (via _normalize_interval) locally.
             return aggregate_bars(bars, interval)
         return bars
+
+    async def validate_asset(self, asset: AssetConfig) -> ValidationStatus:
+        details = await self._get_details()
+        if not details:
+            return "unavailable"
+        return "valid" if asset.symbol.upper() in details else "not_found"
 
     async def has_market(self, symbol: str) -> bool:
         """Whether Lighter lists a market for this symbol (cached)."""
@@ -448,7 +454,7 @@ def _bar_from_candle(asset: AssetConfig, raw: Any, interval: str) -> Bar | None:
         or close is None
     ):
         return None
-    return Bar(
+    bar = Bar(
         symbol=asset.symbol,
         provider="lighter",
         interval=interval,
@@ -459,6 +465,7 @@ def _bar_from_candle(asset: AssetConfig, raw: Any, interval: str) -> Bar | None:
         close=close,
         volume=_number(raw.get("v")),
     )
+    return bar if is_valid_bar(bar) else None
 
 
 def _normalize_interval(interval: str) -> str:

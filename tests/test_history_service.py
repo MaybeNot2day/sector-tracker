@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -29,6 +30,22 @@ class HistoryProvider(QuoteProvider):
         ]
 
 
+class CountingHistoryProvider(HistoryProvider):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def get_history(
+        self,
+        asset: AssetConfig,
+        *,
+        interval: str,
+        range_: str,
+    ) -> list[Bar]:
+        self.calls += 1
+        await asyncio.sleep(0)
+        return await super().get_history(asset, interval=interval, range_=range_)
+
+
 @pytest.mark.asyncio
 async def test_history_service_fetches_and_caches_bars(tmp_path: Path) -> None:
     groups = [
@@ -43,6 +60,25 @@ async def test_history_service_fetches_and_caches_bars(tmp_path: Path) -> None:
 
     assert len(bars) == 1
     assert bars[0].close == 102.0
+
+
+@pytest.mark.asyncio
+async def test_history_service_collapses_concurrent_identical_fetches(tmp_path: Path) -> None:
+    groups = [
+        GroupConfig(
+            name="TEST",
+            assets=[AssetConfig(symbol="SPY", type="etf", source="yahoo")],
+        )
+    ]
+    provider = CountingHistoryProvider()
+    service = HistoryService(tmp_path / "board.sqlite3", {"yahoo": provider})
+
+    results = await asyncio.gather(
+        *(service.get_history(groups, "SPY", interval="1d", range_="1y") for _ in range(3))
+    )
+
+    assert provider.calls == 1
+    assert [len(bars) for bars in results] == [1, 1, 1]
 
 
 def test_filter_bars_to_intraday_range() -> None:

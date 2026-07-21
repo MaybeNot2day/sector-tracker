@@ -1,6 +1,7 @@
 from time import monotonic
 from typing import Any
 
+import httpx
 import pytest
 
 from app.models import AssetConfig
@@ -23,7 +24,7 @@ def forbid_http(monkeypatch: pytest.MonkeyPatch) -> None:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             raise AssertionError("HTTP client constructed during a cached call")
 
-    monkeypatch.setattr(lighter_module.httpx, "AsyncClient", _Boom)
+    monkeypatch.setattr(httpx, "AsyncClient", _Boom)
 
 
 class FakeResponse:
@@ -65,7 +66,7 @@ class FakeHTTP:
                 result = fake.routes[path]
                 return result if isinstance(result, FakeResponse) else FakeResponse(result)
 
-        monkeypatch.setattr(lighter_module.httpx, "AsyncClient", _Client)
+        monkeypatch.setattr(httpx, "AsyncClient", _Client)
 
     def count(self, path: str) -> int:
         return sum(1 for requested, _ in self.requests if requested == path)

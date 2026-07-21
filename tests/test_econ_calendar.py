@@ -15,7 +15,7 @@ inlined); tests never touch the network.
 
 import json
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -186,7 +186,7 @@ def eastern(days_ahead: int) -> str:
     return (EASTERN_TODAY + timedelta(days=days_ahead)).isoformat()
 
 
-def matched_title(event: dict[str, object]) -> str | None:
+def matched_title(event: Mapping[str, object]) -> str | None:
     release = match_release(event, ROWS)
     return str(release["matched_title"]) if release else None
 
@@ -538,7 +538,7 @@ async def test_cache_serves_within_ttl_without_refetch(
 # --- scheduler broadcast trigger ---
 
 
-def _items(*releases: dict[str, object] | None) -> list[dict[str, Any]]:
+def _items(*releases: Mapping[str, object] | None) -> list[dict[str, Any]]:
     return [{"id": index, "release": release} for index, release in enumerate(releases)]
 
 

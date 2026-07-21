@@ -22,7 +22,7 @@ async def test_board_payload_async_shares_one_inflight_build(
     release = Event()
     calls = 0
     calls_lock = Lock()
-    payload = {"groups": []}
+    payload: dict[str, object] = {"groups": []}
 
     def blocked_build(app_state: Any, groups: Any, grouped: Any) -> dict[str, object]:
         nonlocal calls
@@ -56,7 +56,7 @@ async def test_board_payload_caller_cancellation_does_not_cancel_shared_build(
 ) -> None:
     entered = Event()
     release = Event()
-    payload = {"overview": {}}
+    payload: dict[str, object] = {"overview": {}}
 
     def blocked_build(app_state: Any, groups: Any, grouped: Any) -> dict[str, object]:
         entered.set()
@@ -88,8 +88,8 @@ async def test_older_payload_build_cannot_overwrite_newer_finished_cache(
     release_new = Event()
     old_grouped: dict[str, object] = {"snapshot": "old"}
     new_grouped: dict[str, object] = {"snapshot": "new"}
-    old_payload = {"snapshot": "old"}
-    new_payload = {"snapshot": "new"}
+    old_payload: dict[str, object] = {"snapshot": "old"}
+    new_payload: dict[str, object] = {"snapshot": "new"}
 
     def ordered_build(app_state: Any, groups: Any, grouped: Any) -> dict[str, object]:
         if grouped is old_grouped:

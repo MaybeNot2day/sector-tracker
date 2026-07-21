@@ -10,6 +10,9 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
+from threading import Lock
+from time import monotonic
+from typing import Annotated, Literal
 
 from fastapi import (
     Depends,
@@ -25,10 +28,16 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import Response
-from starlette.types import Scope
+from starlette.types import Message, Receive, Scope, Send
 
 from app import db
-from app.config import Settings, find_group, load_watchlists, save_watchlists
+from app.config import (
+    Settings,
+    find_group,
+    load_watchlists,
+    save_watchlists,
+    validate_watchlist_identities,
+)
 from app.models import AssetConfig, AssetType, GroupConfig, ProviderName
 from app.providers.base import QuoteProvider
 from app.providers.lighter import LighterProvider
@@ -57,6 +66,11 @@ from app.services.quotes import QuoteService
 
 APP_DIR = Path(__file__).parent
 STATIC_DIR = APP_DIR / "static"
+YAHOO_STATUS_CACHE_SECONDS = 60.0
+HistoryInterval = Literal["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1wk", "1mo"]
+HistoryRange = Literal["1d", "1w", "1mo", "3mo", "6mo", "ytd", "1y", "5y", "10y"]
+_yahoo_status_cache: tuple[float, dict[str, object]] | None = None
+_yahoo_status_lock = Lock()
 
 
 logger = logging.getLogger(__name__)
@@ -183,9 +197,52 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
 
 
+SECURITY_HEADERS = (
+    (
+        b"content-security-policy",
+        b"default-src 'self'; "
+        b"script-src 'self' 'sha256-lzStUcqAQVQGXafGBmFjwHSxC/uBQ+JRbPX12Zt3sew='; "
+        b"style-src 'self' https://fonts.googleapis.com; style-src-attr 'unsafe-inline'; "
+        b"font-src https://fonts.gstatic.com; img-src 'self' data:; "
+        b"connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; "
+        b"frame-ancestors 'none'; form-action 'self'",
+    ),
+    (b"permissions-policy", b"camera=(), geolocation=(), microphone=()"),
+    (b"referrer-policy", b"no-referrer"),
+    (b"x-content-type-options", b"nosniff"),
+    (b"x-frame-options", b"DENY"),
+)
+
+
+class SecurityHeadersMiddleware:
+    """Attach browser hardening without BaseHTTPMiddleware's request buffering."""
+
+    def __init__(self, app: object) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)  # type: ignore[operator]
+            return
+
+        async def send_with_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                headers.extend(SECURITY_HEADERS)
+                if scope.get("scheme") == "https":
+                    headers.append(
+                        (b"strict-transport-security", b"max-age=31536000; includeSubDomains")
+                    )
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)  # type: ignore[operator]
+
+
 app = FastAPI(title="Cross-Asset Board", lifespan=lifespan)
 # Vercel's edge gzips responses; this covers local/VPS deployments too.
 app.add_middleware(GZipMiddleware, minimum_size=1024)
+app.add_middleware(SecurityHeadersMiddleware)
 
 
 class CachedStaticFiles(StaticFiles):
@@ -251,8 +308,12 @@ def favicon() -> FileResponse:
 
 
 @app.get("/api/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health() -> dict[str, object]:
+    payload: dict[str, object] = {"status": "ok"}
+    service = getattr(app.state, "daily_board_service", None)
+    if isinstance(service, DailyBoardService):
+        payload["snapshots"] = service.snapshot_status()
+    return payload
 
 
 @app.get("/api/groups")
@@ -335,26 +396,35 @@ async def create_asset(group_name: str, request: AssetRequest) -> dict[str, obje
             )
             for item in groups_current
         ]
+        try:
+            validate_watchlist_identities(groups_current)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="symbol_configuration_conflict",
+            ) from exc
         save_watchlists(app.state.settings.watchlist_path, groups_current)
         app.state.groups = load_watchlists(app.state.settings.watchlist_path)
     return groups_payload(app.state.groups)
 
 
 async def validate_symbol_exists(asset: AssetConfig) -> None:
-    """Reject adds only when the provider answers and has no data for the symbol.
-
-    A provider outage must not block edits, so exceptions pass silently.
-    """
+    """Reject only a definitive provider not-found; outages must not block edits."""
     provider = app.state.quote_service.providers.get(asset.source)
     if provider is None:
         return
     try:
-        quotes = await provider.get_quotes([asset])
+        status = await provider.validate_asset(asset)
     except Exception:
-        return
-    valid = [quote for quote in quotes if quote.symbol == asset.symbol and quote.error is None]
-    if not valid:
+        status = "unavailable"
+    if status == "not_found":
         raise HTTPException(status_code=422, detail="symbol_not_found")
+    if status == "unavailable":
+        logger.warning(
+            "symbol %s added without provider verification (%s unavailable)",
+            asset.symbol,
+            asset.source,
+        )
 
 
 @app.delete("/api/groups/{group_name}/assets/{symbol}", dependencies=[Depends(require_edit_token)])
@@ -479,30 +549,22 @@ async def create_report(request: ReportRequest) -> dict[str, object]:
     actions = parse_fringe_actions(request.body)
 
     def _ingest() -> int:
-        path = app.state.settings.database_path
-        report_id = db.save_report(
-            path,
+        return db.ingest_report(
+            app.state.settings.database_path,
             slug=slug,
             report_date=report_date,
             title=clean_text(request.title),
             body=request.body,
-        )
-        db.replace_key_dates(
-            path,
-            slug=slug,
             events=[(e.date, e.time, e.title, e.category) for e in events],
-        )
-        if actions is not None:
-            db.apply_fringe_actions(
-                path,
-                slug=slug,
-                report_date=report_date,
-                actions=[
+            fringe_actions=(
+                [
                     (a.action, a.ticker, a.direction, a.text, a.horizon, a.target)
                     for a in actions
-                ],
-            )
-        return report_id
+                ]
+                if actions is not None
+                else None
+            ),
+        )
 
     report_id = await asyncio.to_thread(_ingest)
     if actions:
@@ -616,25 +678,29 @@ def lighter_status() -> dict[str, object]:
 
 @app.get("/api/yahoo-status")
 def yahoo_status() -> dict[str, object]:
-    """Yahoo transport diagnostics from inside the running host.
+    """Cached Yahoo transport diagnostics from inside the running host."""
+    global _yahoo_status_cache
+    now = monotonic()
+    with _yahoo_status_lock:
+        if (
+            _yahoo_status_cache is not None
+            and now - _yahoo_status_cache[0] < YAHOO_STATUS_CACHE_SECONDS
+        ):
+            return _yahoo_status_cache[1]
+        from app.providers.yahoo import YAHOO_SPARK_URLS, _get_json
 
-    Distinguishes 'curl binary missing from the image' from 'Yahoo is
-    rejecting this host's egress IP' — the two failure modes that make every
-    equity quote come back no_quote_available on fresh deployments.
-    """
-    from app.providers.yahoo import YAHOO_SPARK_URLS, _get_json
-
-    result: dict[str, object] = {"curl": shutil.which("curl")}
-    try:
-        payload = _get_json(
-            YAHOO_SPARK_URLS[0],
-            {"symbols": "SPY", "interval": "1d", "range": "1d"},
-        )
-        healthy = isinstance(payload, dict) and payload.get("spark")
-        result["spark"] = "ok" if healthy else "unexpected_payload"
-    except Exception as exc:
-        result["spark_error"] = str(exc)[:300] or type(exc).__name__
-    return result
+        result: dict[str, object] = {"curl": shutil.which("curl")}
+        try:
+            payload = _get_json(
+                YAHOO_SPARK_URLS[0],
+                {"symbols": "SPY", "interval": "1d", "range": "1d"},
+            )
+            healthy = isinstance(payload, dict) and payload.get("spark")
+            result["spark"] = "ok" if healthy else "unexpected_payload"
+        except Exception as exc:
+            result["spark_error"] = str(exc)[:300] or type(exc).__name__
+        _yahoo_status_cache = (monotonic(), result)
+        return result
 
 
 @app.get("/api/snapshots")
@@ -647,17 +713,20 @@ async def snapshots(days: int = Query(default=30, ge=1, le=365)) -> dict[str, ob
 @app.get("/api/history/{symbol}")
 async def history(
     symbol: str,
-    interval: str = Query(default="1d"),
-    range_: str = Query(default="1y", alias="range"),
+    interval: Annotated[HistoryInterval, Query()] = "1d",
+    range_: Annotated[HistoryRange, Query(alias="range")] = "1y",
 ) -> dict[str, object]:
+    clean = clean_symbol(symbol)
+    if not clean or len(clean) > 24 or "/" in clean or "\\" in clean:
+        raise HTTPException(status_code=422, detail="symbol_invalid")
     bars = await app.state.history_service.get_history(
         app.state.groups,
-        symbol,
+        clean,
         interval=interval,
         range_=range_,
     )
     return {
-        "symbol": symbol.upper(),
+        "symbol": clean,
         "interval": interval,
         "range": range_,
         "bars": bars_payload(bars),

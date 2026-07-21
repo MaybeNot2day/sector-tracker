@@ -63,10 +63,13 @@ def load_watchlists(path: Path) -> list[GroupConfig]:
         group_name = str(group_raw.get("name", "<unknown>"))
         assets = [_parse_asset(asset_raw, group_name) for asset_raw in assets_raw]
         groups.append(GroupConfig(name=str(group_raw["name"]), assets=assets))
+    validate_watchlist_identities(groups)
     return groups
 
 
 def save_watchlists(path: Path, groups: list[GroupConfig]) -> None:
+    validate_watchlist_identities(groups)
+
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "groups": [
@@ -95,6 +98,23 @@ def save_watchlists(path: Path, groups: list[GroupConfig]) -> None:
     tmp_path = path.with_name(path.name + ".tmp")
     tmp_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
     os.replace(tmp_path, path)
+
+
+def validate_watchlist_identities(groups: list[GroupConfig]) -> None:
+    """A symbol may repeat across groups only with identical quote semantics."""
+    seen: dict[str, tuple[AssetType, ProviderName, str | None]] = {}
+    for group in groups:
+        for asset in group.assets:
+            identity = (
+                asset.type,
+                asset.source,
+                asset.exchange.upper() if asset.exchange else None,
+            )
+            previous = seen.setdefault(asset.symbol, identity)
+            if previous != identity:
+                raise ValueError(
+                    f"symbol {asset.symbol} has conflicting type/source/exchange configurations"
+                )
 
 
 def find_group(groups: list[GroupConfig], name: str) -> GroupConfig | None:

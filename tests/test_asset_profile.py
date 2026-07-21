@@ -1,6 +1,9 @@
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, Lock
 from time import sleep
+from typing import cast
+
+import pytest
 
 from app.models import AssetConfig
 from app.services import asset_profile
@@ -45,7 +48,9 @@ def test_etf_average_volume_is_not_currency_prefixed() -> None:
     assert by_label["Avg Volume"] == "1.2M"
 
 
-def test_non_usd_profile_monetary_metrics_are_converted(monkeypatch) -> None:
+def test_non_usd_profile_monetary_metrics_are_converted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(asset_profile, "_usd_money_divisor", lambda _info: 1_550.0)
     asset = AssetConfig(
         symbol="000660.KS",
@@ -68,7 +73,8 @@ def test_non_usd_profile_monetary_metrics_are_converted(monkeypatch) -> None:
             "fiftyTwoWeekHigh": 3_100_000,
         },
     )
-    by_label = {str(metric["label"]): metric["value"] for metric in profile["metrics"]}  # type: ignore[index]
+    metrics = cast(list[dict[str, str | None]], profile["metrics"])
+    by_label = {str(metric["label"]): metric["value"] for metric in metrics}
 
     assert by_label["Market Cap"] == "$1.00B"
     assert by_label["EV"] == "$2.00B"
@@ -77,7 +83,9 @@ def test_non_usd_profile_monetary_metrics_are_converted(monkeypatch) -> None:
     assert by_label["52W Range"] == "$100.00 - $2,000"
 
 
-def test_partial_profile_failures_are_not_long_cached(monkeypatch) -> None:
+def test_partial_profile_failures_are_not_long_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls = {"count": 0}
 
     class FakeTicker:
@@ -111,7 +119,9 @@ def test_partial_profile_failures_are_not_long_cached(monkeypatch) -> None:
     assert calls["count"] == 2
 
 
-def test_profile_failure_cooldown_suppresses_retries_then_expires(monkeypatch) -> None:
+def test_profile_failure_cooldown_suppresses_retries_then_expires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls = {"count": 0}
 
     class RecoveringTicker:
@@ -150,7 +160,9 @@ def test_profile_failure_cooldown_suppresses_retries_then_expires(monkeypatch) -
     assert calls["count"] == 2
 
 
-def test_concurrent_profile_misses_collapse_per_symbol(monkeypatch) -> None:
+def test_concurrent_profile_misses_collapse_per_symbol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls = 0
     calls_lock = Lock()
 
@@ -178,7 +190,9 @@ def test_concurrent_profile_misses_collapse_per_symbol(monkeypatch) -> None:
     assert all(result is results[0] for result in results)
 
 
-def test_different_profile_symbols_fetch_concurrently(monkeypatch) -> None:
+def test_different_profile_symbols_fetch_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     rendezvous = Barrier(2, timeout=1)
 
     class ParallelTicker:
@@ -209,7 +223,9 @@ def test_different_profile_symbols_fetch_concurrently(monkeypatch) -> None:
     assert all(result["status"] == "ok" for result in results)
 
 
-def test_expired_good_profile_is_served_when_refresh_fails(monkeypatch) -> None:
+def test_expired_good_profile_is_served_when_refresh_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class FailingTicker:
         def __init__(self, symbol: str) -> None:
             self.symbol = symbol
@@ -217,7 +233,7 @@ def test_expired_good_profile_is_served_when_refresh_fails(monkeypatch) -> None:
         def get_info(self) -> dict[str, object]:
             raise RuntimeError("rate limited")
 
-    cached = {
+    cached: dict[str, object] = {
         "status": "ok",
         "symbol": "TSM",
         "name": "Taiwan Semiconductor Manufacturing Company Limited",

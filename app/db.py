@@ -10,7 +10,7 @@ from pathlib import Path
 from threading import Lock
 from typing import SupportsFloat, SupportsIndex, cast
 
-from app.models import AssetType, Bar, ProviderName, Quote
+from app.models import AssetType, Bar, ProviderName, Quote, is_valid_bar
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS latest_quotes (
@@ -48,6 +48,21 @@ CREATE TABLE IF NOT EXISTS bars (
     PRIMARY KEY (symbol, provider, interval, timestamp)
 );
 
+CREATE TABLE IF NOT EXISTS invalid_bars (
+    symbol TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    interval TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    open REAL NOT NULL,
+    high REAL NOT NULL,
+    low REAL NOT NULL,
+    close REAL NOT NULL,
+    volume REAL,
+    quarantined_at TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    PRIMARY KEY (symbol, provider, interval, timestamp)
+);
+
 CREATE INDEX IF NOT EXISTS idx_bars_interval_symbol_provider_timestamp
 ON bars (interval, symbol, provider, timestamp DESC);
 
@@ -80,6 +95,19 @@ CREATE TABLE IF NOT EXISTS key_dates (
 
 CREATE INDEX IF NOT EXISTS idx_key_dates_slug ON key_dates (source_slug);
 
+CREATE TABLE IF NOT EXISTS key_date_sources (
+    source_slug TEXT NOT NULL,
+    event_date TEXT NOT NULL,
+    event_time TEXT,
+    title TEXT NOT NULL,
+    category TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (source_slug, event_date, title)
+);
+
+CREATE INDEX IF NOT EXISTS idx_key_date_sources_event
+ON key_date_sources (event_date, title, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS fringe_ideas (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ticker TEXT NOT NULL,
@@ -111,6 +139,14 @@ CREATE TABLE IF NOT EXISTS etf_flow_history (
 _initialized_paths: set[Path] = set()
 _init_lock = Lock()
 
+_VALID_BAR_SQL = """
+    open > 0 AND high > 0 AND low > 0 AND close > 0
+    AND open < 1.0e100 AND high < 1.0e100 AND low < 1.0e100 AND close < 1.0e100
+    AND high >= open AND high >= close
+    AND low <= open AND low <= close
+    AND low <= high
+"""
+
 
 
 def init_db(path: Path) -> None:
@@ -135,7 +171,41 @@ def init_db(path: Path) -> None:
             _ensure_column(conn, "latest_quotes", "funding_rate", "REAL")
             _ensure_column(conn, "latest_quotes", "open_interest_usd", "REAL")
             _ensure_column(conn, "fringe_ideas", "target", "TEXT")
+            _seed_key_date_sources(conn)
+            _quarantine_invalid_bars(conn)
         _initialized_paths.add(resolved)
+
+
+def _seed_key_date_sources(conn: sqlite3.Connection) -> None:
+    """Preserve pre-migration calendar ownership as the first attribution."""
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO key_date_sources (
+            source_slug, event_date, event_time, title, category, created_at
+        )
+        SELECT source_slug, event_date, event_time, title, category, created_at
+        FROM key_dates
+        """
+    )
+
+
+def _quarantine_invalid_bars(conn: sqlite3.Connection) -> None:
+    """Move corrupt provider candles out of every downstream calculation."""
+    quarantined_at = datetime.now(UTC).isoformat()
+    conn.execute(
+        f"""
+        INSERT OR REPLACE INTO invalid_bars (
+            symbol, provider, interval, timestamp, open, high, low, close, volume,
+            quarantined_at, reason
+        )
+        SELECT symbol, provider, interval, timestamp, open, high, low, close, volume,
+               ?, 'invalid_ohlc'
+        FROM bars
+        WHERE NOT ({_VALID_BAR_SQL})
+        """,
+        (quarantined_at,),
+    )
+    conn.execute(f"DELETE FROM bars WHERE NOT ({_VALID_BAR_SQL})")
 
 
 def save_quotes(path: Path, quotes: Sequence[Quote]) -> None:
@@ -250,36 +320,83 @@ def load_latest_quotes(path: Path, symbols: Sequence[str]) -> dict[str, Quote]:
 def save_bars(path: Path, bars: Sequence[Bar]) -> None:
     if not bars:
         return
+    valid_bars = [bar for bar in bars if is_valid_bar(bar)]
+    invalid_bars = [bar for bar in bars if not is_valid_bar(bar)]
     init_db(path)
     with _connect(path) as conn:
-        conn.executemany(
-            """
-            INSERT INTO bars (
-                symbol, provider, interval, timestamp, open, high, low, close, volume
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(symbol, provider, interval, timestamp) DO UPDATE SET
-                open = excluded.open,
-                high = excluded.high,
-                low = excluded.low,
-                close = excluded.close,
-                volume = excluded.volume
-            """,
-            [
-                (
-                    bar.symbol,
-                    bar.provider,
-                    bar.interval,
-                    _to_iso(bar.timestamp),
-                    bar.open,
-                    bar.high,
-                    bar.low,
-                    bar.close,
-                    bar.volume,
+        if invalid_bars:
+            conn.executemany(
+                """
+                INSERT INTO invalid_bars (
+                    symbol, provider, interval, timestamp, open, high, low, close,
+                    volume, quarantined_at, reason
                 )
-                for bar in bars
-            ],
-        )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol, provider, interval, timestamp) DO UPDATE SET
+                    open = excluded.open,
+                    high = excluded.high,
+                    low = excluded.low,
+                    close = excluded.close,
+                    volume = excluded.volume,
+                    quarantined_at = excluded.quarantined_at,
+                    reason = excluded.reason
+                """,
+                [
+                    (
+                        bar.symbol,
+                        bar.provider,
+                        bar.interval,
+                        _to_iso(bar.timestamp),
+                        str(bar.open),
+                        str(bar.high),
+                        str(bar.low),
+                        str(bar.close),
+                        bar.volume,
+                        _to_iso(datetime.now(UTC)),
+                        "invalid_ohlc",
+                    )
+                    for bar in invalid_bars
+                ],
+            )
+        if valid_bars:
+            conn.executemany(
+                """
+                INSERT INTO bars (
+                    symbol, provider, interval, timestamp, open, high, low, close, volume
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol, provider, interval, timestamp) DO UPDATE SET
+                    open = excluded.open,
+                    high = excluded.high,
+                    low = excluded.low,
+                    close = excluded.close,
+                    volume = excluded.volume
+                """,
+                [
+                    (
+                        bar.symbol,
+                        bar.provider,
+                        bar.interval,
+                        _to_iso(bar.timestamp),
+                        bar.open,
+                        bar.high,
+                        bar.low,
+                        bar.close,
+                        bar.volume,
+                    )
+                    for bar in valid_bars
+                ],
+            )
+            conn.executemany(
+                """
+                DELETE FROM invalid_bars
+                WHERE symbol = ? AND provider = ? AND interval = ? AND timestamp = ?
+                """,
+                [
+                    (bar.symbol, bar.provider, bar.interval, _to_iso(bar.timestamp))
+                    for bar in valid_bars
+                ],
+            )
 
 
 def load_bars(
@@ -402,36 +519,85 @@ def load_board_snapshots(path: Path, limit: int) -> list[dict[str, object]]:
 
 
 def save_report(path: Path, *, slug: str, report_date: str, title: str, body: str) -> int:
-    """Upsert one agent report; only the NEWEST date per slug survives.
-
-    Same-day cron re-runs replace that day's report; a new day's brief
-    replaces the previous day's entirely. Pruning by MAX(report_date)
-    (not the incoming date) means a late edit to an older vault file can
-    never displace a newer brief. Delete + insert share one transaction.
-    """
+    """Upsert one agent report, ignoring stale dates older than the current brief."""
     init_db(path)
     with _connect(path) as conn:
-        row = conn.execute(
-            """
-            INSERT INTO reports (slug, report_date, title, body, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(slug, report_date) DO UPDATE SET
-                title = excluded.title,
-                body = excluded.body,
-                created_at = excluded.created_at
-            RETURNING id
-            """,
-            (slug, report_date, title, body, _to_iso(datetime.now(UTC))),
-        ).fetchone()
-        conn.execute(
-            """
-            DELETE FROM reports
-            WHERE slug = ?
-              AND report_date < (SELECT MAX(report_date) FROM reports WHERE slug = ?)
-            """,
-            (slug, slug),
+        report_id, _ = _save_report(
+            conn,
+            slug=slug,
+            report_date=report_date,
+            title=title,
+            body=body,
         )
-    return int(row["id"])
+    return report_id
+
+
+def _save_report(
+    conn: sqlite3.Connection,
+    *,
+    slug: str,
+    report_date: str,
+    title: str,
+    body: str,
+) -> tuple[int, bool]:
+    latest = conn.execute(
+        "SELECT id, report_date FROM reports WHERE slug = ?"
+        " ORDER BY report_date DESC LIMIT 1",
+        (slug,),
+    ).fetchone()
+    if latest is not None and report_date < str(latest["report_date"]):
+        return int(latest["id"]), False
+
+    row = conn.execute(
+        """
+        INSERT INTO reports (slug, report_date, title, body, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(slug, report_date) DO UPDATE SET
+            title = excluded.title,
+            body = excluded.body,
+            created_at = excluded.created_at
+        RETURNING id
+        """,
+        (slug, report_date, title, body, _to_iso(datetime.now(UTC))),
+    ).fetchone()
+    conn.execute(
+        "DELETE FROM reports WHERE slug = ? AND report_date < ?",
+        (slug, report_date),
+    )
+    return int(row["id"]), True
+
+
+def ingest_report(
+    path: Path,
+    *,
+    slug: str,
+    report_date: str,
+    title: str,
+    body: str,
+    events: Sequence[tuple[str, str | None, str, str]],
+    fringe_actions: Sequence[tuple[str, str, str, str, str | None, str | None]] | None,
+) -> int:
+    """Persist a report and every derived projection in one transaction."""
+    init_db(path)
+    with _connect(path) as conn:
+        report_id, accepted = _save_report(
+            conn,
+            slug=slug,
+            report_date=report_date,
+            title=title,
+            body=body,
+        )
+        if not accepted:
+            return report_id
+        _replace_key_dates(conn, slug=slug, events=events)
+        if fringe_actions is not None:
+            _apply_fringe_actions(
+                conn,
+                slug=slug,
+                report_date=report_date,
+                actions=fringe_actions,
+            )
+        return report_id
 
 
 def load_reports(path: Path, limit: int) -> list[dict[str, object]]:
@@ -476,13 +642,15 @@ def load_report(path: Path, report_id: int) -> dict[str, object] | None:
 
 
 def delete_report(path: Path, report_id: int) -> bool:
-    """Remove one report and the key dates it fed (slug maps to <=1 report)."""
+    """Remove one report and only its calendar attribution."""
     init_db(path)
     with _connect(path) as conn:
         row = conn.execute("SELECT slug FROM reports WHERE id = ?", (report_id,)).fetchone()
         if row is None:
             return False
-        conn.execute("DELETE FROM key_dates WHERE source_slug = ?", (str(row["slug"]),))
+        slug = str(row["slug"])
+        conn.execute("DELETE FROM key_date_sources WHERE source_slug = ?", (slug,))
+        _rebuild_key_dates(conn)
         conn.execute("DELETE FROM reports WHERE id = ?", (report_id,))
         return True
 
@@ -490,31 +658,72 @@ def delete_report(path: Path, report_id: int) -> bool:
 def replace_key_dates(
     path: Path, *, slug: str, events: Sequence[tuple[str, str | None, str, str]]
 ) -> int:
-    """Mirror one report's key dates: drop the slug's old rows, upsert the new.
-
-    Events are (date, time, title, category). A (date, title) collision with
-    another slug's row is the same real-world event mentioned by two briefs;
-    the newest mention wins the row instead of duplicating the calendar.
-    Delete + upsert share one transaction, so a re-ingested report that
-    dropped its Key Dates section also clears its stale calendar entries.
-    """
+    """Mirror one report's calendar attribution without losing shared events."""
     init_db(path)
-    now = _to_iso(datetime.now(UTC))
     with _connect(path) as conn:
-        conn.execute("DELETE FROM key_dates WHERE source_slug = ?", (slug,))
-        conn.executemany(
-            """
-            INSERT INTO key_dates (event_date, event_time, title, category, source_slug, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(event_date, title) DO UPDATE SET
-                event_time = excluded.event_time,
-                category = excluded.category,
-                source_slug = excluded.source_slug,
-                created_at = excluded.created_at
-            """,
-            [(date, time, title, category, slug, now) for date, time, title, category in events],
-        )
+        _replace_key_dates(conn, slug=slug, events=events)
     return len(events)
+
+
+def _replace_key_dates(
+    conn: sqlite3.Connection,
+    *,
+    slug: str,
+    events: Sequence[tuple[str, str | None, str, str]],
+) -> None:
+    now = _to_iso(datetime.now(UTC))
+    conn.execute("DELETE FROM key_date_sources WHERE source_slug = ?", (slug,))
+    conn.executemany(
+        """
+        INSERT INTO key_date_sources (
+            source_slug, event_date, event_time, title, category, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source_slug, event_date, title) DO UPDATE SET
+            event_time = excluded.event_time,
+            category = excluded.category,
+            created_at = excluded.created_at
+        """,
+        [(slug, date, time, title, category, now) for date, time, title, category in events],
+    )
+    _rebuild_key_dates(conn)
+
+
+def _rebuild_key_dates(conn: sqlite3.Connection) -> None:
+    """Project all source attributions into one newest-mention calendar row."""
+    conn.execute(
+        """
+        DELETE FROM key_dates
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM key_date_sources AS source
+            WHERE source.event_date = key_dates.event_date
+              AND source.title = key_dates.title
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO key_dates (
+            event_date, event_time, title, category, source_slug, created_at
+        )
+        SELECT event_date, event_time, title, category, source_slug, created_at
+        FROM (
+            SELECT source.*,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY event_date, title
+                       ORDER BY created_at DESC, source_slug DESC
+                   ) AS source_rank
+            FROM key_date_sources AS source
+        )
+        WHERE source_rank = 1
+        ON CONFLICT(event_date, title) DO UPDATE SET
+            event_time = excluded.event_time,
+            category = excluded.category,
+            source_slug = excluded.source_slug,
+            created_at = excluded.created_at
+        """
+    )
 
 
 def load_key_dates(path: Path, *, start: str, end: str, limit: int) -> list[dict[str, object]]:
@@ -555,106 +764,99 @@ def apply_fringe_actions(
     report_date: str,
     actions: Sequence[tuple[str, str, str, str, str | None, str | None]],
 ) -> dict[str, int]:
-    """Replay one report's fringe actions against the ideas ledger.
-
-    Actions are (action, ticker, direction, text, horizon, target), action
-    in open/hold/close, applied in report order. Unlike replace_key_dates this
-    is NOT a mirror: the ledger is an accruing book the agent manages
-    explicitly, so unmentioned open ideas stay open and deleting a report
-    leaves the book intact. The one mirror-like rule is same-day: open
-    ideas CREATED by (slug, report_date) that a same-day re-run no longer
-    mentions never really existed and are removed. Semantics:
-
-    - OPEN with an existing open (ticker, direction) idea updates thesis,
-      horizon, and target; entry price and opened date are preserved
-      (idempotent).
-    - HOLD updates the note and last_mentioned, keeping horizon/target
-      unless the bullet restates them; HOLD with no open idea is treated
-      as OPEN.
-    - CLOSE stamps closed_date/close_reason; CLOSE with nothing open is
-      ignored (an already-closed idea keeps its original close).
-
-    Everything shares one transaction, like replace_key_dates.
-    """
+    """Replay one report's fringe actions against the accruing ideas ledger."""
     init_db(path)
+    with _connect(path) as conn:
+        return _apply_fringe_actions(
+            conn,
+            slug=slug,
+            report_date=report_date,
+            actions=actions,
+        )
+
+
+def _apply_fringe_actions(
+    conn: sqlite3.Connection,
+    *,
+    slug: str,
+    report_date: str,
+    actions: Sequence[tuple[str, str, str, str, str | None, str | None]],
+) -> dict[str, int]:
     now = _to_iso(datetime.now(UTC))
     counts = {"opened": 0, "updated": 0, "closed": 0, "removed": 0}
     mentioned: set[tuple[str, str]] = set()
-    with _connect(path) as conn:
-        for action, ticker, direction, text, horizon, target in actions:
-            mentioned.add((ticker, direction))
-            row = conn.execute(
-                "SELECT id FROM fringe_ideas"
-                " WHERE ticker = ? AND direction = ? AND status = 'open'",
-                (ticker, direction),
-            ).fetchone()
-            if action == "close":
-                if row is None:
-                    continue
-                conn.execute(
-                    """
-                    UPDATE fringe_ideas
-                    SET status = 'closed', closed_date = ?, close_reason = ?,
-                        last_mentioned = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (report_date, text, report_date, now, int(row["id"])),
-                )
-                counts["closed"] += 1
-            elif row is not None:
-                # OPEN restates the idea (horizon/target replaced, even by
-                # nothing); HOLD only refreshes the note, keeping both
-                # unless the bullet restates them.
-                restate = "?" if action == "open" else "COALESCE(?, {})"
-                horizon_sql = restate.format("horizon")
-                target_sql = restate.format("target")
-                conn.execute(
-                    f"""
-                    UPDATE fringe_ideas
-                    SET thesis = ?, horizon = {horizon_sql}, target = {target_sql},
-                        last_mentioned = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (text, horizon, target, report_date, now, int(row["id"])),
-                )
-                counts["updated"] += 1
-            else:
-                conn.execute(
-                    """
-                    INSERT INTO fringe_ideas (
-                        ticker, direction, thesis, horizon, target, status,
-                        opened_date, last_mentioned, source_slug, created_at,
-                        updated_at
-                    ) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        ticker,
-                        direction,
-                        text,
-                        horizon,
-                        target,
-                        report_date,
-                        report_date,
-                        slug,
-                        now,
-                        now,
-                    ),
-                )
-                counts["opened"] += 1
-        # Same-day mirror: a re-run of (slug, report_date) is the authority
-        # on what it opened today; prior-day ideas are never rolled back.
-        rows = conn.execute(
-            "SELECT id, ticker, direction FROM fringe_ideas"
-            " WHERE source_slug = ? AND opened_date = ? AND status = 'open'",
-            (slug, report_date),
-        ).fetchall()
-        orphaned = [
-            (int(row["id"]),)
-            for row in rows
-            if (str(row["ticker"]), str(row["direction"])) not in mentioned
-        ]
-        conn.executemany("DELETE FROM fringe_ideas WHERE id = ?", orphaned)
-        counts["removed"] = len(orphaned)
+    for action, ticker, direction, text, horizon, target in actions:
+        mentioned.add((ticker, direction))
+        row = conn.execute(
+            "SELECT id FROM fringe_ideas"
+            " WHERE ticker = ? AND direction = ? AND status = 'open'",
+            (ticker, direction),
+        ).fetchone()
+        if action == "close":
+            if row is None:
+                continue
+            conn.execute(
+                """
+                UPDATE fringe_ideas
+                SET status = 'closed', closed_date = ?, close_reason = ?,
+                    last_mentioned = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (report_date, text, report_date, now, int(row["id"])),
+            )
+            counts["closed"] += 1
+        elif row is not None:
+            # OPEN replaces optional terms; HOLD preserves omitted ones.
+            restate = "?" if action == "open" else "COALESCE(?, {})"
+            horizon_sql = restate.format("horizon")
+            target_sql = restate.format("target")
+            conn.execute(
+                f"""
+                UPDATE fringe_ideas
+                SET thesis = ?, horizon = {horizon_sql}, target = {target_sql},
+                    last_mentioned = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (text, horizon, target, report_date, now, int(row["id"])),
+            )
+            counts["updated"] += 1
+        else:
+            conn.execute(
+                """
+                INSERT INTO fringe_ideas (
+                    ticker, direction, thesis, horizon, target, status,
+                    opened_date, last_mentioned, source_slug, created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)
+                """,
+                (
+                    ticker,
+                    direction,
+                    text,
+                    horizon,
+                    target,
+                    report_date,
+                    report_date,
+                    slug,
+                    now,
+                    now,
+                ),
+            )
+            counts["opened"] += 1
+
+    # Same-day re-runs authoritatively retract ideas they opened that day.
+    rows = conn.execute(
+        "SELECT id, ticker, direction FROM fringe_ideas"
+        " WHERE source_slug = ? AND opened_date = ? AND status = 'open'",
+        (slug, report_date),
+    ).fetchall()
+    orphaned = [
+        (int(row["id"]),)
+        for row in rows
+        if (str(row["ticker"]), str(row["direction"])) not in mentioned
+    ]
+    conn.executemany("DELETE FROM fringe_ideas WHERE id = ?", orphaned)
+    counts["removed"] = len(orphaned)
     return counts
 
 

@@ -1,6 +1,7 @@
 from datetime import date
 from typing import Any
 
+import httpx
 import pytest
 
 from app.models import AssetConfig
@@ -47,7 +48,7 @@ async def test_history_bounds_requests_reuses_client_and_closes(
     }
     monkeypatch.setattr(stooq_module, "_utc_today", lambda: date(2026, 7, 10))
     monkeypatch.setattr(
-        stooq_module.httpx,
+        httpx,
         "AsyncClient",
         lambda *args, **kwargs: FakeClient(tracker, *args, **kwargs),
     )

@@ -290,36 +290,37 @@ A single long-lived process is what this architecture wants: warm caches (no fun
 flicker), background quote/history loops, live WebSocket streaming, accruing daily
 snapshots, durable watchlist edits, and a dedicated rate-limit budget for Lighter/Yahoo.
 
-On a fresh Ubuntu 22.04/24.04 (or Debian 12) server, run one command:
+On a fresh Ubuntu 22.04/24.04 (or Debian 12) server, install Tailscale and join
+the server to your tailnet first. Then run:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MaybeNot2day/sector-tracker/main/deploy/setup-vps.sh | sudo bash
 ```
 
-It installs the app under `/opt/sector-tracker` with a dedicated system user, starts it
-via systemd on port 8787, and enables auto-deploy: the server polls `origin/main` every
-2 minutes and restarts itself when new commits land — pushing to GitHub is the whole
-deploy workflow. The script is idempotent; re-run it to repair an install.
+The idempotent installer puts the app under `/opt/sector-tracker`, binds Uvicorn
+to loopback, and publishes it only through Tailscale Serve HTTPS. The systemd
+unit runs as a dedicated, sandboxed user. Runtime installs use the hashed,
+fully pinned `requirements.txt`; the auto-deploy timer polls `origin/main`,
+restarts only after installing that lock, and rolls back any revision whose
+local `/api/health` check fails.
 
 ```bash
 # after setup
-open http://YOUR_SERVER_IP:8787
-journalctl -u sector-tracker -f          # logs
-systemctl restart sector-tracker         # manual restart
-```
-
-Viewing is public by design; watchlist edits should be locked before sharing the URL.
-Set `EDIT_TOKEN` and the create/delete endpoints require it — the editor prompts for
-the token once per browser and remembers it:
-
-```bash
-echo 'EDIT_TOKEN=pick-something-long' >> /opt/sector-tracker/.env
+open https://YOUR-TAILSCALE-DNS-NAME
+journalctl -u sector-tracker -f
 systemctl restart sector-tracker
 ```
 
-For a fully private board, install [Tailscale](https://tailscale.com) on the VPS and
-your devices (then firewall port 8787 to the tailnet), or front it with Caddy for
-HTTPS + basic auth.
+The setup generates a random `EDIT_TOKEN`; keep it in a password manager and
+configure the same value in the Hermes uploader. To rotate it:
+
+```bash
+sudo sed -i 's/^EDIT_TOKEN=.*/EDIT_TOKEN=NEW_RANDOM_VALUE/' /opt/sector-tracker/.env
+sudo systemctl restart sector-tracker
+```
+
+Read access is private to the tailnet. Mutation endpoints additionally require
+`X-Edit-Token`; the browser keeps that token only for the current tab session.
 
 ### Vercel
 

@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from time import monotonic
 from typing import Any
 
+import httpx
 import pytest
 
 from app.models import AssetConfig
@@ -59,7 +60,7 @@ class FakeHTTP:
                     result = result(dict(params or {}))
                 return result if isinstance(result, FakeResponse) else FakeResponse(result)
 
-        monkeypatch.setattr(lighter_module.httpx, "AsyncClient", _Client)
+        monkeypatch.setattr(httpx, "AsyncClient", _Client)
 
     def count(self, path: str) -> int:
         return sum(1 for requested, _ in self.requests if requested == path)

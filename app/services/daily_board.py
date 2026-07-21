@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -11,6 +12,8 @@ from typing import Any
 from app import db
 from app.models import AssetConfig, Bar, GroupConfig, ProviderName, Quote
 from app.services.macro import vix_read
+
+logger = logging.getLogger(__name__)
 
 SNAPSHOT_WRITE_INTERVAL_SECONDS = 300.0
 
@@ -25,6 +28,8 @@ class DailyBoardService:
     def __init__(self, database_path: Path) -> None:
         self.database_path = database_path
         self._last_snapshot_write = 0.0
+        self._last_snapshot_success_at: datetime | None = None
+        self._last_snapshot_error: str | None = None
 
     def build_board(
         self,
@@ -93,15 +98,25 @@ class DailyBoardService:
         if as_of_date and as_of_date != today:
             return
         snapshot_date = today
+        self._last_snapshot_write = now
         try:
             db.save_board_snapshot(self.database_path, snapshot_date, _snapshot_payload(overview))
-        except Exception:
-            # Swallowed on purpose (a snapshot miss must not break the board),
-            # but the throttle timestamp only advances on success — a failed
-            # save otherwise burned the whole 300s window.
-            pass
+        except Exception as exc:
+            self._last_snapshot_error = type(exc).__name__
+            logger.warning("daily board snapshot persistence failed", exc_info=True)
         else:
-            self._last_snapshot_write = now
+            self._last_snapshot_success_at = datetime.now(UTC)
+            self._last_snapshot_error = None
+
+    def snapshot_status(self) -> dict[str, object]:
+        return {
+            "last_success_at": (
+                self._last_snapshot_success_at.isoformat()
+                if self._last_snapshot_success_at is not None
+                else None
+            ),
+            "last_error": self._last_snapshot_error,
+        }
 
     def build(
         self,

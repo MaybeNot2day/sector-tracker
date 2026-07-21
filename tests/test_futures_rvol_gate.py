@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from app.models import AssetConfig, Bar, Quote
+from app.models import AssetConfig, AssetType, Bar, Quote
 from app.services.daily_board import _market_summary
 
 _TODAY = datetime(2026, 7, 3, 15, 30, tzinfo=UTC)
@@ -40,7 +40,7 @@ def _bars() -> list[Bar]:
     return completed + [_bar(_TODAY.replace(hour=14), 60.0)]
 
 
-def _quote(asset_type: str) -> Quote:
+def _quote(asset_type: AssetType) -> Quote:
     return Quote.from_last_and_prev_close(
         symbol="GC=F",
         asset_type=asset_type,
@@ -52,7 +52,7 @@ def _quote(asset_type: str) -> Quote:
     )
 
 
-def _summary(asset_type: str) -> dict[str, object]:
+def _summary(asset_type: AssetType) -> dict[str, object]:
     asset = AssetConfig(symbol="GC=F", type=asset_type, source="yahoo")
     return _market_summary(asset, _quote(asset_type), _bars())
 
@@ -62,7 +62,7 @@ def test_future_rvol_is_none_despite_computable_ratio() -> None:
 
 
 @pytest.mark.parametrize("asset_type", ["equity", "etf"])
-def test_non_future_rvol_is_computed(asset_type: str) -> None:
+def test_non_future_rvol_is_computed(asset_type: AssetType) -> None:
     assert _summary(asset_type)["rvol"] == 2.5
 
 

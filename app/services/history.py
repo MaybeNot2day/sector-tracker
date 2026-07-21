@@ -13,6 +13,9 @@ from app.providers.lighter import LighterProvider
 STALE_BAR_AGE = timedelta(hours=26)
 SELF_HEAL_COOLDOWN_SECONDS = 3600.0
 SELF_HEAL_BATCH = 4
+HISTORY_CACHE_SECONDS = 300.0
+INTRADAY_CACHE_SECONDS = 15.0
+HISTORY_FAILURE_CACHE_SECONDS = 15.0
 
 # Intraday candles come from Lighter when it lists the symbol: its synthetic
 # markets trade 24/7 and are not delayed. Daily/weekly history stays with the
@@ -25,6 +28,8 @@ class HistoryService:
         self.database_path = database_path
         self.providers = providers
         self._heal_attempts: dict[str, float] = {}
+        self._history_cache: dict[tuple[str, ProviderName, str, str], tuple[float, list[Bar]]] = {}
+        self._history_locks: dict[tuple[str, ProviderName, str, str], asyncio.Lock] = {}
 
     async def get_history(
         self,
@@ -39,6 +44,44 @@ class HistoryService:
             asset = await self._tape_asset(symbol)
         if asset is None:
             return []
+        cache_key = (asset.symbol, asset.source, interval, range_)
+        cached = self._cached_history(cache_key, interval)
+        if cached is not None:
+            return cached
+        lock = self._history_locks.setdefault(cache_key, asyncio.Lock())
+        async with lock:
+            cached = self._cached_history(cache_key, interval)
+            if cached is not None:
+                return cached
+            bars = await self._load_history(asset, interval=interval, range_=range_)
+            self._history_cache[cache_key] = (monotonic(), bars)
+            return bars
+
+    def _cached_history(
+        self,
+        cache_key: tuple[str, ProviderName, str, str],
+        interval: str,
+    ) -> list[Bar] | None:
+        cached = self._history_cache.get(cache_key)
+        if cached is None:
+            return None
+        cached_at, bars = cached
+        ttl = (
+            HISTORY_FAILURE_CACHE_SECONDS
+            if not bars
+            else INTRADAY_CACHE_SECONDS
+            if interval in INTRADAY_INTERVALS
+            else HISTORY_CACHE_SECONDS
+        )
+        return bars if monotonic() - cached_at < ttl else None
+
+    async def _load_history(
+        self,
+        asset: AssetConfig,
+        *,
+        interval: str,
+        range_: str,
+    ) -> list[Bar]:
         providers_to_try: list[QuoteProvider] = []
         lighter = self.providers.get("lighter")
         if (

@@ -51,8 +51,8 @@ class CryptoEtfFlowService:
         self._lock = asyncio.Lock()
 
     async def get_flows(self) -> dict[str, object]:
-        if self._cache_payload and time.monotonic() - self._cache_time < self.cache_seconds:
-            return self._cache_payload
+        if self._cache_is_fresh():
+            return self._cache_payload or {}
         if (
             self._failed_time is not None
             and time.monotonic() - self._failed_time < self.FAILURE_RETRY_SECONDS
@@ -61,8 +61,8 @@ class CryptoEtfFlowService:
         async with self._lock:
             # Herd guard: concurrent callers wait here; whoever lost the
             # race returns the winner's fresh cache instead of refetching.
-            if self._cache_payload and time.monotonic() - self._cache_time < self.cache_seconds:
-                return self._cache_payload
+            if self._cache_is_fresh():
+                return self._cache_payload or {}
             if (
                 self._failed_time is not None
                 and time.monotonic() - self._failed_time < self.FAILURE_RETRY_SECONDS
@@ -96,7 +96,7 @@ class CryptoEtfFlowService:
                 if isinstance(cached_assets, list)
                 else {}
             )
-            carried = False
+            missing = [symbol for symbol in FARSIDE_ASSETS if symbol not in fetched]
             merged: list[dict[str, object]] = []
             for symbol in FARSIDE_ASSETS:
                 entry = fetched.get(symbol)
@@ -104,18 +104,31 @@ class CryptoEtfFlowService:
                     entry = cached_by_symbol.get(symbol)
                     if entry is None:
                         continue
-                    carried = True
                 merged.append(entry)
             payload: dict[str, object] = {
                 "status": "ok",
                 "source": "farside",
                 "updated_at": datetime.now(UTC).isoformat(),
-                "is_stale": carried,
+                "is_stale": bool(missing),
                 "assets": merged,
             }
+            if missing:
+                payload["error"] = "farside_partial_data"
+                payload["missing_assets"] = missing
             self._cache_payload = payload
             self._cache_time = time.monotonic()
             return payload
+
+    def _cache_is_fresh(self) -> bool:
+        if self._cache_payload is None:
+            return False
+        ttl = (
+            self.FAILURE_RETRY_SECONDS
+            if self._cache_payload.get("is_stale")
+            else self.cache_seconds
+        )
+        return time.monotonic() - self._cache_time < ttl
+
 
     def _degraded(self, error: str, detail: str | None = None) -> dict[str, object]:
         if self._cache_payload:

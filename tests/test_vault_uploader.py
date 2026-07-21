@@ -15,6 +15,7 @@ import urllib.error
 from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -55,7 +56,14 @@ class _PostRecorder:
         self.calls: list[tuple[str, str, str, str, str]] = []
         self.fail_times = 0
 
-    def __call__(self, base_url: str, token: str, title: str, date_text: str, body: str) -> dict:
+    def __call__(
+        self,
+        base_url: str,
+        token: str,
+        title: str,
+        date_text: str,
+        body: str,
+    ) -> dict[str, object]:
         self.calls.append((base_url, token, title, date_text, body))
         if self.fail_times > 0:
             self.fail_times -= 1
@@ -69,7 +77,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     vault.mkdir()
     config_path = tmp_path / "uploader.env"
     config_path.write_text(
-        "BOARD_URL=http://board.test:8787\n"
+        "BOARD_URL=https://board.test\n"
         "EDIT_TOKEN=sekrit\n"
         f"VAULT_DIR={vault}\n"
         "MAX_AGE_DAYS=30\n"
@@ -83,8 +91,8 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     return SimpleNamespace(vault=vault, config=config_path, state=state_path, post=post)
 
 
-def _read_state(env: SimpleNamespace) -> dict:
-    return json.loads(env.state.read_text(encoding="utf-8"))
+def _read_state(env: SimpleNamespace) -> dict[str, str]:
+    return cast(dict[str, str], json.loads(env.state.read_text(encoding="utf-8")))
 
 
 # --- parse_report_name -------------------------------------------------------
@@ -243,7 +251,11 @@ def test_save_state_overwrites_previous_contents(tmp_path: Path) -> None:
         pytest.param('{"x.md": 5}', {"x.md": "5"}, id="values-coerced-to-str"),
     ],
 )
-def test_load_state_tolerates_bad_files(tmp_path: Path, content: str, expected: dict) -> None:
+def test_load_state_tolerates_bad_files(
+    tmp_path: Path,
+    content: str,
+    expected: dict[str, str],
+) -> None:
     state_path = tmp_path / "uploads.json"
     state_path.write_text(content, encoding="utf-8")
     assert uploader.load_state(state_path) == expected
@@ -291,6 +303,20 @@ def test_load_config_parses_key_values_and_skips_noise(tmp_path: Path) -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://board.example", True),
+        ("http://localhost:8787", True),
+        ("http://127.0.0.1:8787", True),
+        ("http://board.example:8787", False),
+        ("file:///tmp/report", False),
+    ],
+)
+def test_secure_board_url_policy(url: str, expected: bool) -> None:
+    assert uploader._is_secure_board_url(url) is expected
+
+
 def test_load_config_missing_file_returns_empty(tmp_path: Path) -> None:
     assert uploader.load_config(tmp_path / "absent.env") == {}
 
@@ -327,7 +353,7 @@ def test_run_exits_2_when_vault_dir_missing(
 ) -> None:
     config_path = tmp_path / "uploader.env"
     config_path.write_text(
-        "BOARD_URL=http://board.test:8787\n"
+        "BOARD_URL=https://board.test\n"
         "EDIT_TOKEN=sekrit\n"
         f"VAULT_DIR={tmp_path / 'no-such-vault'}\n",
         encoding="utf-8",
@@ -412,7 +438,7 @@ def test_new_file_uploads_once_then_skips(env: SimpleNamespace) -> None:
 
     assert uploader.run([]) == 0
     assert env.post.calls == [
-        ("http://board.test:8787", "sekrit", "Morning Brief", _TODAY_TEXT, body)
+        ("https://board.test", "sekrit", "Morning Brief", _TODAY_TEXT, body)
     ]
     assert _read_state(env) == {name: _sha(body)}
 

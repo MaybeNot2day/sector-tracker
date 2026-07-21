@@ -1,6 +1,7 @@
 import asyncio
 import threading
 import time
+from typing import Any, cast
 
 import pytest
 
@@ -290,6 +291,21 @@ def test_fetch_assets_sync_is_bounded_concurrent_ordered_and_best_effort(
     assert [asset["asset"] for asset in surviving_assets] == ["BTC", "SOL"]
 
 
+def test_cold_partial_fetch_reports_missing_assets_as_stale() -> None:
+    service = CryptoEtfFlowService()
+    service._fetch_assets_sync = lambda: [  # type: ignore[method-assign]
+        {"asset": "BTC", "name": "BTC Spot ETFs"},
+    ]
+
+    payload = asyncio.run(service.get_flows())
+
+    assert payload["is_stale"] is True
+    assert payload["error"] == "farside_partial_data"
+    assert payload["missing_assets"] == ["ETH", "SOL"]
+    assets = cast(list[dict[str, Any]], payload["assets"])
+    assert [entry["asset"] for entry in assets] == ["BTC"]
+
+
 def test_get_flows_carries_cached_assets_through_partial_fetch() -> None:
     # Regression: a partial cycle (only BTC survives) used to replace the
     # full cached payload with status ok / is_stale False, hiding the good
@@ -310,4 +326,5 @@ def test_get_flows_carries_cached_assets_through_partial_fetch() -> None:
     second = asyncio.run(service.get_flows())
 
     assert second["is_stale"] is True
-    assert [entry["asset"] for entry in second["assets"]] == ["BTC", "ETH", "SOL"]  # type: ignore[index]
+    assets = cast(list[dict[str, Any]], second["assets"])
+    assert [entry["asset"] for entry in assets] == ["BTC", "ETH", "SOL"]
