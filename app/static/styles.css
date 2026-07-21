@@ -56,21 +56,6 @@
   /* Tracking for the small uppercase labels that carry the institutional feel */
   --track-label: 0.07em;
   --track-tab: 0.09em;
-  /* Density: Comfortable defaults; [data-density="compact"] tightens spacing
-     only — font sizes never change between modes. */
-  --den-gap: 14px;
-  --den-heading-min: 36px;
-  --den-regime-min: 88px;
-  --den-regime-pad: 14px;
-  --den-bench-min: 132px;
-  --den-bench-pad: 13px;
-  --den-breadth-min: 29px;
-  --den-theme-row: 36px;
-  --den-keydate-min: 44px;
-  --den-keydate-pad: 5px;
-  --den-fringe-pad: 6px;
-  --den-rot-min: 34px;
-  --den-cell-pad: 7px;
 }
 
 :root[data-theme="light"] {
@@ -126,22 +111,6 @@
   --chart-ma-20: #8b6a20;
   --chart-ma-50: #2f6f9f;
   --chart-ma-200: #73519a;
-}
-
-:root[data-density="compact"] {
-  --den-gap: 10px;
-  --den-heading-min: 30px;
-  --den-regime-min: 62px;
-  --den-regime-pad: 8px;
-  --den-bench-min: 100px;
-  --den-bench-pad: 8px;
-  --den-breadth-min: 24px;
-  --den-theme-row: 29px;
-  --den-keydate-min: 34px;
-  --den-keydate-pad: 2px;
-  --den-fringe-pad: 3px;
-  --den-rot-min: 28px;
-  --den-cell-pad: 4px;
 }
 
 * {
@@ -588,18 +557,6 @@ h1 {
   display: block;
 }
 
-.density-icon-comfortable {
-  display: none;
-}
-
-:root[data-density="compact"] .density-icon-compact {
-  display: none;
-}
-
-:root[data-density="compact"] .density-icon-comfortable {
-  display: block;
-}
-
 .toolbar-button:hover,
 .toolbar-button:focus-visible,
 .icon-button:hover,
@@ -700,7 +657,7 @@ h1 {
 
 .daily-board {
   display: grid;
-  gap: var(--den-gap);
+  gap: 14px;
 }
 
 /* One-time boot: panels rise in staggered on the first data paint. */
@@ -724,7 +681,7 @@ h1 {
 }
 
 .panel-heading {
-  min-height: var(--den-heading-min);
+  min-height: 36px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -863,12 +820,12 @@ h1 {
 
 .regime-cell {
   min-width: 0;
-  min-height: var(--den-regime-min);
+  min-height: 88px;
   display: flex;
   flex-direction: column;
   justify-content: center;
   gap: 6px;
-  padding: var(--den-regime-pad) 16px;
+  padding: 14px 16px;
   border-right: 1px solid var(--line);
 }
 
@@ -955,7 +912,7 @@ h1 {
 .analytics-grid {
   display: grid;
   grid-template-columns: 1.4fr 1fr;
-  gap: var(--den-gap);
+  gap: 14px;
 }
 
 .analytics-grid.equal {
@@ -973,12 +930,12 @@ h1 {
 
 .benchmark-card {
   min-width: 0;
-  min-height: var(--den-bench-min);
+  min-height: 132px;
   border: 0;
   border-right: 1px solid var(--line);
   background: transparent;
   cursor: pointer;
-  padding: var(--den-bench-pad) 14px;
+  padding: 13px 14px;
   text-align: left;
   transition: background 0.12s ease, transform 0.16s ease, box-shadow 0.16s ease;
 }
@@ -1069,7 +1026,7 @@ h1 {
 }
 
 .breadth-row {
-  min-height: var(--den-breadth-min);
+  min-height: 29px;
   border-bottom: 1px solid var(--line-soft);
 }
 
@@ -1200,7 +1157,7 @@ h1 {
 
 .theme-table th,
 .theme-table td {
-  height: var(--den-theme-row);
+  height: 36px;
   overflow: hidden;
   border-bottom: 1px solid var(--line-soft);
   padding: 0 10px;
@@ -1366,12 +1323,12 @@ h1 {
 }
 
 .key-date-row {
-  min-height: var(--den-keydate-min);
+  min-height: 44px;
   display: grid;
   grid-template-columns: 40px minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
-  padding: var(--den-keydate-pad) 14px;
+  padding: 5px 14px;
   border-bottom: 1px solid var(--line-soft);
 }
 
@@ -1597,8 +1554,8 @@ a.key-date-row:focus-visible {
 }
 
 .fringe-row td {
-  padding-top: var(--den-fringe-pad);
-  padding-bottom: var(--den-fringe-pad);
+  padding-top: 6px;
+  padding-bottom: 6px;
   border-bottom: 1px solid var(--line-soft);
   color: var(--muted-strong);
   vertical-align: middle;
@@ -1775,7 +1732,7 @@ a.key-date-row:focus-visible {
 }
 
 .rotation-row {
-  min-height: var(--den-rot-min);
+  min-height: 34px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 64px 76px;
   align-items: center;
@@ -2107,7 +2064,7 @@ a.key-date-row:focus-visible {
 .asset-row span {
   min-width: 0;
   overflow: hidden;
-  padding: var(--den-cell-pad) 9px;
+  padding: 7px 9px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -3173,12 +3130,6 @@ a.key-date-row:focus-visible {
     min-width: 44px;
     min-height: 44px;
     padding: 0;
-  }
-
-  /* Density is a desktop feature; phones keep Comfortable and its 44px
-     touch targets. */
-  #density-toggle {
-    display: none;
   }
 
   .help-tip {

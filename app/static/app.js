@@ -8,7 +8,6 @@ const liveFreshness = document.querySelector("#live-freshness");
 const feedModeLabel = document.querySelector("#feed-mode");
 const refreshButton = document.querySelector("#refresh-button");
 const themeToggle = document.querySelector("#theme-toggle");
-const densityToggle = document.querySelector("#density-toggle");
 const viewButtons = Array.from(document.querySelectorAll(".view-tabs button"));
 const dailyView = document.querySelector("#daily-view");
 const marketsView = document.querySelector("#markets-view");
@@ -105,7 +104,6 @@ const NEWS_OPEN_KEY = "news-open";
 // Muted news channels, persisted per browser.
 const NEWS_MUTED_KEY = "news-muted-channels-v1";
 const THEME_STORAGE_KEY = "board-theme";
-const DENSITY_STORAGE_KEY = "board-density";
 let mutedNewsChannels = new Set();
 try {
   mutedNewsChannels = new Set(JSON.parse(localStorage.getItem(NEWS_MUTED_KEY) || "[]"));
@@ -320,23 +318,6 @@ function setTheme(theme, persist = false) {
   }
 }
 
-function setDensity(density, persist = false) {
-  const compact = density === "compact";
-  if (compact) document.documentElement.dataset.density = "compact";
-  else delete document.documentElement.dataset.density;
-  densityToggle.setAttribute("aria-pressed", String(compact));
-  const label = compact ? "Switch to comfortable density" : "Switch to compact density";
-  densityToggle.setAttribute("aria-label", label);
-  densityToggle.title = label;
-  if (!persist) return;
-  try {
-    localStorage.setItem(DENSITY_STORAGE_KEY, compact ? "compact" : "comfortable");
-  } catch (error) {
-    // Private browsing can deny storage; the active density still applies.
-  }
-}
-
-
 init();
 
 // --- URL state ------------------------------------------------------------
@@ -432,7 +413,6 @@ function openPendingChartFromUrl() {
 
 function init() {
   setTheme(document.documentElement.dataset.theme === "light" ? "light" : "dark");
-  setDensity(document.documentElement.dataset.density === "compact" ? "compact" : "comfortable");
   setupHelpTooltips();
   // icons are inline SVG; no icon library needed
   setConnection("connecting");
@@ -505,12 +485,6 @@ function init() {
   newsClose.addEventListener("click", () => setNewsOpen(false));
   themeToggle.addEventListener("click", () => {
     setTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light", true);
-  });
-  densityToggle.addEventListener("click", () => {
-    setDensity(
-      document.documentElement.dataset.density === "compact" ? "comfortable" : "compact",
-      true
-    );
   });
   newsChannelsBar.addEventListener("click", (event) => {
     const chip = event.target.closest("button[data-channel]");
