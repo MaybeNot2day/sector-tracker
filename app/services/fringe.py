@@ -154,14 +154,17 @@ class FringeService:
         await self._load_and_restamp()
 
     async def payload(self) -> dict[str, object]:
-        """The /api/fringe contract: open book marked to market + recent closes."""
+        """The /api/fringe contract: marked book, performance, recent closes."""
         open_rows, closed_rows = await self._load_and_restamp()
         latest = await asyncio.to_thread(db.latest_fringe_mention, self.database_path)
         prices = await self._prices_for({str(row["ticker"]) for row in open_rows})
+        open_items = [_open_item(row, prices.get(str(row["ticker"])), latest) for row in open_rows]
+        closed_items = [_closed_item(row) for row in closed_rows]
         return {
             "as_of": datetime.now(UTC).isoformat(),
-            "open": [_open_item(row, prices.get(str(row["ticker"])), latest) for row in open_rows],
-            "closed": [_closed_item(row) for row in closed_rows],
+            "summary": _performance_summary(open_items, closed_items),
+            "open": open_items,
+            "closed": closed_items[: self.RECENT_CLOSED],
         }
 
     async def _load_and_restamp(
@@ -172,7 +175,7 @@ class FringeService:
             db.load_fringe_ideas, self.database_path, status="open"
         )
         closed_rows = await asyncio.to_thread(
-            db.load_fringe_ideas, self.database_path, status="closed", limit=self.RECENT_CLOSED
+            db.load_fringe_ideas, self.database_path, status="closed"
         )
         need_entry = [row for row in open_rows if row["entry_price"] is None]
         need_exit = [row for row in closed_rows if row["exit_price"] is None]
@@ -305,6 +308,29 @@ def _closed_item(row: dict[str, object]) -> dict[str, object]:
         "exit_price": _round_price(row["exit_price"]),
         "realized_pct": _pnl_pct(str(row["direction"]), row["entry_price"], row["exit_price"]),
         "close_reason": row["close_reason"],
+    }
+
+
+def _performance_summary(
+    open_items: list[dict[str, object]], closed_items: list[dict[str, object]]
+) -> dict[str, object]:
+    """Equal-weight return across every marked open and realized closed idea."""
+    pnl_values: list[float] = []
+    for item in open_items:
+        value = item["unrealized_pct"]
+        if isinstance(value, int | float):
+            pnl_values.append(float(value))
+    for item in closed_items:
+        value = item["realized_pct"]
+        if isinstance(value, int | float):
+            pnl_values.append(float(value))
+    overall = round(sum(pnl_values) / len(pnl_values), 2) if pnl_values else None
+    return {
+        "overall_pnl_pct": 0.0 if overall == 0 else overall,
+        "marked_count": len(pnl_values),
+        "idea_count": len(open_items) + len(closed_items),
+        "open_count": len(open_items),
+        "closed_count": len(closed_items),
     }
 
 

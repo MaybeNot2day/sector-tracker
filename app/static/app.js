@@ -2097,9 +2097,31 @@ function fringeSection(payload) {
   const open = Array.isArray(payload?.open) ? payload.open : [];
   const closed = Array.isArray(payload?.closed) ? payload.closed : [];
   if (!open.length && !closed.length) return "";
+  const summary = payload?.summary || {};
+  const openCount = Number.isInteger(summary.open_count) ? summary.open_count : open.length;
+  const closedCount = Number.isInteger(summary.closed_count) ? summary.closed_count : closed.length;
+  let overallPnl = numericOrNull(summary.overall_pnl_pct);
+  if (overallPnl === null) {
+    let total = 0;
+    let marked = 0;
+    for (const idea of open) {
+      const pct = numericOrNull(idea.unrealized_pct);
+      if (pct === null) continue;
+      total += pct;
+      marked += 1;
+    }
+    for (const idea of closed) {
+      const pct = numericOrNull(idea.realized_pct);
+      if (pct === null) continue;
+      total += pct;
+      marked += 1;
+    }
+    overallPnl = marked ? total / marked : null;
+  }
   const note = [
-    open.length ? `${open.length} open` : "",
-    closed.length ? `${closed.length} closed` : "",
+    openCount ? `${openCount} open` : "",
+    closedCount ? `${closedCount} closed` : "",
+    `overall P&L ${overallPnl === null ? "\u2014" : formatSignedPct(overallPnl)}`,
   ]
     .filter(Boolean)
     .join(" \u00b7 ");
@@ -2107,7 +2129,7 @@ function fringeSection(payload) {
     ${panelHeading(
       "Fringe Corner",
       note,
-      "Hermes' daily trading-ideas book, fed by uploaded agent reports. Entry prices are stamped when an idea first appears and open ideas mark to market. TARGET is the agent's stated objective and TO GO the move still left from the current mark. NOT REFRESHED means the newest report did not mention a still-open idea. Click a ticker to open its chart."
+      "Hermes' daily trading-ideas book, fed by uploaded agent reports. Entry prices are stamped when an idea first appears and open ideas mark to market. Overall P&L is the equal-weight mean of every marked open idea and realized closed idea; ideas without a usable price are excluded. TARGET is the agent's stated objective and TO GO the move still left from the current mark. NOT REFRESHED means the newest report did not mention a still-open idea. Click a ticker to open its chart."
     )}
     ${fringeOpenTable(open)}
     ${fringeClosedList(closed)}

@@ -196,6 +196,10 @@ def test_daily_board_loads_without_page_errors_and_renders_core_sections(
     # Fringe Corner: Hermes' ideas blotter — direction chip, marked P&L,
     # target + distance-to-go, a missing price rendering as an em dash, the
     # in-row thesis and stale marker, and the compact closed footer.
+    fringe_heading = page.locator("#daily-board .analytics-panel").filter(
+        has=page.get_by_role("heading", name="Fringe Corner")
+    ).locator(".panel-heading > span")
+    expect(fringe_heading).to_have_text("3 open · 2 closed · overall P&L +1.92%")
     fringe_rows = page.locator("#daily-board .fringe-row")
     expect(fringe_rows).to_have_count(3)
     expect(fringe_rows.nth(0).locator(".fringe-chip")).to_have_text("LONG")

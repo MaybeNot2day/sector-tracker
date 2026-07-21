@@ -441,6 +441,13 @@ def test_fringe_route_stamps_entries_and_routes_lighter_vs_yahoo(
     assert by_ticker["BTC"]["target"] is None
     assert by_ticker["BTC"]["target_price"] is None
     assert by_ticker["BTC"]["to_target_pct"] is None
+    assert payload["summary"] == {
+        "overall_pnl_pct": 2.08,
+        "marked_count": 2,
+        "idea_count": 2,
+        "open_count": 2,
+        "closed_count": 0,
+    }
     assert payload["closed"] == []
 
 
@@ -529,6 +536,13 @@ def test_close_stamps_exit_price_and_realized_pnl(
     assert item["close_reason"] == "earnings played out"
     assert item["opened"] == "2026-07-10"
     assert item["closed"] == "2026-07-16"
+    assert payload["summary"] == {
+        "overall_pnl_pct": 8.05,
+        "marked_count": 1,
+        "idea_count": 1,
+        "open_count": 0,
+        "closed_count": 1,
+    }
 
 
 # --- etf flow history ----------------------------------------------------------
