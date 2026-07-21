@@ -316,6 +316,47 @@ def test_theme_toggle_persists_light_mode(page: Page, base_url: str) -> None:
     expect(page.locator("#theme-toggle")).to_have_attribute("aria-pressed", "false")
 
 
+def test_density_toggle_tightens_spacing_and_persists(page: Page, base_url: str) -> None:
+    _goto_board(page, base_url)
+    root = page.locator("html")
+    toggle = page.locator("#density-toggle")
+
+    expect(toggle).to_have_attribute("aria-label", "Switch to compact density")
+    comfortable = page.evaluate(
+        """() => ({
+          regime: document.querySelector('.regime-cell').getBoundingClientRect().height,
+          keyDateMin: getComputedStyle(document.documentElement)
+            .getPropertyValue('--den-keydate-min').trim(),
+        })"""
+    )
+    assert comfortable["keyDateMin"] == "44px"
+
+    toggle.click()
+    expect(root).to_have_attribute("data-density", "compact")
+    expect(toggle).to_have_attribute("aria-pressed", "true")
+    expect(toggle).to_have_attribute("aria-label", "Switch to comfortable density")
+    compact = page.evaluate(
+        """() => ({
+          regime: document.querySelector('.regime-cell').getBoundingClientRect().height,
+          keyDateMin: getComputedStyle(document.documentElement)
+            .getPropertyValue('--den-keydate-min').trim(),
+          stored: localStorage.getItem('board-density'),
+        })"""
+    )
+    assert compact["keyDateMin"] == "34px"
+    assert compact["stored"] == "compact"
+    assert compact["regime"] < comfortable["regime"]
+
+    # The head script applies the stored density before first paint.
+    page.reload(wait_until="domcontentloaded")
+    expect(page.locator("html")).to_have_attribute("data-density", "compact")
+    expect(page.locator("#density-toggle")).to_have_attribute("aria-pressed", "true")
+
+    page.locator("#density-toggle").click()
+    expect(page.locator("html")).not_to_have_attribute("data-density", "compact")
+    assert page.evaluate("() => localStorage.getItem('board-density')") == "comfortable"
+
+
 def test_daily_board_hides_fringe_panel_when_book_is_empty(page: Page, base_url: str) -> None:
     # Routes registered later win in Playwright, so this overrides only the
     # fixture's /api/fringe stub; every other endpoint keeps its data.

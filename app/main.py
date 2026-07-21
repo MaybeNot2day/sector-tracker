@@ -201,7 +201,7 @@ SECURITY_HEADERS = (
     (
         b"content-security-policy",
         b"default-src 'self'; "
-        b"script-src 'self' 'sha256-lzStUcqAQVQGXafGBmFjwHSxC/uBQ+JRbPX12Zt3sew='; "
+        b"script-src 'self' 'sha256-q7e6J1QI2T7cU7FmeJyBQCzofFH2eb0qNP3OascPiUo='; "
         b"style-src 'self'; style-src-attr 'unsafe-inline'; "
         b"font-src 'self'; img-src 'self' data:; "
         b"connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; "

@@ -15,9 +15,12 @@
         if (localStorage.getItem("board-theme") === "light") {
           document.documentElement.dataset.theme = "light";
         }
+        if (localStorage.getItem("board-density") === "compact") {
+          document.documentElement.dataset.density = "compact";
+        }
       } catch {}
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260722-3" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260722-4" />
   </head>
   <body>
     <aside id="news-panel" class="news-panel" aria-label="Live Telegram news" aria-hidden="true" inert>
@@ -80,6 +83,17 @@
         >
           <svg class="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41"/></svg>
           <svg class="theme-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/></svg>
+        </button>
+        <button
+          id="density-toggle"
+          class="icon-button"
+          type="button"
+          aria-label="Switch to compact density"
+          aria-pressed="false"
+          title="Switch to compact density"
+        >
+          <svg class="density-icon-compact" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4.5h18M3 9.5h18M3 14.5h18M3 19.5h18"/></svg>
+          <svg class="density-icon-comfortable" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h18M3 12h18M3 19h18"/></svg>
         </button>
         <button
           id="news-toggle"
@@ -331,6 +345,6 @@
 
     <div id="help-tooltip" class="help-tooltip" role="tooltip" hidden></div>
 
-    <script src="/static/app.js?v=20260722-2" defer></script>
+    <script src="/static/app.js?v=20260722-4" defer></script>
   </body>
 </html>
