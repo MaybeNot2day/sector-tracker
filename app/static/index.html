@@ -4,12 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Cross-Asset Market Board</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
-      rel="stylesheet"
-    />
+    <link rel="preload" href="/static/fonts/ibm-plex-mono-latin-400.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/static/fonts/ibm-plex-mono-latin-600.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/static/fonts/ibm-plex-sans-latin-400.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/static/fonts.css?v=20260722-3" />
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=20260710-1" />
     <link rel="apple-touch-icon" href="/static/apple-touch-icon.png?v=20260710-1" />
     <script>
@@ -19,7 +17,7 @@
         }
       } catch {}
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260722-2" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260722-3" />
   </head>
   <body>
     <aside id="news-panel" class="news-panel" aria-label="Live Telegram news" aria-hidden="true" inert>

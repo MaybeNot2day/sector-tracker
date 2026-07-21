@@ -202,8 +202,8 @@ SECURITY_HEADERS = (
         b"content-security-policy",
         b"default-src 'self'; "
         b"script-src 'self' 'sha256-lzStUcqAQVQGXafGBmFjwHSxC/uBQ+JRbPX12Zt3sew='; "
-        b"style-src 'self' https://fonts.googleapis.com; style-src-attr 'unsafe-inline'; "
-        b"font-src https://fonts.gstatic.com; img-src 'self' data:; "
+        b"style-src 'self'; style-src-attr 'unsafe-inline'; "
+        b"font-src 'self'; img-src 'self' data:; "
         b"connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; "
         b"frame-ancestors 'none'; form-action 'self'",
     ),
