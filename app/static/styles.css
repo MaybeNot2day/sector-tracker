@@ -1328,8 +1328,8 @@ h1 {
   gap: 3px;
 }
 
-/* Rows are external links (ForexFactory day view); keep them looking like
-   rows, with a hover wash as the click affordance. */
+/* Only rows with a verified source URL are links. Keep those anchors looking
+   like rows, with a hover wash as the click affordance. */
 a.key-date-row {
   color: inherit;
   cursor: pointer;

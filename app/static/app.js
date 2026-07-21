@@ -2123,13 +2123,6 @@ function keyDatesList(items, payload) {
   return `<div class="key-dates-list" data-scroll-keep="key-dates">${items.map((item) => keyDateRow(item, asOf)).join("")}</div>`;
 }
 
-// Unmatched events fall back to ForexFactory's day view. Enriched releases
-// instead link to their exact TradingView series (the source of the figures).
-function keyDateCalendarUrl(dateText) {
-  const [year, month, day] = String(dateText || "").split("-").map(Number);
-  if (!year || !month || !day) return "";
-  return `https://www.forexfactory.com/calendar?day=${KEY_DATE_MONTHS[month - 1].toLowerCase()}${day}.${year}`;
-}
 
 function keyDateRow(item, asOf) {
   const [, month, day] = String(item.date || "").split("-").map(Number);
@@ -2147,7 +2140,7 @@ function keyDateRow(item, asOf) {
   ].filter(Boolean).join(" \u00b7 ");
   const tooltip = tooltipText ? ` title="${escapeHtml(tooltipText)}"` : "";
   const high = release?.importance === 1;
-  const href = release?.series_url || keyDateCalendarUrl(item.date);
+  const href = release?.series_url || "";
   const [tagOpen, tagClose] = href
     ? [`<a href="${escapeHtml(href)}" target="_blank" rel="noopener"`, "</a>"]
     : ["<div", "</div>"];

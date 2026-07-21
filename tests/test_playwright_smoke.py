@@ -188,6 +188,12 @@ def test_daily_board_loads_without_page_errors_and_renders_core_sections(
         "EST 0.3% · PREV 0.4% · ACT —"
     )
     expect(key_date_rows.nth(2).locator(".key-date-figures")).to_have_count(0)
+    # Unmatched events and enriched releases without a verified series URL
+    # remain plain rows. A generic calendar page is not evidence for the event.
+    assert key_date_rows.nth(1).evaluate("row => row.tagName") == "DIV"
+    assert key_date_rows.nth(1).get_attribute("href") is None
+    assert key_date_rows.nth(2).evaluate("row => row.tagName") == "DIV"
+    assert key_date_rows.nth(2).get_attribute("href") is None
 
     # Fringe Corner: Hermes' ideas blotter — direction chip, marked P&L,
     # target + distance-to-go, a missing price rendering as an em dash, the
