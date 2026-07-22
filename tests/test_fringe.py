@@ -891,12 +891,20 @@ def test_legacy_open_ideas_are_grandfathered_at_1000(tmp_path: Path) -> None:
         " 'closed', '2026-07-17', '2026-07-22', 853.2, 970.82, '2026-07-22',"
         " 'fringe-corner', 'x', 'x')"
     )
+    conn.execute(
+        "INSERT INTO fringe_ideas (ticker, direction, thesis, status,"
+        " opened_date, closed_date, last_mentioned, source_slug, created_at,"
+        " updated_at) VALUES ('GHOST', 'long', 't', 'closed', '2026-07-01',"
+        " '2026-07-02', '2026-07-02', 'fringe-corner', 'x', 'x')"
+    )
     conn.commit()
     conn.close()
 
     (open_idea,) = db.load_fringe_ideas(path, status="open")
-    (closed_idea,) = db.load_fringe_ideas(path, status="closed")
-    # Migration grandfathers live positions at a flat $1,000; historical
-    # closes stay unsized (%-only, no retroactive dollars).
+    closed = {row["ticker"]: row for row in db.load_fringe_ideas(path, status="closed")}
+    # Migration grandfathers every pre-capital idea at a flat $1,000 — live
+    # positions AND priced closes (their realized dollars join the bankroll).
+    # A close that never got prices has no honest dollars and stays unsized.
     assert open_idea["size_notional"] == 1000.0
-    assert closed_idea["size_notional"] is None
+    assert closed["MU"]["size_notional"] == 1000.0
+    assert closed["GHOST"]["size_notional"] is None

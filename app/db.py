@@ -179,11 +179,21 @@ def init_db(path: Path) -> None:
             sized_added = _ensure_column(conn, "fringe_ideas", "size_notional", "REAL")
             if sized_added:
                 # Pre-capital open ideas are grandfathered at a flat $1,000
-                # of the $10k paper book; historical closes stay %-only.
+                # of the $10k paper book.
                 conn.execute(
                     "UPDATE fringe_ideas SET size_notional = 1000.0"
                     " WHERE status = 'open' AND size_notional IS NULL"
                 )
+            # Pre-capital CLOSES get the same flat $1,000 so their realized
+            # dollars enter the bankroll. Safe to replay forever: under the
+            # sizing regime a position is sized in the same pass that stamps
+            # its entry, so "closed + priced + unsized" can only describe
+            # rows that predate the capital era.
+            conn.execute(
+                "UPDATE fringe_ideas SET size_notional = 1000.0"
+                " WHERE status = 'closed' AND size_notional IS NULL"
+                " AND entry_price IS NOT NULL AND exit_price IS NOT NULL"
+            )
             _seed_key_date_sources(conn)
             _quarantine_invalid_bars(conn)
         _initialized_paths.add(resolved)

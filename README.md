@@ -180,8 +180,9 @@ and 100% gross exposure; bankroll = $10k + cumulative realized dollars), and fix
 the notional for the life of the position — HOLD never resizes. Missing or
 geometrically broken conf/stop inputs fall back to a 5% default. `/api/fringe`
 carries per-idea `size_notional`, `unrealized_usd`/`realized_usd`, and a
-`summary.portfolio` block (equity, return, exposure); pre-capital positions were
-grandfathered at $1,000 each and historical closes stay %-only.
+`summary.portfolio` block (equity, return, exposure); every pre-capital idea —
+open positions and priced closes alike — was grandfathered at a flat $1,000, so
+historical realized results count in dollars too.
 
 Hermes manages its own book explicitly — unlike Key Dates the ledger **accrues**
 instead of mirroring. `OPEN` on an already-open `(ticker, direction)` idea just
