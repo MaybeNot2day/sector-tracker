@@ -640,7 +640,28 @@ def _trade_stats(
         "worst": _stat_trade(worst),
         "avg_hold_days": round(sum(hold_days) / len(hold_days), 1) if hold_days else None,
         "max_drawdown_pct": round(max_drawdown * 100.0, 2),
+        "sharpe_ratio": _sharpe_ratio(curve),
     }
+
+
+def _sharpe_ratio(curve: list[dict[str, object]]) -> float | None:
+    """Annualized Sharpe (rf = 0) from mark-to-mark returns of the equity
+    curve. None until there are at least two returns with any variance —
+    early readings are small-sample noise and converge as marks accrue."""
+    equities = [float(str(point["equity"])) for point in curve]
+    returns = [
+        equities[i] / equities[i - 1] - 1.0
+        for i in range(1, len(equities))
+        if equities[i - 1] > 0
+    ]
+    if len(returns) < 2:
+        return None
+    mean = sum(returns) / len(returns)
+    variance = sum((value - mean) ** 2 for value in returns) / (len(returns) - 1)
+    std = variance**0.5
+    if std == 0:
+        return None
+    return round(mean / std * 252.0**0.5, 2)
 
 
 def _stat_trade(item: dict[str, object] | None) -> dict[str, object] | None:

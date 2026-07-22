@@ -2437,6 +2437,7 @@ function renderFringeView() {
   const maxDd = numericOrNull(stats.max_drawdown_pct);
   const profitFactor = numericOrNull(stats.profit_factor);
   const holdDays = numericOrNull(stats.avg_hold_days);
+  const sharpe = numericOrNull(stats.sharpe_ratio);
   const tradeCount = numericOrNull(stats.trade_count) || 0;
   fringeBoard.innerHTML = `
     <section class="analytics-panel">
@@ -2451,6 +2452,7 @@ function renderFringeView() {
         ${regimeCell("Unrealized", unrealized === null ? "\u2014" : formatSignedUsd(unrealized), `${open.length} open position${open.length === 1 ? "" : "s"}`, usdTone(unrealized))}
         ${regimeCell("Invested", formatUsdWhole(invested), exposure === null ? "" : `${exposure}% of book exposed`)}
         ${regimeCell("Win rate", winRate === null ? "\u2014" : `${winRate}%`, profitFactor === null ? "" : `profit factor ${profitFactor}`, usdTone(winRate === null ? null : winRate - 50))}
+        ${regimeCell("Sharpe", sharpe === null ? "\u2014" : sharpe.toFixed(2), "annualized \u00b7 rf 0%", usdTone(sharpe))}
         ${regimeCell("Max drawdown", maxDd === null ? "\u2014" : `${maxDd}%`, holdDays === null ? "" : `avg hold ${holdDays}d`, maxDd ? "tone-negative" : "")}
       </div>
     </section>

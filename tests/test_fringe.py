@@ -908,3 +908,19 @@ def test_legacy_open_ideas_are_grandfathered_at_1000(tmp_path: Path) -> None:
     assert open_idea["size_notional"] == 1000.0
     assert closed["MU"]["size_notional"] == 1000.0
     assert closed["GHOST"]["size_notional"] is None
+
+
+def test_sharpe_ratio_annualizes_curve_returns() -> None:
+    from app.services.fringe import _trade_stats
+
+    # Returns +1% then +3%: mean 2%, sample std ~1.414% -> 1.414 x sqrt(252).
+    curve = [
+        {"date": "2026-07-01", "equity": 10000.0},
+        {"date": "2026-07-02", "equity": 10100.0},
+        {"date": "2026-07-03", "equity": 10403.0},
+    ]
+    assert _trade_stats([], curve)["sharpe_ratio"] == pytest.approx(22.45, abs=0.01)
+    # Too few marks or zero variance -> no reading, never a fake number.
+    assert _trade_stats([], curve[:2])["sharpe_ratio"] is None
+    flat = [{"date": f"2026-07-0{i}", "equity": 10000.0} for i in range(1, 4)]
+    assert _trade_stats([], flat)["sharpe_ratio"] is None

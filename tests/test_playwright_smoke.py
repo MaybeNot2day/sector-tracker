@@ -260,6 +260,7 @@ def test_fringe_tab_renders_portfolio_curve_and_history(page: Page, base_url: st
     ).to_contain_text("+$171")
     expect(cells.filter(has_text="Invested")).to_contain_text("$2,450")
     expect(cells.filter(has_text="Win rate")).to_contain_text("50%")
+    expect(cells.filter(has_text="Sharpe")).to_contain_text("1.85")
     expect(cells.filter(has_text="Max drawdown")).to_contain_text("1.2%")
 
     # Equity curve renders as an inline SVG with baseline and live dot.
@@ -1512,6 +1513,7 @@ FRINGE_PAYLOAD: dict[str, Any] = {
         "worst": {"ticker": "GME", "realized_usd": -29.95, "realized_pct": -5.99},
         "avg_hold_days": 13.0,
         "max_drawdown_pct": 1.2,
+        "sharpe_ratio": 1.85,
     },
     "open": [
         {
