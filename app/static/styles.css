@@ -1697,6 +1697,11 @@ a.key-date-row:focus-visible {
   font-weight: 600;
 }
 
+.fringe-closed-usd {
+  color: var(--muted);
+  font-size: 10px;
+}
+
 .fringe-closed-row em {
   font-style: normal;
   text-align: right;
@@ -3294,7 +3299,8 @@ a.key-date-row:focus-visible {
   }
 
   .fringe-table .fringe-row .fringe-entry,
-  .fringe-table .fringe-row .fringe-last {
+  .fringe-table .fringe-row .fringe-last,
+  .fringe-table .fringe-row .fringe-size {
     display: none;
   }
 

@@ -115,6 +115,9 @@ CREATE TABLE IF NOT EXISTS fringe_ideas (
     thesis TEXT NOT NULL,
     horizon TEXT,
     target TEXT,
+    confidence REAL,
+    stop TEXT,
+    size_notional REAL,
     status TEXT NOT NULL DEFAULT 'open',
     opened_date TEXT NOT NULL,
     closed_date TEXT,
@@ -171,6 +174,16 @@ def init_db(path: Path) -> None:
             _ensure_column(conn, "latest_quotes", "funding_rate", "REAL")
             _ensure_column(conn, "latest_quotes", "open_interest_usd", "REAL")
             _ensure_column(conn, "fringe_ideas", "target", "TEXT")
+            _ensure_column(conn, "fringe_ideas", "confidence", "REAL")
+            _ensure_column(conn, "fringe_ideas", "stop", "TEXT")
+            sized_added = _ensure_column(conn, "fringe_ideas", "size_notional", "REAL")
+            if sized_added:
+                # Pre-capital open ideas are grandfathered at a flat $1,000
+                # of the $10k paper book; historical closes stay %-only.
+                conn.execute(
+                    "UPDATE fringe_ideas SET size_notional = 1000.0"
+                    " WHERE status = 'open' AND size_notional IS NULL"
+                )
             _seed_key_date_sources(conn)
             _quarantine_invalid_bars(conn)
         _initialized_paths.add(resolved)
@@ -762,7 +775,9 @@ def apply_fringe_actions(
     *,
     slug: str,
     report_date: str,
-    actions: Sequence[tuple[str, str, str, str, str | None, str | None]],
+    actions: Sequence[
+        tuple[str, str, str, str, str | None, str | None, float | None, str | None]
+    ],
 ) -> dict[str, int]:
     """Replay one report's fringe actions against the accruing ideas ledger."""
     init_db(path)
@@ -780,12 +795,14 @@ def _apply_fringe_actions(
     *,
     slug: str,
     report_date: str,
-    actions: Sequence[tuple[str, str, str, str, str | None, str | None]],
+    actions: Sequence[
+        tuple[str, str, str, str, str | None, str | None, float | None, str | None]
+    ],
 ) -> dict[str, int]:
     now = _to_iso(datetime.now(UTC))
     counts = {"opened": 0, "updated": 0, "closed": 0, "removed": 0}
     mentioned: set[tuple[str, str]] = set()
-    for action, ticker, direction, text, horizon, target in actions:
+    for action, ticker, direction, text, horizon, target, confidence, stop in actions:
         mentioned.add((ticker, direction))
         row = conn.execute(
             "SELECT id FROM fringe_ideas"
@@ -810,24 +827,27 @@ def _apply_fringe_actions(
             restate = "?" if action == "open" else "COALESCE(?, {})"
             horizon_sql = restate.format("horizon")
             target_sql = restate.format("target")
+            confidence_sql = restate.format("confidence")
+            stop_sql = restate.format("stop")
             conn.execute(
                 f"""
                 UPDATE fringe_ideas
                 SET thesis = ?, horizon = {horizon_sql}, target = {target_sql},
+                    confidence = {confidence_sql}, stop = {stop_sql},
                     last_mentioned = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (text, horizon, target, report_date, now, int(row["id"])),
+                (text, horizon, target, confidence, stop, report_date, now, int(row["id"])),
             )
             counts["updated"] += 1
         else:
             conn.execute(
                 """
                 INSERT INTO fringe_ideas (
-                    ticker, direction, thesis, horizon, target, status,
-                    opened_date, last_mentioned, source_slug, created_at,
-                    updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)
+                    ticker, direction, thesis, horizon, target, confidence,
+                    stop, status, opened_date, last_mentioned, source_slug,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)
                 """,
                 (
                     ticker,
@@ -835,6 +855,8 @@ def _apply_fringe_actions(
                     text,
                     horizon,
                     target,
+                    confidence,
+                    stop,
                     report_date,
                     report_date,
                     slug,
@@ -875,9 +897,10 @@ def load_fringe_ideas(
     with _connect(path) as conn:
         rows = conn.execute(
             f"""
-            SELECT id, ticker, direction, thesis, horizon, target, status,
-                   opened_date, closed_date, close_reason, entry_price,
-                   exit_price, last_mentioned, source_slug
+            SELECT id, ticker, direction, thesis, horizon, target, confidence,
+                   stop, size_notional, status, opened_date, closed_date,
+                   close_reason, entry_price, exit_price, last_mentioned,
+                   source_slug
             FROM fringe_ideas
             WHERE status = ?
             ORDER BY {order}
@@ -893,6 +916,9 @@ def load_fringe_ideas(
             "thesis": str(row["thesis"]),
             "horizon": str(row["horizon"]) if row["horizon"] is not None else None,
             "target": str(row["target"]) if row["target"] is not None else None,
+            "confidence": _optional_float(row["confidence"]),
+            "stop": str(row["stop"]) if row["stop"] is not None else None,
+            "size_notional": _optional_float(row["size_notional"]),
             "status": str(row["status"]),
             "opened_date": str(row["opened_date"]),
             "closed_date": str(row["closed_date"]) if row["closed_date"] is not None else None,
@@ -904,6 +930,20 @@ def load_fringe_ideas(
         }
         for row in rows
     ]
+
+
+def set_fringe_sizes(path: Path, *, sizes: Sequence[tuple[int, float]]) -> None:
+    """Persist notionals computed at entry stamp; a size is written once."""
+    if not sizes:
+        return
+    init_db(path)
+    now = _to_iso(datetime.now(UTC))
+    with _connect(path) as conn:
+        conn.executemany(
+            "UPDATE fringe_ideas SET size_notional = ?, updated_at = ?"
+            " WHERE id = ? AND size_notional IS NULL",
+            [(notional, now, idea_id) for idea_id, notional in sizes],
+        )
 
 
 def latest_fringe_mention(path: Path) -> str | None:
@@ -1033,10 +1073,13 @@ def _ensure_column(
     table: str,
     column: str,
     definition: str,
-) -> None:
+) -> bool:
+    """Add a missing column; True when this call performed the migration."""
     columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
-    if column not in columns:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    if column in columns:
+        return False
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    return True
 
 
 def _to_iso(value: datetime) -> str:

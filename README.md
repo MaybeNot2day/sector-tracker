@@ -160,7 +160,7 @@ action per bullet:
 ```markdown
 ## Fringe Corner
 
-- OPEN LONG CIFR — miner squeeze into the halving narrative [target: $12] [horizon: 2w]
+- OPEN LONG CIFR — miner squeeze into the halving narrative [conf: 60%] [stop: $7.40] [target: $12] [horizon: 2w]
 - HOLD SHORT XLU — utilities still crowded, thesis intact
 - CLOSE LONG NVDA — earnings played out, taking the win
 ```
@@ -168,10 +168,20 @@ action per bullet:
 Grammar: `ACTION DIRECTION TICKER — text`, where ACTION is `OPEN`/`HOLD`/`CLOSE`
 (case-insensitive), DIRECTION is `LONG`/`SHORT`, the ticker is an uppercase
 `[A-Z0-9.-=]` token (`BRK-B`, `ES=F`, `BTC`), the separator is an em-dash, colon, or
-spaced hyphen, and optional trailing `[horizon: ...]` / `[target: ...]` tags carry
-free text in any order. A price-looking number in the target (`$12`, `78.50`, `75k`)
-is parsed out and drives the panel's distance-to-target read. Malformed bullets are
-skipped, never fatal.
+spaced hyphen, and optional trailing `[conf: ...]` / `[stop: ...]` / `[target: ...]` /
+`[horizon: ...]` tags carry free text in any order. A price-looking number in the
+target/stop (`$12`, `78.50`, `75k`) is parsed out; `conf` accepts `60%`, `60`, or
+`0.6` and clamps to 5–95%. Malformed bullets are skipped, never fatal.
+
+The book runs a **$10,000 paper portfolio sized by half-Kelly**. At entry-stamp time
+the board computes `b = |target − entry| / |entry − stop|` and `f* = conf − (1 −
+conf)/b`, commits `f*/2` of the bankroll (floored at 2%, capped at 25% per position
+and 100% gross exposure; bankroll = $10k + cumulative realized dollars), and fixes
+the notional for the life of the position — HOLD never resizes. Missing or
+geometrically broken conf/stop inputs fall back to a 5% default. `/api/fringe`
+carries per-idea `size_notional`, `unrealized_usd`/`realized_usd`, and a
+`summary.portfolio` block (equity, return, exposure); pre-capital positions were
+grandfathered at $1,000 each and historical closes stay %-only.
 
 Hermes manages its own book explicitly — unlike Key Dates the ledger **accrues**
 instead of mirroring. `OPEN` on an already-open `(ticker, direction)` idea just
@@ -211,7 +221,8 @@ Reference skeleton for the Hermes cron job:
 3. Write the daily report with a "## Fringe Corner" section that manages the
    open book EXPLICITLY: HOLD every idea you still like (updated note),
    CLOSE what is done or invalidated (reason), OPEN new ideas sparingly
-   (thesis + [target: ...] + [horizon: ...]). Unmentioned ideas stay open
+   (thesis + [conf: ...] + [stop: ...] + [target: ...] + [horizon: ...]).
+   Unmentioned ideas stay open
    but go stale.
 ```
 

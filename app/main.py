@@ -558,7 +558,8 @@ async def create_report(request: ReportRequest) -> dict[str, object]:
             events=[(e.date, e.time, e.title, e.category) for e in events],
             fringe_actions=(
                 [
-                    (a.action, a.ticker, a.direction, a.text, a.horizon, a.target)
+                    (a.action, a.ticker, a.direction, a.text, a.horizon, a.target,
+                     a.confidence, a.stop)
                     for a in actions
                 ]
                 if actions is not None

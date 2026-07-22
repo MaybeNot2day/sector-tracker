@@ -48,6 +48,19 @@ MAX_ACTIONS = 50
 _MAX_TEXT = 500
 _MAX_HORIZON = 40
 _MAX_TARGET = 40
+_MAX_STOP = 40
+
+# --- Paper portfolio --------------------------------------------------------
+# The book manages a fixed paper bankroll. Position sizes are computed HERE,
+# not by the agent: the agent declares its edge ([conf: 60%], [stop: $X],
+# [target: $Y]) and the ledger derives a half-Kelly fraction from it, so the
+# arithmetic is deterministic and auditable. Sizes are set once, when the
+# entry price is stamped, and never change on HOLD.
+STARTING_CAPITAL = 10_000.0
+KELLY_MULTIPLIER = 0.5  # half-Kelly: declared p and b are estimates
+MAX_POSITION_FRACTION = 0.25
+MIN_POSITION_FRACTION = 0.02  # floor for ideas Kelly grades at <= 0
+DEFAULT_POSITION_FRACTION = 0.05  # OPEN without usable conf/stop inputs
 
 _HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
 _SECTION_TITLE = re.compile(r"fringe", re.IGNORECASE)
@@ -64,7 +77,8 @@ _ACTION = re.compile(
 # Trailing metadata tags, stripped right-to-left so both may appear in any
 # order; the rightmost occurrence of a duplicated key wins.
 _TRAILING_TAG = re.compile(
-    r"\[\s*(?P<key>horizon|target)\s*:\s*(?P<value>[^\]]*?)\s*\]\s*$", re.IGNORECASE
+    r"\[\s*(?P<key>horizon|target|conf|stop)\s*:\s*(?P<value>[^\]]*?)\s*\]\s*$",
+    re.IGNORECASE,
 )
 # First price-looking number in the target's free text ("$120", "0.55-0.60",
 # "75k"); a k suffix scales by a thousand.
@@ -79,6 +93,8 @@ class FringeAction:
     text: str  # thesis / updated note / close reason
     horizon: str | None
     target: str | None
+    confidence: float | None  # declared win probability, percent (5-95)
+    stop: str | None
 
 
 def parse_fringe_actions(body: str) -> list[FringeAction] | None:
@@ -120,8 +136,8 @@ def _parse_bullet(text: str) -> FringeAction | None:
     if match is None:
         return None
     remainder = match.group("text").strip()
-    limits = {"horizon": _MAX_HORIZON, "target": _MAX_TARGET}
-    tags: dict[str, str | None] = {"horizon": None, "target": None}
+    limits = {"horizon": _MAX_HORIZON, "target": _MAX_TARGET, "conf": 12, "stop": _MAX_STOP}
+    tags: dict[str, str | None] = {"horizon": None, "target": None, "conf": None, "stop": None}
     while (tag := _TRAILING_TAG.search(remainder)) is not None:
         key = tag.group("key").lower()
         if tags[key] is None:
@@ -134,7 +150,22 @@ def _parse_bullet(text: str) -> FringeAction | None:
         text=remainder[:_MAX_TEXT],
         horizon=tags["horizon"],
         target=tags["target"],
+        confidence=_confidence_pct(tags["conf"]),
+        stop=tags["stop"],
     )
+
+
+def _confidence_pct(raw: str | None) -> float | None:
+    """`60%`, `60`, or `0.6` -> percent, clamped to a sane 5-95 band."""
+    if raw is None:
+        return None
+    match = _TARGET_PRICE.match(raw.strip())
+    if match is None:
+        return None
+    value = float(match.group(1).replace(",", ""))
+    if value <= 1.0:
+        value *= 100.0
+    return round(min(max(value, 5.0), 95.0), 1)
 
 
 class FringeService:
@@ -179,8 +210,16 @@ class FringeService:
         )
         need_entry = [row for row in open_rows if row["entry_price"] is None]
         need_exit = [row for row in closed_rows if row["exit_price"] is None]
-        if not need_entry and not need_exit:
-            return open_rows, closed_rows
+        if need_entry or need_exit:
+            await self._stamp_missing(need_entry, need_exit)
+        await self._size_new_positions(open_rows, closed_rows)
+        return open_rows, closed_rows
+
+    async def _stamp_missing(
+        self,
+        need_entry: list[dict[str, object]],
+        need_exit: list[dict[str, object]],
+    ) -> None:
         prices = await self._prices_for(
             {str(row["ticker"]) for row in need_entry + need_exit}
         )
@@ -195,7 +234,43 @@ class FringeService:
                 row["entry_price"] = price
             for row, (_, price) in zip(need_exit, _paired(need_exit, prices), strict=True):
                 row["exit_price"] = price
-        return open_rows, closed_rows
+
+    async def _size_new_positions(
+        self,
+        open_rows: list[dict[str, object]],
+        closed_rows: list[dict[str, object]],
+    ) -> None:
+        """Kelly-size freshly stamped opens against the paper bankroll.
+
+        Bankroll = starting capital + cumulative realized dollars. New
+        positions claim min(fraction x bankroll, uncommitted bankroll) so
+        gross exposure never exceeds 100% of the paper book.
+        """
+        unsized = [
+            row
+            for row in open_rows
+            if row["entry_price"] is not None and row["size_notional"] is None
+        ]
+        if not unsized:
+            return
+        realized = sum(
+            usd for row in closed_rows if (usd := _realized_usd(row)) is not None
+        )
+        bankroll = STARTING_CAPITAL + realized
+        committed = sum(
+            float(str(row["size_notional"]))
+            for row in open_rows
+            if row["size_notional"] is not None
+        )
+        sizes: list[tuple[int, float]] = []
+        for row in unsized:
+            fraction = _position_fraction(row)
+            available = max(bankroll - committed, 0.0)
+            notional = round(min(fraction * bankroll, available), 2)
+            row["size_notional"] = notional
+            committed += notional
+            sizes.append((int(str(row["id"])), notional))
+        await asyncio.to_thread(db.set_fringe_sizes, self.database_path, sizes=sizes)
 
     async def _prices_for(self, tickers: set[str]) -> dict[str, float | None]:
         """Last prices for arbitrary tickers, TTL-cached; failures yield None."""
@@ -273,6 +348,7 @@ def _open_item(
     entry = row["entry_price"]
     last_mentioned = str(row["last_mentioned"])
     target_price = _target_price(row["target"])
+    unrealized_pct = _pnl_pct(str(row["direction"]), entry, last)
     return {
         "id": row["id"],
         "ticker": row["ticker"],
@@ -287,15 +363,21 @@ def _open_item(
         "stale": latest_mention is not None and last_mentioned < latest_mention,
         "entry_price": _round_price(entry),
         "last": _round_price(last),
-        "unrealized_pct": _pnl_pct(str(row["direction"]), entry, last),
+        "unrealized_pct": unrealized_pct,
         # Signed % from the current mark to the target in the idea's
         # direction — the move still on the table; null without both.
         "to_target_pct": _pnl_pct(str(row["direction"]), last, target_price),
+        "confidence": row["confidence"],
+        "stop": row["stop"],
+        "stop_price": _round_price(_target_price(row["stop"])),
+        "size_notional": _round_usd(row["size_notional"]),
+        "unrealized_usd": _position_usd(row["size_notional"], unrealized_pct),
         "source_slug": row["source_slug"],
     }
 
 
 def _closed_item(row: dict[str, object]) -> dict[str, object]:
+    realized_pct = _pnl_pct(str(row["direction"]), row["entry_price"], row["exit_price"])
     return {
         "id": row["id"],
         "ticker": row["ticker"],
@@ -306,7 +388,9 @@ def _closed_item(row: dict[str, object]) -> dict[str, object]:
         "closed": row["closed_date"],
         "entry_price": _round_price(row["entry_price"]),
         "exit_price": _round_price(row["exit_price"]),
-        "realized_pct": _pnl_pct(str(row["direction"]), row["entry_price"], row["exit_price"]),
+        "realized_pct": realized_pct,
+        "size_notional": _round_usd(row["size_notional"]),
+        "realized_usd": _position_usd(row["size_notional"], realized_pct),
         "close_reason": row["close_reason"],
     }
 
@@ -314,7 +398,7 @@ def _closed_item(row: dict[str, object]) -> dict[str, object]:
 def _performance_summary(
     open_items: list[dict[str, object]], closed_items: list[dict[str, object]]
 ) -> dict[str, object]:
-    """Equal-weight return across every marked open and realized closed idea."""
+    """Equal-weight return across every marked idea, plus the paper portfolio."""
     pnl_values: list[float] = []
     for item in open_items:
         value = item["unrealized_pct"]
@@ -331,7 +415,104 @@ def _performance_summary(
         "idea_count": len(open_items) + len(closed_items),
         "open_count": len(open_items),
         "closed_count": len(closed_items),
+        "portfolio": _portfolio_summary(open_items, closed_items),
     }
+
+
+def _portfolio_summary(
+    open_items: list[dict[str, object]], closed_items: list[dict[str, object]]
+) -> dict[str, object]:
+    """The $-denominated paper book: equity, exposure, realized/unrealized."""
+    realized = sum(
+        float(str(item["realized_usd"]))
+        for item in closed_items
+        if item["realized_usd"] is not None
+    )
+    unrealized = sum(
+        float(str(item["unrealized_usd"]))
+        for item in open_items
+        if item["unrealized_usd"] is not None
+    )
+    invested = sum(
+        float(str(item["size_notional"]))
+        for item in open_items
+        if item["size_notional"] is not None
+    )
+    equity = STARTING_CAPITAL + realized + unrealized
+    return {
+        "starting_capital": STARTING_CAPITAL,
+        "equity": round(equity, 2),
+        "return_pct": round((equity / STARTING_CAPITAL - 1.0) * 100.0, 2),
+        "realized_usd": round(realized, 2),
+        "unrealized_usd": round(unrealized, 2),
+        "invested_notional": round(invested, 2),
+        "exposure_pct": round(invested / equity * 100.0, 1) if equity > 0 else None,
+    }
+
+
+def _position_fraction(row: dict[str, object]) -> float:
+    """Bankroll fraction for a new position: clamped half-Kelly, or the
+    conservative default when the agent declared no usable edge inputs."""
+    kelly = _kelly_fraction(
+        str(row["direction"]),
+        row["entry_price"],
+        _target_price(row["stop"]),
+        _target_price(row["target"]),
+        row["confidence"],
+    )
+    if kelly is None:
+        return DEFAULT_POSITION_FRACTION
+    scaled = kelly * KELLY_MULTIPLIER
+    return min(max(scaled, MIN_POSITION_FRACTION), MAX_POSITION_FRACTION)
+
+
+def _kelly_fraction(
+    direction: str,
+    entry: object,
+    stop: float | None,
+    target: float | None,
+    confidence: object,
+) -> float | None:
+    """Kelly f* = p - q/b with b = reward/risk from entry vs target/stop.
+
+    None when the declared geometry is unusable (missing numbers, stop on
+    the wrong side, target behind the entry) — the caller falls back to the
+    default fraction instead of trusting broken inputs.
+    """
+    if (
+        not isinstance(entry, int | float)
+        or not isinstance(confidence, int | float)
+        or stop is None
+        or target is None
+        or entry <= 0
+    ):
+        return None
+    sign = -1.0 if direction == "short" else 1.0
+    reward = sign * (target - entry)
+    risk = sign * (entry - stop)
+    if reward <= 0 or risk <= 0:
+        return None
+    b = reward / risk
+    p = float(confidence) / 100.0
+    return p - (1.0 - p) / b
+
+
+def _realized_usd(row: dict[str, object]) -> float | None:
+    """Dollar result of a sized closed idea; None for the pre-capital era."""
+    return _position_usd(
+        row["size_notional"],
+        _pnl_pct(str(row["direction"]), row["entry_price"], row["exit_price"]),
+    )
+
+
+def _position_usd(notional: object, pct: object) -> float | None:
+    if not isinstance(notional, int | float) or not isinstance(pct, int | float):
+        return None
+    return round(float(notional) * float(pct) / 100.0, 2)
+
+
+def _round_usd(value: object) -> float | None:
+    return round(float(value), 2) if isinstance(value, int | float) else None
 
 
 def _pnl_pct(direction: str, entry: object, exit_: object) -> float | None:

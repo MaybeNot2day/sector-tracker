@@ -2265,10 +2265,18 @@ function fringeSection(payload) {
     marked += 1;
   }
   const overallPnl = marked ? total / marked : null;
+  const portfolio = payload?.summary?.portfolio || null;
+  const equity = numericOrNull(portfolio?.equity);
+  const returnPct = numericOrNull(portfolio?.return_pct);
   const note = [
+    equity !== null
+      ? `equity $${Math.round(equity).toLocaleString("en-US")}${returnPct !== null ? ` (${formatSignedPct(returnPct)})` : ""}`
+      : "",
     open.length ? `${open.length} open` : "",
     closed.length ? `${closed.length} closed` : "",
-    `overall P&L ${overallPnl === null ? "\u2014" : formatSignedPct(overallPnl)}`,
+    equity === null
+      ? `overall P&L ${overallPnl === null ? "\u2014" : formatSignedPct(overallPnl)}`
+      : "",
   ]
     .filter(Boolean)
     .join(" \u00b7 ");
@@ -2276,7 +2284,7 @@ function fringeSection(payload) {
     ${panelHeading(
       "Fringe Corner",
       note,
-      "Hermes' daily trading-ideas book, fed by uploaded agent reports. Entry prices are stamped when an idea first appears and open ideas mark to market. Overall P&L is the equal-weight mean of the open ideas and recent closes shown below; ideas without a usable price are excluded. TARGET is the agent's stated objective and TO GO the move still left from the current mark. NOT REFRESHED means the newest report did not mention a still-open idea. Click a ticker to open its chart."
+      "Hermes' paper trading book: $10,000 starting capital, positions sized by half-Kelly from the agent's declared conviction ([conf]), stop, and target — floored at 2%, capped at 25% of the bankroll and 100% gross exposure. Sizes are fixed when the entry is stamped. Equity = capital + realized + marked-to-market open P&L. NOT REFRESHED means the newest report did not mention a still-open idea. Click a ticker to open its chart."
     )}
     ${fringeOpenTable(open)}
     ${fringeClosedList(closed)}
@@ -2292,6 +2300,7 @@ function fringeOpenTable(open) {
       <th>Thesis</th>
       <th class="fringe-num">Entry</th>
       <th class="fringe-num">Last</th>
+      <th class="fringe-num fringe-size">Size</th>
       <th class="fringe-num">P&amp;L</th>
       <th class="fringe-num">Target</th>
       <th class="fringe-num">To go</th>
@@ -2307,12 +2316,14 @@ function fringeOpenRow(idea) {
   const direction = String(idea.direction || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
   const ticker = escapeHtml(idea.ticker || "");
   const pct = numericOrNull(idea.unrealized_pct);
+  const usd = numericOrNull(idea.unrealized_usd);
+  const pnlTitle = usd === null ? "" : ` title="${escapeHtml(formatSignedUsd(usd))} on the position"`;
   // A null mark (provider miss; the backend retries lazily) reads as a
   // muted em dash — never a fake 0.00%.
   const pnl =
     pct === null
       ? '<strong class="fringe-pnl fringe-missing">\u2014</strong>'
-      : `<strong class="fringe-pnl ${pct > 0 ? "tone-positive" : pct < 0 ? "tone-negative" : ""}">${escapeHtml(formatSignedPct(pct))}</strong>`;
+      : `<strong class="fringe-pnl ${pct > 0 ? "tone-positive" : pct < 0 ? "tone-negative" : ""}"${pnlTitle}>${escapeHtml(formatSignedPct(pct))}</strong>`;
   const entry = numericOrNull(idea.entry_price);
   const last = numericOrNull(idea.last);
   const targetPrice = numericOrNull(idea.target_price);
@@ -2322,6 +2333,16 @@ function fringeOpenRow(idea) {
   const target = idea.target
     ? `<span class="fringe-target" title="${escapeHtml(idea.target)}">${escapeHtml(targetPrice === null ? idea.target : formatPrice(targetPrice))}</span>`
     : '<span class="fringe-missing">\u2014</span>';
+  const size = numericOrNull(idea.size_notional);
+  const conf = numericOrNull(idea.confidence);
+  const stopPrice = numericOrNull(idea.stop_price);
+  const sizeTitle = [
+    conf !== null ? `conf ${conf}%` : "",
+    stopPrice !== null ? `stop ${formatPrice(stopPrice)}` : "",
+    "half-Kelly sized",
+  ]
+    .filter(Boolean)
+    .join(" \u00b7 ");
   const meta = [idea.opened ? `opened ${idea.opened}` : ""].filter(Boolean).join(" \u00b7 ");
   return `<tr class="fringe-row">
     <td class="fringe-cell-ticker"><button type="button" class="fringe-ticker" data-symbol="${ticker}" title="Open ${ticker} chart">${ticker}</button></td>
@@ -2332,6 +2353,7 @@ function fringeOpenRow(idea) {
     </td>
     <td class="fringe-num fringe-entry">${entry === null ? "\u2014" : escapeHtml(formatPrice(entry))}</td>
     <td class="fringe-num fringe-last">${last === null ? "\u2014" : escapeHtml(formatPrice(last))}</td>
+    <td class="fringe-num fringe-size" data-mobile-label="Size" title="${escapeHtml(sizeTitle)}">${size === null ? "\u2014" : `$${Math.round(size).toLocaleString("en-US")}`}</td>
     <td class="fringe-num fringe-pnl-cell" data-mobile-label="P&amp;L">${pnl}</td>
     <td class="fringe-num fringe-target-cell" data-mobile-label="Target">${target}</td>
     <td class="fringe-num fringe-togo" data-mobile-label="To go">${toGo === null ? "\u2014" : escapeHtml(formatSignedPct(toGo))}</td>
@@ -2354,7 +2376,7 @@ function fringeClosedList(closed) {
       <strong>${escapeHtml(idea.ticker || "")}</strong>
       <span>${escapeHtml(String(idea.direction || "").toUpperCase())}</span>
       <span class="fringe-closed-trip">${escapeHtml(trip)}</span>
-      <em class="${tone}">${pct === null ? "\u2014" : escapeHtml(formatSignedPct(pct))}</em>
+      <em class="${tone}">${pct === null ? "\u2014" : escapeHtml(formatSignedPct(pct))}${(() => { const usd = numericOrNull(idea.realized_usd); return usd === null ? "" : ` <span class="fringe-closed-usd">${escapeHtml(formatSignedUsd(usd))}</span>`; })()}</em>
       <span class="fringe-closed-reason">${escapeHtml(idea.close_reason || "")}</span>
     </div>`;
   });
@@ -2362,6 +2384,16 @@ function fringeClosedList(closed) {
     <span class="fringe-closed-label">Recently closed</span>
     ${rows.join("")}
   </div>`;
+}
+
+function formatSignedUsd(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "";
+  const digits = Math.abs(value) >= 100 ? 0 : 2;
+  const abs = Math.abs(value).toLocaleString("en-US", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  });
+  return `${value < 0 ? "\u2212" : "+"}$${abs}`;
 }
 
 function hasLatestFlowPrint(asset) {

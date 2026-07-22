@@ -24,7 +24,13 @@ from app.models import AssetConfig, Bar, GroupConfig, ProviderName, Quote
 from app.providers.base import QuoteProvider
 from app.providers.lighter import LighterProvider
 from app.services.crypto_etf_flows import CryptoEtfFlowService
-from app.services.fringe import FringeService, _pnl_pct, parse_fringe_actions
+from app.services.fringe import (
+    FringeService,
+    _confidence_pct,
+    _kelly_fraction,
+    _pnl_pct,
+    parse_fringe_actions,
+)
 
 # --- grammar ---------------------------------------------------------------
 
@@ -124,8 +130,10 @@ def act(
     text: str = "t",
     horizon: str | None = None,
     target: str | None = None,
-) -> tuple[str, str, str, str, str | None, str | None]:
-    return (action, ticker, direction, text, horizon, target)
+    confidence: float | None = None,
+    stop: str | None = None,
+) -> tuple[str, str, str, str, str | None, str | None, float | None, str | None]:
+    return (action, ticker, direction, text, horizon, target, confidence, stop)
 
 
 def open_ideas(path: Path) -> list[dict[str, object]]:
@@ -448,6 +456,17 @@ def test_fringe_route_stamps_entries_and_routes_lighter_vs_yahoo(
         "idea_count": 2,
         "open_count": 2,
         "closed_count": 0,
+        # Neither bullet declared conf/stop: both got the 5% default of the
+        # $10k bankroll. CIFR marks +4.16% on $500; BTC is flat.
+        "portfolio": {
+            "starting_capital": 10000.0,
+            "equity": 10020.8,
+            "return_pct": 0.21,
+            "realized_usd": 0.0,
+            "unrealized_usd": 20.8,
+            "invested_notional": 1000.0,
+            "exposure_pct": 10.0,
+        },
     }
     assert payload["closed"] == []
 
@@ -543,6 +562,16 @@ def test_close_stamps_exit_price_and_realized_pnl(
         "idea_count": 1,
         "open_count": 0,
         "closed_count": 1,
+        # Default-sized $500 at open; +8.05% realized banks $40.25.
+        "portfolio": {
+            "starting_capital": 10000.0,
+            "equity": 10040.25,
+            "return_pct": 0.4,
+            "realized_usd": 40.25,
+            "unrealized_usd": 0.0,
+            "invested_notional": 0.0,
+            "exposure_pct": 0.0,
+        },
     }
 
 
@@ -705,3 +734,169 @@ def test_market_context_degrades_to_empty_pieces_instead_of_500(
     payload = response.json()
     assert payload["snapshots"] == []
     assert payload["fringe_book"] == {"open": [], "recently_closed": []}
+
+
+# --- Kelly sizing -----------------------------------------------------------
+
+
+def test_parse_bullet_reads_conf_and_stop_tags() -> None:
+    body = (
+        "## Fringe Corner\n"
+        "- OPEN LONG AMD — rack thesis [conf: 60%] [stop: $450] "
+        "[target: $580] [horizon: 2m]\n"
+    )
+    actions = parse_fringe_actions(body)
+    assert actions is not None
+    (action,) = actions
+    assert action.confidence == 60.0
+    assert action.stop == "$450"
+    assert action.target == "$580"
+    assert action.text == "rack thesis"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("60%", 60.0),
+        ("60", 60.0),
+        ("0.6", 60.0),
+        ("99.9%", 95.0),  # clamped: certainty is not a probability estimate
+        ("2", 5.0),
+        ("confident", None),
+        (None, None),
+    ],
+)
+def test_confidence_parsing_clamps_to_probability_band(
+    raw: str | None, expected: float | None
+) -> None:
+    assert _confidence_pct(raw) == expected
+
+
+def test_kelly_fraction_math_and_geometry_guards() -> None:
+    # Long: b = (580-500)/(500-450) = 1.6, f* = 0.6 - 0.4/1.6 = 0.35.
+    assert _kelly_fraction("long", 500.0, 450.0, 580.0, 60.0) == pytest.approx(0.35)
+    # Short mirrors: reward below entry, risk above.
+    assert _kelly_fraction("short", 152.0, 160.0, 140.0, 55.0) == pytest.approx(0.25)
+    # Negative-edge inputs still compute (caller floors the size).
+    assert _kelly_fraction("long", 500.0, 450.0, 580.0, 20.0) == pytest.approx(-0.3)
+    # Broken geometry -> None: stop on the wrong side / target behind entry.
+    assert _kelly_fraction("long", 500.0, 550.0, 580.0, 60.0) is None
+    assert _kelly_fraction("long", 500.0, 450.0, 480.0, 60.0) is None
+    assert _kelly_fraction("short", 152.0, 140.0, 160.0, 55.0) is None
+    assert _kelly_fraction("long", 500.0, None, 580.0, 60.0) is None
+
+
+def test_open_with_kelly_inputs_sizes_half_kelly_notional(
+    configure_app: Callable[..., Path],
+) -> None:
+    yahoo = ScriptedYahoo({"AMD": 500.0, "XBI": 152.0})
+    configure_app({"yahoo": yahoo})
+    client = TestClient(app)
+
+    created = client.post(
+        "/api/reports",
+        json={
+            "title": "Hermes Fringe Corner",
+            "date": "2026-07-22",
+            "body": (
+                "## Fringe Corner\n"
+                "- OPEN LONG AMD — rack thesis [conf: 60%] [stop: $450] [target: $580]\n"
+                "- OPEN SHORT XBI — fade strength [conf: 55%] [stop: $160] [target: $140]\n"
+            ),
+        },
+    )
+    assert created.status_code == 200
+
+    payload = client.get("/api/fringe").json()
+    by_ticker = {item["ticker"]: item for item in payload["open"]}
+    # AMD: f* = 0.35, half-Kelly 0.175 of $10k -> $1,750.
+    assert by_ticker["AMD"]["size_notional"] == 1750.0
+    assert by_ticker["AMD"]["confidence"] == 60.0
+    assert by_ticker["AMD"]["stop_price"] == 450.0
+    # XBI short: f* = 0.25, half-Kelly 0.125 -> $1,250.
+    assert by_ticker["XBI"]["size_notional"] == 1250.0
+    portfolio = payload["summary"]["portfolio"]
+    assert portfolio["invested_notional"] == 3000.0
+    assert portfolio["equity"] == 10000.0
+    assert portfolio["exposure_pct"] == 30.0
+
+
+def test_kelly_sizing_clamps_floor_cap_and_gross_exposure(
+    configure_app: Callable[..., Path],
+) -> None:
+    prices = {f"T{i}": 100.0 for i in range(5)}
+    prices["WEAK"] = 100.0
+    yahoo = ScriptedYahoo(prices)
+    configure_app({"yahoo": yahoo})
+    client = TestClient(app)
+
+    # 95% conf with a tight stop grades far beyond the 25% cap.
+    hot = "".join(
+        f"- OPEN LONG T{i} — max edge [conf: 95%] [stop: $99] [target: $120]\n"
+        for i in range(5)
+    )
+    created = client.post(
+        "/api/reports",
+        json={
+            "title": "Hermes Fringe Corner",
+            "date": "2026-07-22",
+            "body": (
+                "## Fringe Corner\n"
+                f"{hot}"
+                "- OPEN LONG WEAK — negative edge [conf: 20%] [stop: $95] [target: $103]\n"
+            ),
+        },
+    )
+    assert created.status_code == 200
+
+    payload = client.get("/api/fringe").json()
+    sizes = {item["ticker"]: item["size_notional"] for item in payload["open"]}
+    # Cap: 25% of the $10k bankroll each; the fifth hits the 100% gross wall.
+    assert sizes["T0"] == sizes["T1"] == sizes["T2"] == sizes["T3"] == 2500.0
+    assert sizes["T4"] == 0.0
+    # Kelly graded WEAK at <= 0 but gross exposure is exhausted anyway.
+    assert sizes["WEAK"] == 0.0
+    assert payload["summary"]["portfolio"]["exposure_pct"] == 100.0
+
+
+def test_legacy_open_ideas_are_grandfathered_at_1000(tmp_path: Path) -> None:
+    import sqlite3
+
+    path = tmp_path / "legacy.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE fringe_ideas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL, direction TEXT NOT NULL,
+            thesis TEXT NOT NULL, horizon TEXT, target TEXT,
+            status TEXT NOT NULL DEFAULT 'open',
+            opened_date TEXT NOT NULL, closed_date TEXT, close_reason TEXT,
+            entry_price REAL, exit_price REAL,
+            last_mentioned TEXT NOT NULL, source_slug TEXT NOT NULL,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO fringe_ideas (ticker, direction, thesis, status,"
+        " opened_date, entry_price, last_mentioned, source_slug, created_at,"
+        " updated_at) VALUES ('AAPL', 'short', 't', 'open', '2026-07-17',"
+        " 333.26, '2026-07-21', 'fringe-corner', 'x', 'x')"
+    )
+    conn.execute(
+        "INSERT INTO fringe_ideas (ticker, direction, thesis, status,"
+        " opened_date, closed_date, entry_price, exit_price, last_mentioned,"
+        " source_slug, created_at, updated_at) VALUES ('MU', 'long', 't',"
+        " 'closed', '2026-07-17', '2026-07-22', 853.2, 970.82, '2026-07-22',"
+        " 'fringe-corner', 'x', 'x')"
+    )
+    conn.commit()
+    conn.close()
+
+    (open_idea,) = db.load_fringe_ideas(path, status="open")
+    (closed_idea,) = db.load_fringe_ideas(path, status="closed")
+    # Migration grandfathers live positions at a flat $1,000; historical
+    # closes stay unsized (%-only, no retroactive dollars).
+    assert open_idea["size_notional"] == 1000.0
+    assert closed_idea["size_notional"] is None

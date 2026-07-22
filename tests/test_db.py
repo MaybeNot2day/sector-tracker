@@ -163,15 +163,15 @@ def test_init_db_runs_schema_once_per_path_and_reinitializes_deleted_file(
     with ThreadPoolExecutor(max_workers=8) as executor:
         list(executor.map(db.init_db, [database] * 16))
 
-    assert probe_count == 10
+    assert probe_count == 13
     assert db.load_latest_quote(database, "MISSING") is None
-    assert probe_count == 10
+    assert probe_count == 13
 
     database.unlink()
     db.init_db(database)
 
     assert database.exists()
-    assert probe_count == 20
+    assert probe_count == 26
 
 
 def test_load_latest_quotes_batches_normalizes_and_deduplicates(

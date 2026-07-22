@@ -195,13 +195,14 @@ def test_daily_board_loads_without_page_errors_and_renders_core_sections(
     assert key_date_rows.nth(2).evaluate("row => row.tagName") == "DIV"
     assert key_date_rows.nth(2).get_attribute("href") is None
 
-    # Fringe Corner: Hermes' ideas blotter — direction chip, marked P&L,
+    # Fringe Corner: Hermes' $10k paper book — equity heading from the
+    # portfolio block, Kelly-sized notionals, direction chip, marked P&L,
     # target + distance-to-go, a missing price rendering as an em dash, the
     # in-row thesis and stale marker, and the compact closed footer.
     fringe_heading = page.locator("#daily-board .analytics-panel").filter(
         has=page.get_by_role("heading", name="Fringe Corner")
     ).locator(".panel-heading > span")
-    expect(fringe_heading).to_have_text("3 open · 2 closed · overall P&L +1.92%")
+    expect(fringe_heading).to_have_text("equity $10,247 (+2.47%) · 3 open · 2 closed")
     fringe_rows = page.locator("#daily-board .fringe-row")
     expect(fringe_rows).to_have_count(3)
     expect(fringe_rows.nth(0).locator(".fringe-chip")).to_have_text("LONG")
@@ -209,6 +210,10 @@ def test_daily_board_loads_without_page_errors_and_renders_core_sections(
     expect(fringe_rows.nth(0).locator(".fringe-ticker")).to_have_text("CIFR")
     expect(fringe_rows.nth(0).locator(".fringe-target")).to_have_text("12.00")
     expect(fringe_rows.nth(0).locator(".fringe-togo")).to_have_text("+36.83%")
+    expect(fringe_rows.nth(0).locator(".fringe-size")).to_have_text("$1,750")
+    expect(fringe_rows.nth(0).locator(".fringe-pnl")).to_have_attribute(
+        "title", "+$72.80 on the position"
+    )
     expect(fringe_rows.nth(1).locator(".fringe-chip")).to_have_text("SHORT")
     expect(fringe_rows.nth(1).locator(".fringe-pnl")).to_have_text("—")
     expect(fringe_rows.nth(1).locator(".fringe-entry")).to_have_text("—")
@@ -234,6 +239,7 @@ def test_daily_board_loads_without_page_errors_and_renders_core_sections(
     expect(closed_rows.nth(0)).to_contain_text("NVDA")
     expect(closed_rows.nth(0)).to_contain_text("160.20 \u2192 173.10")
     expect(closed_rows.nth(0)).to_contain_text("+8.05%")
+    expect(closed_rows.nth(0).locator(".fringe-closed-usd")).to_have_text("+$201")
 
 
 def test_closed_news_panel_is_inert_until_opened(page: Page, base_url: str) -> None:
@@ -1436,7 +1442,22 @@ KEY_DATES_PAYLOAD: dict[str, Any] = {
 # (the server figure averages closes no longer shown).
 FRINGE_PAYLOAD: dict[str, Any] = {
     "as_of": _iso(),
-    "summary": {"overall_pnl_pct": 99.99, "open_count": 12, "closed_count": 34},
+    # overall_pnl_pct stays poisoned: the heading must build from the
+    # portfolio block and rendered rows, never that legacy figure.
+    "summary": {
+        "overall_pnl_pct": 99.99,
+        "open_count": 12,
+        "closed_count": 34,
+        "portfolio": {
+            "starting_capital": 10000.0,
+            "equity": 10247.02,
+            "return_pct": 2.47,
+            "realized_usd": 171.3,
+            "unrealized_usd": 75.72,
+            "invested_notional": 2450.0,
+            "exposure_pct": 23.9,
+        },
+    },
     "open": [
         {
             "id": 3,
@@ -1453,6 +1474,11 @@ FRINGE_PAYLOAD: dict[str, Any] = {
             "entry_price": 8.42,
             "last": 8.77,
             "unrealized_pct": 4.16,
+            "confidence": 60.0,
+            "stop": "$7.40",
+            "stop_price": 7.4,
+            "size_notional": 1750.0,
+            "unrealized_usd": 72.8,
             "source_slug": "fringe-corner",
         },
         {
@@ -1470,6 +1496,11 @@ FRINGE_PAYLOAD: dict[str, Any] = {
             "entry_price": None,
             "last": None,
             "unrealized_pct": None,
+            "confidence": None,
+            "stop": None,
+            "stop_price": None,
+            "size_notional": 500.0,
+            "unrealized_usd": None,
             "source_slug": "fringe-corner",
         },
         {
@@ -1487,6 +1518,11 @@ FRINGE_PAYLOAD: dict[str, Any] = {
             "entry_price": 82.1,
             "last": 80.9,
             "unrealized_pct": 1.46,
+            "confidence": None,
+            "stop": None,
+            "stop_price": None,
+            "size_notional": 200.0,
+            "unrealized_usd": 2.92,
             "source_slug": "fringe-corner",
         },
     ],
@@ -1502,6 +1538,8 @@ FRINGE_PAYLOAD: dict[str, Any] = {
             "entry_price": 160.2,
             "exit_price": 173.1,
             "realized_pct": 8.05,
+            "size_notional": 2500.0,
+            "realized_usd": 201.25,
             "close_reason": "Target hit into earnings",
         },
         {
@@ -1515,6 +1553,8 @@ FRINGE_PAYLOAD: dict[str, Any] = {
             "entry_price": 28.4,
             "exit_price": 30.1,
             "realized_pct": -5.99,
+            "size_notional": 500.0,
+            "realized_usd": -29.95,
             "close_reason": "Stopped on renewed retail flow",
         },
     ],
