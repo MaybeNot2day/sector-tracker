@@ -17,6 +17,11 @@ Config lives in ~/.config/sector-tracker/uploader.env (KEY=VALUE lines):
     VAULT_DIR=/Users/you/Desktop/Main/HERMES RESEARCH   # optional
     MAX_AGE_DAYS=30                                     # optional
     REPORT_TITLES=Biotech Pharma Brief                  # optional, comma-separated
+    NOTIFY_TARGET=slack:#market-briefs                  # optional, comma-separated
+
+NOTIFY_TARGET announces each landed batch through the Hermes gateway
+(`hermes send --to <target>`): "New briefs on the dashboard: ... <BOARD_URL>".
+Any `hermes send` target works (slack:#channel, telegram, discord:#ops).
 
 Only files whose <Title> is in REPORT_TITLES upload (case-insensitive); this
 keeps ad-hoc research notes in the vault off the board. Unset, it defaults to
@@ -35,6 +40,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -53,6 +59,8 @@ DEFAULT_REPORT_TITLES = (
     "Biotech Pharma Brief, AI Semis Morning Brief, Macro Tape Brief, "
     "US Asia Close, Fringe Corner"
 )
+HERMES_BIN = Path.home() / ".local/bin/hermes"
+NOTIFY_TIMEOUT = 20
 # A file whose mtime is this fresh may still be mid-write; settle briefly.
 SETTLE_SECONDS = 3.0
 REQUEST_TIMEOUT = 20
@@ -252,6 +260,33 @@ def post_report(
         return cast(dict[str, Any], json.loads(response.read().decode("utf-8")))
 
 
+def notify_new_reports(targets: str, base_url: str, titles: list[str]) -> None:
+    """Announce a landed batch via the Hermes gateway; never fails the pass."""
+    plural = "s" if len(titles) != 1 else ""
+    message = (
+        f"New brief{plural} on the dashboard: {', '.join(titles)} \u2192 {base_url}"
+    )
+    for target in (part.strip() for part in targets.split(",")):
+        if not target:
+            continue
+        try:
+            result = subprocess.run(
+                [str(HERMES_BIN), "send", "--to", target, "--quiet", message],
+                capture_output=True,
+                text=True,
+                timeout=NOTIFY_TIMEOUT,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log(f"notify failed for {target}: {exc}")
+            continue
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            log(f"notify failed for {target}: {detail or f'exit {result.returncode}'}")
+        else:
+            log(f"notified {target}: {len(titles)} brief{plural}")
+
+
 def run(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", action="store_true", help="record hashes, upload nothing")
@@ -283,6 +318,7 @@ def run(argv: list[str] | None = None) -> int:
     state = prune_state(state, max_age_days)
     reports = scan_vault(vault, max_age_days, allowed_titles)
     uploaded = failed = 0
+    landed_titles: list[str] = []
 
     for path, date_text, title in reports:
         try:
@@ -321,10 +357,14 @@ def run(argv: list[str] | None = None) -> int:
             continue  # hash stays unrecorded -> retried on the next pass
         state[path.name] = digest
         uploaded += 1
+        landed_titles.append(title)
         log(f"uploaded {path.name} -> id={result.get('id')} slug={result.get('slug')}")
 
     if not args.dry_run:
         save_state(state)
+    notify_target = config.get("NOTIFY_TARGET", "").strip()
+    if landed_titles and notify_target and not args.dry_run:
+        notify_new_reports(notify_target, base_url, landed_titles)
     log(f"pass done: {len(reports)} candidates, {uploaded} uploaded, {failed} failed")
     return 1 if failed else 0
 

@@ -226,10 +226,13 @@ the board. Known daily reports are contract-checked before upload (dated YAML pl
 report-specific structural markers), so incomplete cron output is retried instead of
 replacing the dashboard report. Config lives in
 `~/.config/sector-tracker/uploader.env` (`BOARD_URL`, `EDIT_TOKEN`, `VAULT_DIR`,
-`MAX_AGE_DAYS`, `REPORT_TITLES`, `ALERT_TARGET` — report titles are comma-separated and
-case-insensitive; defaults cover the known cron jobs, `*` disables the filter).
-Run `--baseline` once at install to mark existing files as seen, and `--dry-run` to
-preview.
+`MAX_AGE_DAYS`, `REPORT_TITLES`, `ALERT_TARGET`, `NOTIFY_TARGET` — report titles are
+comma-separated and case-insensitive; defaults cover the known cron jobs, `*` disables
+the filter). `NOTIFY_TARGET` announces each landed batch through the Hermes gateway
+(comma-separated `hermes send` targets, e.g. `slack:#market-briefs, telegram`):
+"New briefs on the dashboard: <titles> → <BOARD_URL>". Delivery failures are logged,
+never fatal. Run `--baseline` once at install to mark existing files as seen, and
+`--dry-run` to preview.
 
 The production wiring runs on the Hermes box (`hermes-ts`), which already receives the
 Obsidian vault at `/home/ds/hermes-research` via Syncthing (macOS TCC blocks launchd

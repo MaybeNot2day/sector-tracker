@@ -616,3 +616,91 @@ def test_invalid_current_cron_report_is_not_uploaded(env: SimpleNamespace) -> No
     assert uploader.run([]) == 1
     assert env.post.calls == []
     assert _read_state(env) == {}
+
+
+# --- landing notifications --------------------------------------------------
+
+
+class _NotifyRecorder:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, list[str]]] = []
+
+    def __call__(self, targets: str, base_url: str, titles: list[str]) -> None:
+        self.calls.append((targets, base_url, list(titles)))
+
+
+def _enable_notify(env: SimpleNamespace, target: str = "slack:#market-briefs") -> None:
+    env.config.write_text(
+        env.config.read_text(encoding="utf-8") + f"NOTIFY_TARGET={target}\n",
+        encoding="utf-8",
+    )
+
+
+def test_uploaded_batch_sends_one_notification(
+    env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _enable_notify(env)
+    notify = _NotifyRecorder()
+    monkeypatch.setattr(uploader, "notify_new_reports", notify)
+    _write_report(env.vault, f"{_TODAY_TEXT} Morning Brief.md", "fresh body")
+    _write_report(env.vault, f"{_TODAY_TEXT} Wrap.md", "wrap body")
+
+    assert uploader.run([]) == 0
+    assert notify.calls == [
+        ("slack:#market-briefs", "https://board.test", ["Morning Brief", "Wrap"])
+    ]
+
+    assert uploader.run([]) == 0  # unchanged pass: no re-announcement
+    assert len(notify.calls) == 1
+
+
+def test_no_notification_without_target_or_uploads(
+    env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    notify = _NotifyRecorder()
+    monkeypatch.setattr(uploader, "notify_new_reports", notify)
+    _write_report(env.vault, f"{_TODAY_TEXT} Morning Brief.md", "fresh body")
+
+    assert uploader.run([]) == 0  # NOTIFY_TARGET unset
+    assert notify.calls == []
+
+    _enable_notify(env)
+    _write_report(env.vault, f"{_TODAY_TEXT} Wrap.md", "wrap body")
+    assert uploader.run(["--dry-run"]) == 0  # dry runs stay silent
+    assert notify.calls == []
+
+
+def test_failed_upload_is_not_announced(
+    env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _enable_notify(env)
+    notify = _NotifyRecorder()
+    monkeypatch.setattr(uploader, "notify_new_reports", notify)
+    env.post.fail_times = 1
+    _write_report(env.vault, f"{_TODAY_TEXT} Morning Brief.md", "flaky body")
+
+    assert uploader.run([]) == 1
+    assert notify.calls == []
+
+
+def test_notify_new_reports_survives_gateway_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        commands.append(list(cmd))
+        return SimpleNamespace(returncode=1, stderr="delivery/backend error", stdout="")
+
+    monkeypatch.setattr(uploader.subprocess, "run", fake_run)
+    # Must not raise; failures are logged and swallowed.
+    uploader.notify_new_reports(
+        "slack:#market-briefs, telegram", "https://board.test", ["Macro Tape Brief"]
+    )
+
+    assert [cmd[2:5] for cmd in commands] == [
+        ["--to", "slack:#market-briefs", "--quiet"],
+        ["--to", "telegram", "--quiet"],
+    ]
+    message = commands[0][5]
+    assert message == "New brief on the dashboard: Macro Tape Brief \u2192 https://board.test"
