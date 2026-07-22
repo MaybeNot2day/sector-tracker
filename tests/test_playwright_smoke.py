@@ -700,6 +700,12 @@ def test_reports_modal_lists_reports_and_renders_escaped_markdown_reader(
     expect(page.locator("#reports-list .reports-date").first).to_contain_text("Jul 9, 2026")
     expect(cards.first).to_contain_text("Hermes Daily Flows")
     expect(cards.first).to_contain_text("Position sizing check")
+    # Exact landing time: created_at 14:00Z renders 16:00 CEST; same display
+    # day as the report date, so no day prefix.
+    expect(cards.first.locator(".report-stamp")).to_have_text("16:00")
+    expect(cards.first.locator(".report-stamp")).to_have_attribute(
+        "title", "Landed 2026-07-09 04:00:00 PM CEST"
+    )
     # Back button belongs to the reader; in list view it stays hidden.
     expect(page.locator("#reports-back")).to_be_hidden()
 
@@ -709,6 +715,9 @@ def test_reports_modal_lists_reports_and_renders_escaped_markdown_reader(
     expect(reader).to_be_visible()
     body = reader.locator(".report-body")
     expect(reader.locator(".report-head h2")).to_be_focused()
+    expect(reader.locator(".report-head p")).to_have_text(
+        "Thu, Jul 9, 2026 · hermes-daily-flows · landed 2026-07-09 04:00:00 PM CEST"
+    )
     expect(body.locator("h2")).to_have_text("Flow Summary")
     expect(body.locator("table th").first).to_have_text("Asset")
     expect(body.locator("table td").first).to_have_text("ZEC")

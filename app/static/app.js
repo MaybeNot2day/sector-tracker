@@ -942,9 +942,11 @@ function renderReportsList(reports) {
   for (const [date, items] of byDate) {
     sections.push(`<h3 class="reports-date">${escapeHtml(formatReportDate(date))}</h3>`);
     for (const item of items) {
+      const stamp = formatReportStamp(item.created_at, date);
       sections.push(`
         <button type="button" class="report-card" data-report-id="${Number(item.id)}">
           <strong>${escapeHtml(item.title)}</strong>
+          ${stamp ? `<time class="report-stamp" datetime="${escapeHtml(item.created_at)}" title="Landed ${escapeHtml(formatLandedFull(item.created_at))}">${escapeHtml(stamp)}</time>` : ""}
           <span>${escapeHtml(item.preview || "")}</span>
         </button>`);
     }
@@ -975,7 +977,7 @@ async function openReport(reportId) {
     reportReaderElement.innerHTML = `
       <header class="report-head">
         <h2 tabindex="-1">${escapeHtml(item.title)}</h2>
-        <p>${escapeHtml(formatReportDate(item.date))} · ${escapeHtml(item.slug)}</p>
+        <p>${escapeHtml(formatReportDate(item.date))} · ${escapeHtml(item.slug)}${item.created_at ? escapeHtml(` · landed ${formatLandedFull(item.created_at)}`) : ""}</p>
       </header>
       <div class="report-body">${renderMarkdown(item.body)}</div>`;
     reportReaderElement.removeAttribute("aria-busy");
@@ -1017,6 +1019,32 @@ function formatReportDate(value) {
     day: "numeric",
     timeZone: "UTC",
   });
+}
+
+// Exact landing time of a brief in the display zone. Overnight briefs are
+// dated for the next session but land the evening before, so the calendar
+// day is prefixed whenever it differs from the report's dated day.
+function formatReportStamp(createdAt, reportDate) {
+  const parsed = new Date(createdAt || "");
+  if (Number.isNaN(parsed.getTime())) return "";
+  const time = parsed.toLocaleTimeString("en-GB", {
+    timeZone: DISPLAY_TIME_ZONE,
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  if (formatLocalDate(parsed) === reportDate) return time;
+  const day = parsed.toLocaleDateString("en-US", {
+    timeZone: DISPLAY_TIME_ZONE,
+    month: "short",
+    day: "numeric",
+  });
+  return `${day} · ${time}`;
+}
+
+function formatLandedFull(createdAt) {
+  const parsed = new Date(createdAt || "");
+  if (Number.isNaN(parsed.getTime())) return "";
+  return `${formatLocalDate(parsed)} ${formatClock(parsed)}`;
 }
 
 // Minimal escape-first markdown renderer for trusted-ish agent reports:
