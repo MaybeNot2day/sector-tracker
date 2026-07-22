@@ -255,7 +255,9 @@ def test_fringe_tab_renders_portfolio_curve_and_history(page: Page, base_url: st
     cells = board.locator(".regime-cell")
     expect(cells.filter(has_text="Equity")).to_contain_text("$10,247")
     expect(cells.filter(has_text="Equity")).to_contain_text("+2.47% since inception")
-    expect(cells.filter(has_text=re.compile(r"^Realized"))).to_contain_text("+$171")
+    expect(
+        cells.filter(has=page.get_by_text("Realized", exact=True))
+    ).to_contain_text("+$171")
     expect(cells.filter(has_text="Invested")).to_contain_text("$2,450")
     expect(cells.filter(has_text="Win rate")).to_contain_text("50%")
     expect(cells.filter(has_text="Max drawdown")).to_contain_text("1.2%")
