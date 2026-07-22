@@ -1431,9 +1431,12 @@ KEY_DATES_PAYLOAD: dict[str, Any] = {
 
 # Hermes book: an open long marking to market, an open short the providers
 # cannot price yet (null price → em dash), a stale idea the newest report
-# skipped, and two closed ideas for the footer list.
+# skipped, and two closed ideas for the footer list. The summary deliberately
+# disagrees with the rows: the heading must derive from the rendered table
+# (the server figure averages closes no longer shown).
 FRINGE_PAYLOAD: dict[str, Any] = {
     "as_of": _iso(),
+    "summary": {"overall_pnl_pct": 99.99, "open_count": 12, "closed_count": 34},
     "open": [
         {
             "id": 3,
