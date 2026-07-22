@@ -11,6 +11,8 @@ const themeToggle = document.querySelector("#theme-toggle");
 const viewButtons = Array.from(document.querySelectorAll(".view-tabs button"));
 const dailyView = document.querySelector("#daily-view");
 const marketsView = document.querySelector("#markets-view");
+const fringeView = document.querySelector("#fringe-view");
+const fringeBoard = document.querySelector("#fringe-board");
 const marketSearch = document.querySelector("#market-search");
 const marketFilterClear = document.querySelector("#market-filter-clear");
 const marketLayoutToggle = document.querySelector("#market-layout-toggle");
@@ -348,7 +350,7 @@ function restoreUrlState() {
   restoringUrlState = true;
   try {
     const view = params.get("view");
-    if (view === "markets") selectView("markets");
+    if (view === "markets" || view === "fringe") selectView(view);
     const group = params.get("group");
     if (group) activeGroupFilter = group;
     const query = params.get("q");
@@ -613,16 +615,17 @@ function groupCategory(group) {
 }
 
 function selectView(view) {
-  activeView = view === "markets" ? "markets" : "daily";
-  const showDaily = activeView === "daily";
-  dailyView.hidden = !showDaily;
-  marketsView.hidden = showDaily;
+  activeView = view === "markets" || view === "fringe" ? view : "daily";
+  dailyView.hidden = activeView !== "daily";
+  marketsView.hidden = activeView !== "markets";
+  fringeView.hidden = activeView !== "fringe";
   viewButtons.forEach((button) => {
     const selected = button.dataset.view === activeView;
     button.classList.toggle("active", selected);
     button.setAttribute("aria-selected", String(selected));
     button.tabIndex = selected ? 0 : -1;
   });
+  if (activeView === "fringe") renderFringeView();
   syncUrlState();
 }
 
@@ -1503,6 +1506,7 @@ async function fetchFringe() {
     latestFringe = payload;
     fringeRevision += 1;
     if (latestData?.overview) renderDailyBoard(latestData.overview, latestCryptoEtfFlows);
+    renderFringeView();
   } catch (error) {
     // Keep the last good book: a transient fetch error must not blank a
     // panel that already renders ideas, and while nothing ever loaded the
@@ -1815,18 +1819,24 @@ dailyBoard.addEventListener("click", (event) => {
   // context), else fall back to a bare Yahoo equity — the same resolution
   // order deep links use. A failed chart load already shows chart-error.
   const fringeButton = event.target.closest(".fringe-ticker");
-  if (fringeButton) {
-    const symbol = fringeButton.dataset.symbol || "";
-    if (!symbol) return;
-    const asset = findAssetConfig(symbol);
-    if (asset) {
-      openChart(asset);
-    } else if ((latestData?.crypto_tape || []).some((row) => row.symbol === symbol)) {
-      openTapeChart(symbol);
-    } else {
-      openChart({ symbol, type: "equity", quote: { provider: "yahoo" } });
-    }
+  if (fringeButton) openFringeTicker(fringeButton.dataset.symbol || "");
+});
+
+function openFringeTicker(symbol) {
+  if (!symbol) return;
+  const asset = findAssetConfig(symbol);
+  if (asset) {
+    openChart(asset);
+  } else if ((latestData?.crypto_tape || []).some((row) => row.symbol === symbol)) {
+    openTapeChart(symbol);
+  } else {
+    openChart({ symbol, type: "equity", quote: { provider: "yahoo" } });
   }
+}
+
+fringeBoard?.addEventListener("click", (event) => {
+  const fringeButton = event.target.closest(".fringe-ticker");
+  if (fringeButton) openFringeTicker(fringeButton.dataset.symbol || "");
 });
 
 function panelHeading(title, note, tip = "") {
@@ -2394,6 +2404,162 @@ function formatSignedUsd(value) {
     maximumFractionDigits: digits,
   });
   return `${value < 0 ? "\u2212" : "+"}$${abs}`;
+}
+
+// --- Fringe tab -------------------------------------------------------------
+// The paper book's full record: stat cards, equity curve, the live open
+// book, and every close. Renders from the same /api/fringe payload as the
+// Daily panel; hidden-tab renders are cheap innerHTML swaps.
+function renderFringeView() {
+  if (!fringeBoard) return;
+  const payload = latestFringe;
+  if (!payload) {
+    fringeBoard.innerHTML = '<div class="empty-state">Loading Fringe book</div>';
+    return;
+  }
+  const open = Array.isArray(payload.open) ? payload.open : [];
+  const closed = Array.isArray(payload.closed) ? payload.closed : [];
+  if (!open.length && !closed.length) {
+    fringeBoard.innerHTML =
+      '<div class="empty-state">No Fringe book yet — ideas land with the daily Fringe Corner report</div>';
+    return;
+  }
+  const portfolio = payload.summary?.portfolio || {};
+  const stats = payload.stats || {};
+  const curve = Array.isArray(payload.equity_curve) ? payload.equity_curve : [];
+  const equity = numericOrNull(portfolio.equity);
+  const returnPct = numericOrNull(portfolio.return_pct);
+  const realized = numericOrNull(portfolio.realized_usd);
+  const unrealized = numericOrNull(portfolio.unrealized_usd);
+  const invested = numericOrNull(portfolio.invested_notional);
+  const exposure = numericOrNull(portfolio.exposure_pct);
+  const winRate = numericOrNull(stats.win_rate_pct);
+  const maxDd = numericOrNull(stats.max_drawdown_pct);
+  const profitFactor = numericOrNull(stats.profit_factor);
+  const holdDays = numericOrNull(stats.avg_hold_days);
+  const tradeCount = numericOrNull(stats.trade_count) || 0;
+  fringeBoard.innerHTML = `
+    <section class="analytics-panel">
+      ${panelHeading(
+        "Paper Book",
+        `since ${escapeHtml(curve[0]?.date || "\u2014")} \u00b7 $10,000 start`,
+        "Hermes' half-Kelly paper portfolio. Equity = starting capital + realized dollars from every sized close + open positions marked to market. Realized compounds the bankroll; unrealized does not buy new size until banked."
+      )}
+      <div class="regime-grid">
+        ${regimeCell("Equity", formatUsdWhole(equity), returnPct === null ? "" : `${formatSignedPct(returnPct)} since inception`, usdTone(returnPct))}
+        ${regimeCell("Realized", realized === null ? "\u2014" : formatSignedUsd(realized), `${tradeCount} closed trade${tradeCount === 1 ? "" : "s"}`, usdTone(realized))}
+        ${regimeCell("Unrealized", unrealized === null ? "\u2014" : formatSignedUsd(unrealized), `${open.length} open position${open.length === 1 ? "" : "s"}`, usdTone(unrealized))}
+        ${regimeCell("Invested", formatUsdWhole(invested), exposure === null ? "" : `${exposure}% of book exposed`)}
+        ${regimeCell("Win rate", winRate === null ? "\u2014" : `${winRate}%`, profitFactor === null ? "" : `profit factor ${profitFactor}`, usdTone(winRate === null ? null : winRate - 50))}
+        ${regimeCell("Max drawdown", maxDd === null ? "\u2014" : `${maxDd}%`, holdDays === null ? "" : `avg hold ${holdDays}d`, maxDd ? "tone-negative" : "")}
+      </div>
+    </section>
+    <section class="analytics-panel">
+      ${panelHeading(
+        "Equity Curve",
+        curve.length ? `${curve.length} daily marks` : "",
+        "Book equity by day. History before the portfolio regime is a realized-step reconstruction (capital plus closes on their close dates); from the regime start every day carries a true mark-to-market snapshot. The dashed line is the $10,000 baseline."
+      )}
+      ${fringeEquityChart(curve)}
+    </section>
+    <section class="analytics-panel">
+      ${panelHeading(
+        "Open Positions",
+        `${open.length} open \u00b7 ${formatUsdWhole(invested)} at work`,
+        "The live book — identical to the Daily panel. Hover a size for the declared conf/stop inputs behind its Kelly fraction."
+      )}
+      ${open.length ? fringeOpenTable(open) : '<div class="empty-state">No open positions</div>'}
+    </section>
+    <section class="analytics-panel">
+      ${panelHeading(
+        "Trade History",
+        `${closed.length} closed trade${closed.length === 1 ? "" : "s"}`,
+        "Every close in the book's life, newest first. Dollar results exist from the capital regime onward; pre-capital closes were grandfathered at a flat $1,000."
+      )}
+      ${fringeHistoryTable(closed)}
+    </section>`;
+}
+
+function usdTone(value) {
+  if (typeof value !== "number" || value === 0) return "";
+  return value > 0 ? "tone-positive" : "tone-negative";
+}
+
+function formatUsdWhole(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "\u2014";
+  return `$${Math.round(value).toLocaleString("en-US")}`;
+}
+
+function fringeEquityChart(curve) {
+  if (curve.length < 2) {
+    return '<div class="empty-state">The curve builds as daily marks accrue</div>';
+  }
+  const width = 720;
+  const height = 200;
+  const pad = 8;
+  const equities = curve.map((point) => Number(point.equity));
+  const min = Math.min(...equities, 10000);
+  const max = Math.max(...equities, 10000);
+  const span = max - min || 1;
+  const x = (index) => pad + (index / (curve.length - 1)) * (width - pad * 2);
+  const y = (value) => height - pad - ((value - min) / span) * (height - pad * 2);
+  const pts = equities.map((value, index) => `${x(index).toFixed(1)},${y(value).toFixed(1)}`);
+  const base = y(10000).toFixed(1);
+  const last = equities[equities.length - 1];
+  const tone = last >= 10000 ? "positive" : "negative";
+  const area = `M ${pts[0]} L ${pts.join(" L ")} L ${x(curve.length - 1).toFixed(1)},${base} L ${x(0).toFixed(1)},${base} Z`;
+  return `<div class="equity-chart-wrap">
+    <svg class="equity-chart equity-${tone}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="Equity curve, now ${escapeHtml(formatUsdWhole(last))}">
+      <path class="equity-area" d="${area}"></path>
+      <line class="equity-base" x1="${pad}" y1="${base}" x2="${width - pad}" y2="${base}"></line>
+      <polyline class="equity-line" points="${pts.join(" ")}"></polyline>
+      <circle class="equity-dot" cx="${x(curve.length - 1).toFixed(1)}" cy="${y(last).toFixed(1)}" r="3"></circle>
+    </svg>
+    <div class="equity-axis">
+      <span>${escapeHtml(curve[0].date)}</span>
+      <span>peak ${escapeHtml(formatUsdWhole(Math.max(...equities)))} \u00b7 trough ${escapeHtml(formatUsdWhole(Math.min(...equities)))} \u00b7 now ${escapeHtml(formatUsdWhole(last))}</span>
+      <span>${escapeHtml(curve[curve.length - 1].date)}</span>
+    </div>
+  </div>`;
+}
+
+function fringeHistoryTable(closed) {
+  if (!closed.length) return '<div class="empty-state">No closed trades yet</div>';
+  const rows = closed.map((idea) => {
+    const pct = numericOrNull(idea.realized_pct);
+    const usd = numericOrNull(idea.realized_usd);
+    const tone = pct === null ? "" : pct > 0 ? "tone-positive" : pct < 0 ? "tone-negative" : "";
+    const entry = numericOrNull(idea.entry_price);
+    const exit = numericOrNull(idea.exit_price);
+    const size = numericOrNull(idea.size_notional);
+    const days =
+      idea.opened && idea.closed
+        ? Math.max(0, Math.round((Date.parse(idea.closed) - Date.parse(idea.opened)) / 86400000))
+        : null;
+    const direction = String(idea.direction || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+    const ticker = escapeHtml(idea.ticker || "");
+    return `<tr class="trade-row">
+      <td><button type="button" class="fringe-ticker" data-symbol="${ticker}" title="Open ${ticker} chart">${ticker}</button></td>
+      <td><span class="fringe-chip fringe-${direction.toLowerCase()}">${direction}</span></td>
+      <td class="trade-reason" title="${escapeHtml(idea.close_reason || "")}">${escapeHtml(idea.close_reason || idea.thesis || "")}</td>
+      <td class="fringe-num">${escapeHtml(idea.opened || "\u2014")}</td>
+      <td class="fringe-num">${escapeHtml(idea.closed || "\u2014")}</td>
+      <td class="fringe-num">${days === null ? "\u2014" : `${days}d`}</td>
+      <td class="fringe-num">${size === null ? "\u2014" : escapeHtml(formatUsdWhole(size))}</td>
+      <td class="fringe-num">${entry === null ? "\u2014" : escapeHtml(formatPrice(entry))} \u2192 ${exit === null ? "\u2014" : escapeHtml(formatPrice(exit))}</td>
+      <td class="fringe-num"><strong class="${tone}">${pct === null ? "\u2014" : escapeHtml(formatSignedPct(pct))}</strong></td>
+      <td class="fringe-num">${usd === null ? "\u2014" : `<strong class="${tone}">${escapeHtml(formatSignedUsd(usd))}</strong>`}</td>
+    </tr>`;
+  });
+  return `<div class="trade-scroll"><table class="trade-table">
+    <thead><tr>
+      <th>Idea</th><th></th><th>Close reason</th>
+      <th class="fringe-num">Opened</th><th class="fringe-num">Closed</th>
+      <th class="fringe-num">Days</th><th class="fringe-num">Size</th>
+      <th class="fringe-num">Entry \u2192 Exit</th><th class="fringe-num">P&amp;L %</th><th class="fringe-num">P&amp;L $</th>
+    </tr></thead>
+    <tbody>${rows.join("")}</tbody>
+  </table></div>`;
 }
 
 function hasLatestFlowPrint(asset) {

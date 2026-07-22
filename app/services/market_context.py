@@ -155,4 +155,8 @@ async def _fringe_book(fringe_service: FringeService | None) -> dict[str, object
     if fringe_service is None:
         return _EMPTY_BOOK.copy()
     payload = await fringe_service.payload()
-    return {"open": payload["open"], "recently_closed": payload["closed"]}
+    # The agent digest keeps a recent tail; the full history lives on the
+    # dashboard's Fringe tab (/api/fringe `closed`).
+    closed = payload["closed"]
+    recent = closed[:10] if isinstance(closed, list) else closed
+    return {"open": payload["open"], "recently_closed": recent}

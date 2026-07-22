@@ -33,7 +33,7 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from time import monotonic
 
@@ -172,7 +172,6 @@ class FringeService:
     """Ledger ingest, price stamping, and the /api/fringe payload."""
 
     QUOTE_TTL_SECONDS = 60.0
-    RECENT_CLOSED = 10
 
     def __init__(self, database_path: Path, providers: dict[ProviderName, QuoteProvider]) -> None:
         self.database_path = database_path
@@ -185,17 +184,35 @@ class FringeService:
         await self._load_and_restamp()
 
     async def payload(self) -> dict[str, object]:
-        """The /api/fringe contract: marked book, performance, recent closes."""
+        """The /api/fringe contract: marked book, performance, history, curve."""
         open_rows, closed_rows = await self._load_and_restamp()
         latest = await asyncio.to_thread(db.latest_fringe_mention, self.database_path)
         prices = await self._prices_for({str(row["ticker"]) for row in open_rows})
         open_items = [_open_item(row, prices.get(str(row["ticker"])), latest) for row in open_rows]
         closed_items = [_closed_item(row) for row in closed_rows]
+        summary = _performance_summary(open_items, closed_items)
+        portfolio = summary["portfolio"]
+        today = datetime.now(UTC).date().isoformat()
+        equity_now = float(str(portfolio["equity"]))
+        await asyncio.to_thread(
+            db.upsert_fringe_equity,
+            self.database_path,
+            date_text=today,
+            equity=equity_now,
+            realized_usd=float(str(portfolio["realized_usd"])),
+            unrealized_usd=float(str(portfolio["unrealized_usd"])),
+            invested_notional=float(str(portfolio["invested_notional"])),
+            open_count=len(open_items),
+        )
+        stored = await asyncio.to_thread(db.load_fringe_equity, self.database_path)
+        curve = _equity_curve(stored, open_items, closed_items, today, equity_now)
         return {
             "as_of": datetime.now(UTC).isoformat(),
-            "summary": _performance_summary(open_items, closed_items),
+            "summary": summary,
             "open": open_items,
-            "closed": closed_items[: self.RECENT_CLOSED],
+            "closed": closed_items,
+            "equity_curve": curve,
+            "stats": _trade_stats(closed_items, curve),
         }
 
     async def _load_and_restamp(
@@ -541,3 +558,96 @@ def _target_price(target: object) -> float | None:
 
 def _round_price(value: object) -> float | None:
     return round(value, 4) if isinstance(value, int | float) else None
+
+
+def _equity_curve(
+    stored: list[dict[str, object]],
+    open_items: list[dict[str, object]],
+    closed_items: list[dict[str, object]],
+    today: str,
+    equity_now: float,
+) -> list[dict[str, object]]:
+    """Daily equity series for the tab's chart.
+
+    Pre-snapshot history is a realized-step reconstruction: starting capital
+    at the book's first open, stepped by cumulative realized dollars at each
+    close date. Stored end-of-day mark-to-market snapshots override those
+    steps once they exist, and today always carries the live mark.
+    """
+    points: dict[str, float] = {}
+    opened_dates = [
+        str(item["opened"])
+        for item in [*open_items, *closed_items]
+        if item.get("opened") is not None
+    ]
+    if opened_dates:
+        points[min(opened_dates)] = STARTING_CAPITAL
+    realized_by_date: dict[str, float] = {}
+    for item in closed_items:
+        usd = item["realized_usd"]
+        closed_date = item.get("closed")
+        if closed_date is None or not isinstance(usd, int | float):
+            continue
+        key = str(closed_date)
+        realized_by_date[key] = realized_by_date.get(key, 0.0) + float(usd)
+    cumulative = 0.0
+    for date_text in sorted(realized_by_date):
+        cumulative += realized_by_date[date_text]
+        points.setdefault(date_text, STARTING_CAPITAL + cumulative)
+        points[date_text] = STARTING_CAPITAL + cumulative
+    for row in stored:
+        points[str(row["date"])] = float(str(row["equity"]))
+    points[today] = equity_now
+    return [
+        {"date": date_text, "equity": round(points[date_text], 2)}
+        for date_text in sorted(points)
+    ]
+
+
+def _trade_stats(
+    closed_items: list[dict[str, object]], curve: list[dict[str, object]]
+) -> dict[str, object]:
+    """Track-record numbers for the Fringe tab; dollars from sized closes."""
+    sized = [
+        item for item in closed_items if isinstance(item["realized_usd"], int | float)
+    ]
+    dollars = {int(str(item["id"])): float(str(item["realized_usd"])) for item in sized}
+    wins = [item for item in sized if dollars[int(str(item["id"]))] > 0]
+    losses = [item for item in sized if dollars[int(str(item["id"]))] < 0]
+    gross_win = sum(dollars[int(str(item["id"]))] for item in wins)
+    gross_loss = -sum(dollars[int(str(item["id"]))] for item in losses)
+    hold_days = [
+        (date.fromisoformat(str(item["closed"])) - date.fromisoformat(str(item["opened"]))).days
+        for item in sized
+        if item.get("closed") is not None and item.get("opened") is not None
+    ]
+    best = max(sized, key=lambda item: dollars[int(str(item["id"]))], default=None)
+    worst = min(sized, key=lambda item: dollars[int(str(item["id"]))], default=None)
+    peak = 0.0
+    max_drawdown = 0.0
+    for point in curve:
+        equity = float(str(point["equity"]))
+        peak = max(peak, equity)
+        if peak > 0:
+            max_drawdown = max(max_drawdown, (peak - equity) / peak)
+    return {
+        "trade_count": len(sized),
+        "win_rate_pct": round(len(wins) / len(sized) * 100.0, 1) if sized else None,
+        "profit_factor": round(gross_win / gross_loss, 2) if gross_loss > 0 else None,
+        "avg_win_usd": round(gross_win / len(wins), 2) if wins else None,
+        "avg_loss_usd": round(-gross_loss / len(losses), 2) if losses else None,
+        "best": _stat_trade(best),
+        "worst": _stat_trade(worst),
+        "avg_hold_days": round(sum(hold_days) / len(hold_days), 1) if hold_days else None,
+        "max_drawdown_pct": round(max_drawdown * 100.0, 2),
+    }
+
+
+def _stat_trade(item: dict[str, object] | None) -> dict[str, object] | None:
+    if item is None:
+        return None
+    return {
+        "ticker": item["ticker"],
+        "realized_usd": item["realized_usd"],
+        "realized_pct": item["realized_pct"],
+    }

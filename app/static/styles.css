@@ -1702,6 +1702,108 @@ a.key-date-row:focus-visible {
   font-size: 10px;
 }
 
+/* --- Fringe tab: equity curve + trade history ---------------------------- */
+.equity-chart-wrap {
+  padding: 12px 14px 10px;
+}
+
+.equity-chart {
+  width: 100%;
+  height: 200px;
+  display: block;
+}
+
+.equity-chart .equity-line {
+  fill: none;
+  stroke-width: 1.8;
+  vector-effect: non-scaling-stroke;
+}
+
+.equity-positive .equity-line { stroke: var(--green); }
+.equity-negative .equity-line { stroke: var(--red); }
+.equity-positive .equity-area { fill: rgba(77, 179, 138, 0.08); }
+.equity-negative .equity-area { fill: rgba(224, 99, 95, 0.08); }
+.equity-positive .equity-dot { fill: var(--green); }
+.equity-negative .equity-dot { fill: var(--red); }
+
+.equity-base {
+  stroke: var(--line-strong);
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+  vector-effect: non-scaling-stroke;
+}
+
+.equity-axis {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 7px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.trade-scroll {
+  overflow-x: auto;
+}
+
+.trade-table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: collapse;
+}
+
+.trade-table th {
+  height: 26px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: var(--track-label);
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.trade-table th.fringe-num {
+  text-align: right;
+}
+
+.trade-table td {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--muted-strong);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.trade-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.trade-table td:first-child,
+.trade-table th:first-child {
+  padding-left: 14px;
+}
+
+.trade-table td:last-child,
+.trade-table th:last-child {
+  padding-right: 14px;
+}
+
+.trade-table td.trade-reason {
+  max-width: 380px;
+  overflow: hidden;
+  color: var(--muted-strong);
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+}
+
 .fringe-closed-row em {
   font-style: normal;
   text-align: right;

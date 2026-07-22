@@ -132,6 +132,16 @@ CREATE TABLE IF NOT EXISTS fringe_ideas (
 
 CREATE INDEX IF NOT EXISTS idx_fringe_ideas_status ON fringe_ideas (status, ticker, direction);
 
+CREATE TABLE IF NOT EXISTS fringe_equity_history (
+    date TEXT PRIMARY KEY,
+    equity REAL NOT NULL,
+    realized_usd REAL NOT NULL,
+    unrealized_usd REAL NOT NULL,
+    invested_notional REAL NOT NULL,
+    open_count INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS etf_flow_history (
     asset TEXT NOT NULL,
     flow_date TEXT NOT NULL,
@@ -937,6 +947,68 @@ def load_fringe_ideas(
             "exit_price": _optional_float(row["exit_price"]),
             "last_mentioned": str(row["last_mentioned"]),
             "source_slug": str(row["source_slug"]),
+        }
+        for row in rows
+    ]
+
+
+def upsert_fringe_equity(
+    path: Path,
+    *,
+    date_text: str,
+    equity: float,
+    realized_usd: float,
+    unrealized_usd: float,
+    invested_notional: float,
+    open_count: int,
+) -> None:
+    """One mark-to-market equity point per day; same-day builds converge to
+    the latest mark, so the stored row ends the day as the EOD snapshot."""
+    init_db(path)
+    with _connect(path) as conn:
+        conn.execute(
+            """
+            INSERT INTO fringe_equity_history (
+                date, equity, realized_usd, unrealized_usd,
+                invested_notional, open_count, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(date) DO UPDATE SET
+                equity = excluded.equity,
+                realized_usd = excluded.realized_usd,
+                unrealized_usd = excluded.unrealized_usd,
+                invested_notional = excluded.invested_notional,
+                open_count = excluded.open_count,
+                updated_at = excluded.updated_at
+            """,
+            (
+                date_text,
+                equity,
+                realized_usd,
+                unrealized_usd,
+                invested_notional,
+                open_count,
+                _to_iso(datetime.now(UTC)),
+            ),
+        )
+
+
+def load_fringe_equity(path: Path) -> list[dict[str, object]]:
+    """Stored daily equity marks, oldest first."""
+    init_db(path)
+    with _connect(path) as conn:
+        rows = conn.execute(
+            "SELECT date, equity, realized_usd, unrealized_usd,"
+            " invested_notional, open_count"
+            " FROM fringe_equity_history ORDER BY date"
+        ).fetchall()
+    return [
+        {
+            "date": str(row["date"]),
+            "equity": float(row["equity"]),
+            "realized_usd": float(row["realized_usd"]),
+            "unrealized_usd": float(row["unrealized_usd"]),
+            "invested_notional": float(row["invested_notional"]),
+            "open_count": int(row["open_count"]),
         }
         for row in rows
     ]

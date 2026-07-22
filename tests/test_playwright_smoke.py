@@ -219,7 +219,7 @@ def test_daily_board_loads_without_page_errors_and_renders_core_sections(
     expect(fringe_rows.nth(1).locator(".fringe-entry")).to_have_text("—")
     expect(fringe_rows.nth(0)).to_contain_text("Miner with HPC optionality")
     expect(fringe_rows.nth(2).locator(".fringe-stale")).to_have_text("not refreshed")
-    numeric_column_offsets = page.locator(".fringe-table").evaluate(
+    numeric_column_offsets = page.locator("#daily-board .fringe-table").evaluate(
         """table => {
           const textRight = element => {
             const range = document.createRange();
@@ -240,6 +240,42 @@ def test_daily_board_loads_without_page_errors_and_renders_core_sections(
     expect(closed_rows.nth(0)).to_contain_text("160.20 \u2192 173.10")
     expect(closed_rows.nth(0)).to_contain_text("+8.05%")
     expect(closed_rows.nth(0).locator(".fringe-closed-usd")).to_have_text("+$201")
+
+
+def test_fringe_tab_renders_portfolio_curve_and_history(page: Page, base_url: str) -> None:
+    _goto_board(page, base_url)
+
+    page.locator("#fringe-tab").click()
+    expect(page.locator("#fringe-view")).to_be_visible()
+    expect(page.locator("#daily-view")).to_be_hidden()
+    board = page.locator("#fringe-board")
+
+    # Stat cards derive from summary.portfolio and stats.
+    expect(board.get_by_role("heading", name="Paper Book")).to_be_visible()
+    cells = board.locator(".regime-cell")
+    expect(cells.filter(has_text="Equity")).to_contain_text("$10,247")
+    expect(cells.filter(has_text="Equity")).to_contain_text("+2.47% since inception")
+    expect(cells.filter(has_text=re.compile(r"^Realized"))).to_contain_text("+$171")
+    expect(cells.filter(has_text="Invested")).to_contain_text("$2,450")
+    expect(cells.filter(has_text="Win rate")).to_contain_text("50%")
+    expect(cells.filter(has_text="Max drawdown")).to_contain_text("1.2%")
+
+    # Equity curve renders as an inline SVG with baseline and live dot.
+    expect(board.locator(".equity-chart")).to_be_visible()
+    expect(board.locator(".equity-axis")).to_contain_text("now $10,247")
+
+    # Open positions reuse the blotter table; history lists every close.
+    expect(board.locator(".fringe-table .fringe-row")).to_have_count(3)
+    history = board.locator(".trade-table .trade-row")
+    expect(history).to_have_count(2)
+    expect(history.nth(0)).to_contain_text("NVDA")
+    expect(history.nth(0)).to_contain_text("+$201")
+    expect(history.nth(0)).to_contain_text("18d")
+
+    # Deep link restores the tab.
+    page.goto(f"{base_url}/#view=fringe", wait_until="domcontentloaded")
+    expect(page.locator("#fringe-view")).to_be_visible()
+    expect(page.locator("#fringe-tab")).to_have_attribute("aria-selected", "true")
 
 
 def test_closed_news_panel_is_inert_until_opened(page: Page, base_url: str) -> None:
@@ -1457,6 +1493,23 @@ FRINGE_PAYLOAD: dict[str, Any] = {
             "invested_notional": 2450.0,
             "exposure_pct": 23.9,
         },
+    },
+    "equity_curve": [
+        {"date": "2026-06-15", "equity": 10000.0},
+        {"date": "2026-07-02", "equity": 9970.05},
+        {"date": "2026-07-08", "equity": 10171.3},
+        {"date": "2026-07-09", "equity": 10247.02},
+    ],
+    "stats": {
+        "trade_count": 2,
+        "win_rate_pct": 50.0,
+        "profit_factor": 6.72,
+        "avg_win_usd": 201.25,
+        "avg_loss_usd": -29.95,
+        "best": {"ticker": "NVDA", "realized_usd": 201.25, "realized_pct": 8.05},
+        "worst": {"ticker": "GME", "realized_usd": -29.95, "realized_pct": -5.99},
+        "avg_hold_days": 13.0,
+        "max_drawdown_pct": 1.2,
     },
     "open": [
         {
