@@ -184,14 +184,16 @@ carries per-idea `size_notional`, `unrealized_usd`/`realized_usd`, and a
 open positions and priced closes alike — was grandfathered at a flat $1,000, so
 historical realized results count in dollars too.
 
-Declared stops are **enforced intraday**: `scripts/fringe_stop_monitor.py` runs on the
-Hermes box every 5 minutes around the clock, and when a position's mark breaches its
-stop on two consecutive ticks (bad-tick filter) it closes the position through
-`POST /api/fringe/{id}/close` (edit-token gated). The board re-marks at its own fresh
-price — gaps close with honest slippage, not the stop print — and the close lands in
-the ledger as `auto-stop: ...` for the agent to review in its next brief. Positions
-without a declared stop cannot be enforced; those trigger one alert per day when the
-mark sits 10%+ against entry. New ideas still open only through the daily brief.
+Declared stops AND targets are **enforced intraday**: `scripts/fringe_stop_monitor.py`
+runs on the Hermes box every 5 minutes around the clock, and when a position's mark
+crosses either declared barrier on two consecutive ticks (bad-tick filter) it closes
+the position through `POST /api/fringe/{id}/close` (edit-token gated). The board
+re-marks at its own fresh price — gaps close with honest slippage, not the barrier
+print — and the close lands in the ledger as `auto-stop: ...` / `auto-target: ...` for
+the agent to review in its next brief; a move with legs beyond a harvested target is
+re-opened next brief as a fresh, re-sized bet. Positions without a declared stop
+cannot be stop-enforced; those trigger one alert per day when the mark sits 10%+
+against entry. New ideas still open only through the daily brief.
 
 Hermes manages its own book explicitly — unlike Key Dates the ledger **accrues**
 instead of mirroring. `OPEN` on an already-open `(ticker, direction)` idea just

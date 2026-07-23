@@ -83,7 +83,7 @@ def test_breach_requires_two_consecutive_ticks(wired: dict[str, Any]) -> None:
 
     assert monitor.run() == 0  # tick 1: armed, no close
     assert wired["calls"]["closes"] == []
-    assert json.loads(wired["state"].read_text())["breach"] == {"AMD:long:9": 1}
+    assert json.loads(wired["state"].read_text())["breach"] == {"stop:AMD:long:9": 1}
 
     assert monitor.run() == 0  # tick 2: enforced
     assert len(wired["calls"]["closes"]) == 1
@@ -131,3 +131,39 @@ def test_stopless_big_move_alerts_once_per_day(wired: dict[str, Any]) -> None:
     ]
     assert monitor.run() == 0
     assert len(wired["calls"]["alerts"]) == 1
+
+
+def test_target_hit_harvests_after_two_ticks(wired: dict[str, Any]) -> None:
+    winner = _idea(
+        id=6, ticker="AMD", stop_price=430.0, target_price=580.0,
+        last=584.5, unrealized_pct=16.1,
+    )
+    wired["book"]["open"] = [winner]
+
+    assert monitor.run() == 0  # tick 1: armed
+    assert wired["calls"]["closes"] == []
+    assert json.loads(wired["state"].read_text())["breach"] == {"target:AMD:long:6": 1}
+
+    assert monitor.run() == 0  # tick 2: harvested
+    (call,) = wired["calls"]["closes"]
+    assert call[0] == 6
+    assert call[1].startswith("auto-target: long target $580 reached at $584.5")
+    assert "Target hit" in wired["calls"]["alerts"][0]
+    assert "re-open a fresh" in wired["calls"]["alerts"][0]
+
+
+def test_short_target_direction() -> None:
+    assert monitor.target_reached("long", 584.5, 580.0) is True
+    assert monitor.target_reached("long", 575.0, 580.0) is False
+    assert monitor.target_reached("short", 139.0, 140.0) is True
+    assert monitor.target_reached("short", 145.0, 140.0) is False
+
+
+def test_intact_position_with_both_barriers_stays_open(wired: dict[str, Any]) -> None:
+    wired["book"]["open"] = [
+        _idea(last=500.0, stop_price=450.0, target_price=580.0, unrealized_pct=-0.7)
+    ]
+    assert monitor.run() == 0
+    assert wired["calls"]["closes"] == []
+    assert wired["calls"]["alerts"] == []
+    assert json.loads(wired["state"].read_text())["breach"] == {}

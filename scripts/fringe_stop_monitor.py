@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Intraday auto-stop monitor for the Fringe paper book.
+"""Intraday barrier monitor for the Fringe paper book: stops AND targets.
 
 Every timer tick (5 minutes, 24/7 — crypto never closes) it reads the open
 book from /api/fringe and compares each position's mark against its declared
-stop. A breach must persist for two consecutive ticks (bad-tick filter); the
-second tick closes the position through POST /api/fringe/{id}/close — the
-board re-marks at its own fresh price, so gaps close with honest slippage —
-and announces the close through the Hermes gateway.
+stop and target — the same two numbers its Kelly size was computed from. A
+barrier must hold on two consecutive ticks (bad-tick filter); the second
+tick closes the position through POST /api/fringe/{id}/close — the board
+re-marks at its own fresh price, so gaps close with honest slippage — and
+announces the close through the Hermes gateway. Stops cut losers; targets
+harvest winners; re-opening past a target is a fresh, re-sized bet in the
+next brief.
 
-Positions without a declared stop cannot be enforced; those get one alert
-per day when the mark sits 10% or more against entry.
+Positions without a declared stop cannot be stop-enforced; those get one
+alert per day when the mark sits 10% or more against entry.
 
 Config: ~/.config/sector-tracker/uploader.env (BOARD_URL, EDIT_TOKEN,
 ALERT_TARGET). State: ~/.local/state/sector-tracker/stop-monitor.json.
@@ -85,6 +88,10 @@ def stop_breached(direction: str, last: float, stop: float) -> bool:
     return last <= stop if direction != "short" else last >= stop
 
 
+def target_reached(direction: str, last: float, target_price: float) -> bool:
+    return last >= target_price if direction != "short" else last <= target_price
+
+
 def signed_usd(value: float) -> str:
     return f"{'-' if value < 0 else '+'}${abs(value):,.2f}"
 
@@ -121,28 +128,41 @@ def run() -> int:
         key = f"{ticker}:{direction}:{idea_id}"
         last = idea.get("last")
         stop = idea.get("stop_price")
+        target_price = idea.get("target_price")
         pct = idea.get("unrealized_pct")
+        if not isinstance(last, int | float):
+            continue
 
-        if isinstance(last, int | float) and isinstance(stop, int | float):
-            if not stop_breached(direction, float(last), float(stop)):
-                continue  # count resets by omission from next_counts
-            streak = int(counts.get(key, 0)) + 1
+        barriers: list[tuple[str, float]] = []
+        if isinstance(stop, int | float) and stop_breached(direction, float(last), float(stop)):
+            barriers.append(("stop", float(stop)))
+        if isinstance(target_price, int | float) and target_reached(
+            direction, float(last), float(target_price)
+        ):
+            barriers.append(("target", float(target_price)))
+
+        fired = False
+        for kind, level in barriers[:1]:  # inverted geometry: stop wins
+            skey = f"{kind}:{key}"
+            streak = int(counts.get(skey, 0)) + 1
             if streak < BREACH_TICKS:
-                next_counts[key] = streak
-                log(f"{key}: stop {stop} breached at {last} (tick {streak}/{BREACH_TICKS})")
+                next_counts[skey] = streak
+                log(f"{skey}: {level} touched at {last} (tick {streak}/{BREACH_TICKS})")
                 continue
+            verb = "breached" if kind == "stop" else "reached"
             reason = (
-                f"auto-stop: {direction} stop ${stop:g} breached at ${float(last):g} "
+                f"auto-{kind}: {direction} {kind} ${level:g} {verb} at ${float(last):g} "
                 f"on two consecutive 5m marks"
             )
             try:
                 result = close_position(base_url, token, int(str(idea_id)), reason)
             except (OSError, ValueError, urllib.error.URLError) as exc:
-                next_counts[key] = streak  # keep armed; retry next tick
-                log(f"{key}: close failed ({exc}); retrying next tick")
+                next_counts[skey] = streak  # keep armed; retry next tick
+                log(f"{skey}: close failed ({exc}); retrying next tick")
                 continue
             item = result.get("closed") or {}
             closed += 1
+            fired = True
             exit_price = item.get("exit_price")
             usd = item.get("realized_usd")
             realized_pct = item.get("realized_pct")
@@ -155,15 +175,27 @@ def run() -> int:
                 )
                 if part
             )
-            log(f"{key}: closed ({summary})")
-            send_alert(
-                target,
+            log(f"{skey}: closed ({summary})")
+            headline = (
                 f"Auto-stop: {direction.upper()} {ticker} closed — declared stop "
-                f"${stop:g} breached (mark ${float(last):g}). {summary}. "
-                f"The agent will review it in the next Fringe brief. {base_url}/#view=fringe",
+                f"${level:g} breached (mark ${float(last):g})"
+                if kind == "stop"
+                else f"Target hit: {direction.upper()} {ticker} harvested — declared "
+                f"target ${level:g} reached (mark ${float(last):g})"
             )
-        elif (
-            isinstance(pct, int | float)
+            follow = (
+                "The agent will review it in the next Fringe brief."
+                if kind == "stop"
+                else "If the move has legs, the agent can re-open a fresh, re-sized bet "
+                "in the next brief."
+            )
+            send_alert(target, f"{headline}. {summary}. {follow} {base_url}/#view=fringe")
+        if fired or barriers:
+            continue
+
+        if (
+            not isinstance(stop, int | float)
+            and isinstance(pct, int | float)
             and float(pct) <= BIG_MOVE_ALERT_PCT
             and alerted.get(key) != today
         ):
