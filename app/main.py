@@ -128,6 +128,10 @@ class ReportRequest(BaseModel):
         return value
 
 
+class FringeCloseRequest(BaseModel):
+    reason: str = Field(default="auto-stop", min_length=1, max_length=300)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = Settings()
@@ -637,6 +641,25 @@ async def fringe() -> dict[str, object]:
     """
     service: FringeService = app.state.fringe_service
     return await service.payload()
+
+
+@app.post("/api/fringe/{idea_id}/close", dependencies=[Depends(require_edit_token)])
+async def close_fringe_position(
+    idea_id: int, request: FringeCloseRequest
+) -> dict[str, object]:
+    """Close one open idea at the current mark — the intraday auto-stop path.
+
+    The exit price is always the board's own fresh mark, never caller input;
+    honest slippage on gaps is the point.
+    """
+    service: FringeService = app.state.fringe_service
+    try:
+        item = await service.close_at_market(idea_id, request.reason)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="idea_not_open") from None
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="mark_unavailable") from None
+    return {"closed": item}
 
 
 @app.get("/api/market-context")

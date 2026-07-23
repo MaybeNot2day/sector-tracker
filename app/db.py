@@ -1028,6 +1028,29 @@ def set_fringe_sizes(path: Path, *, sizes: Sequence[tuple[int, float]]) -> None:
         )
 
 
+def close_fringe_idea(
+    path: Path, *, idea_id: int, exit_price: float, closed_date: str, reason: str
+) -> bool:
+    """Close one open idea at a known mark — the intraday auto-stop path.
+
+    Mirrors a report CLOSE (status, dates, reason) but stamps the exit price
+    immediately: the caller just marked the ticker, no lazy re-stamp needed.
+    """
+    init_db(path)
+    now = _to_iso(datetime.now(UTC))
+    with _connect(path) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE fringe_ideas
+            SET status = 'closed', closed_date = ?, close_reason = ?,
+                exit_price = ?, last_mentioned = ?, updated_at = ?
+            WHERE id = ? AND status = 'open'
+            """,
+            (closed_date, reason, exit_price, closed_date, now, idea_id),
+        )
+    return cursor.rowcount > 0
+
+
 def latest_fringe_mention(path: Path) -> str | None:
     """Newest report date that fed the book; open ideas older than this
     were not refreshed by the latest report (the UI's `stale` flag)."""

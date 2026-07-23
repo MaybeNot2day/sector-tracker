@@ -924,3 +924,82 @@ def test_sharpe_ratio_annualizes_curve_returns() -> None:
     assert _trade_stats([], curve[:2])["sharpe_ratio"] is None
     flat = [{"date": f"2026-07-0{i}", "equity": 10000.0} for i in range(1, 4)]
     assert _trade_stats([], flat)["sharpe_ratio"] is None
+
+
+# --- intraday auto-stop -------------------------------------------------------
+
+
+def test_close_at_market_endpoint_closes_at_fresh_mark(
+    configure_app: Callable[..., Path],
+) -> None:
+    yahoo = ScriptedYahoo({"AMD": 500.0})
+    configure_app({"yahoo": yahoo})
+    client = TestClient(app)
+    client.post(
+        "/api/reports",
+        json={
+            "title": "Hermes Fringe Corner",
+            "date": "2026-07-23",
+            "body": (
+                "## Fringe Corner\n"
+                "- OPEN LONG AMD — rack thesis [conf: 60%] [stop: $450] [target: $580]\n"
+            ),
+        },
+    )
+    (idea,) = client.get("/api/fringe").json()["open"]
+
+    # The board re-marks at ITS OWN price: the gap below the stop is the
+    # honest exit, not the stop print.
+    yahoo.prices["AMD"] = 441.2
+    app.state.fringe_service.QUOTE_TTL_SECONDS = 0.0
+    response = client.post(
+        f"/api/fringe/{idea['id']}/close", json={"reason": "auto-stop: test breach"}
+    )
+    assert response.status_code == 200
+    closed = response.json()["closed"]
+    assert closed["exit_price"] == 441.2
+    assert closed["realized_pct"] == -11.76
+    assert closed["realized_usd"] == -205.8  # on the $1,750 half-Kelly size
+    assert closed["close_reason"] == "auto-stop: test breach"
+
+    payload = client.get("/api/fringe").json()
+    assert payload["open"] == []
+    assert payload["summary"]["portfolio"]["realized_usd"] == -205.8
+
+    # Closing again: the idea is no longer open.
+    again = client.post(f"/api/fringe/{idea['id']}/close", json={})
+    assert again.status_code == 404
+
+
+def test_close_at_market_requires_token_and_a_price(
+    configure_app: Callable[..., Path],
+) -> None:
+    yahoo = ScriptedYahoo({"AMD": 500.0})
+    path = configure_app({"yahoo": yahoo})
+    client = TestClient(app)
+    client.post(
+        "/api/reports",
+        json={
+            "title": "Hermes Fringe Corner",
+            "date": "2026-07-23",
+            "body": "## Fringe Corner\n- OPEN LONG AMD — thesis [stop: $450] [target: $580]\n",
+        },
+    )
+    (idea,) = client.get("/api/fringe").json()["open"]
+
+    # With EDIT_TOKEN configured, a missing header is rejected.
+    app.state.settings = SimpleNamespace(edit_token="sekrit", database_path=path)
+    denied = client.post(f"/api/fringe/{idea['id']}/close", json={})
+    assert denied.status_code == 401
+
+    # Provider outage: never close blind — 503 and the monitor retries.
+    yahoo.fail = True
+    app.state.fringe_service.QUOTE_TTL_SECONDS = 0.0
+    blind = client.post(
+        f"/api/fringe/{idea['id']}/close",
+        json={},
+        headers={"X-Edit-Token": "sekrit"},
+    )
+    assert blind.status_code == 503
+    (still_open,) = client.get("/api/fringe").json()["open"]
+    assert still_open["id"] == idea["id"]

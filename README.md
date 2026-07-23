@@ -184,6 +184,15 @@ carries per-idea `size_notional`, `unrealized_usd`/`realized_usd`, and a
 open positions and priced closes alike — was grandfathered at a flat $1,000, so
 historical realized results count in dollars too.
 
+Declared stops are **enforced intraday**: `scripts/fringe_stop_monitor.py` runs on the
+Hermes box every 5 minutes around the clock, and when a position's mark breaches its
+stop on two consecutive ticks (bad-tick filter) it closes the position through
+`POST /api/fringe/{id}/close` (edit-token gated). The board re-marks at its own fresh
+price — gaps close with honest slippage, not the stop print — and the close lands in
+the ledger as `auto-stop: ...` for the agent to review in its next brief. Positions
+without a declared stop cannot be enforced; those trigger one alert per day when the
+mark sits 10%+ against entry. New ideas still open only through the daily brief.
+
 Hermes manages its own book explicitly — unlike Key Dates the ledger **accrues**
 instead of mirroring. `OPEN` on an already-open `(ticker, direction)` idea just
 refreshes the thesis/horizon/target (entry price and opened date are preserved); `HOLD`
@@ -260,6 +269,8 @@ units in `deploy/` (lingering is enabled, so they run unattended):
 - `sector-tracker-report-watchdog.service` — validates vault files, repairs missed
   uploads, compares dashboard bodies, checks the Fringe ledger, and sends edge-triggered
   failure/recovery alerts through Hermes
+- `sector-tracker-stops.timer` / `.service` — the 5-minute, 24/7 auto-stop monitor
+  described in the Fringe Corner section
 
 ## Configuration
 

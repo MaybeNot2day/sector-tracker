@@ -289,6 +289,39 @@ class FringeService:
             sizes.append((int(str(row["id"])), notional))
         await asyncio.to_thread(db.set_fringe_sizes, self.database_path, sizes=sizes)
 
+    async def close_at_market(self, idea_id: int, reason: str) -> dict[str, object]:
+        """Close one open idea at the board's own fresh mark (auto-stop path).
+
+        Raises LookupError for an unknown/already-closed id and RuntimeError
+        when no provider can price the ticker right now — the monitor simply
+        retries on its next tick.
+        """
+        open_rows = await asyncio.to_thread(
+            db.load_fringe_ideas, self.database_path, status="open"
+        )
+        row = next((r for r in open_rows if int(str(r["id"])) == idea_id), None)
+        if row is None:
+            raise LookupError("idea_not_open")
+        ticker = str(row["ticker"])
+        price = (await self._prices_for({ticker})).get(ticker)
+        if price is None:
+            raise RuntimeError("mark_unavailable")
+        closed_date = datetime.now(UTC).date().isoformat()
+        closed = await asyncio.to_thread(
+            db.close_fringe_idea,
+            self.database_path,
+            idea_id=idea_id,
+            exit_price=price,
+            closed_date=closed_date,
+            reason=reason,
+        )
+        if not closed:
+            raise LookupError("idea_not_open")
+        row["exit_price"] = price
+        row["closed_date"] = closed_date
+        row["close_reason"] = reason
+        return _closed_item(row)
+
     async def _prices_for(self, tickers: set[str]) -> dict[str, float | None]:
         """Last prices for arbitrary tickers, TTL-cached; failures yield None."""
         now = monotonic()
