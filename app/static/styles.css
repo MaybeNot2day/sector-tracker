@@ -1885,6 +1885,92 @@ a.key-date-row:focus-visible {
   max-width: 1100px;
 }
 
+.board.board-map {
+  columns: auto;
+  max-width: none;
+}
+
+/* --- Markets treemap ------------------------------------------------------ */
+.market-map {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: inset 0 1px 0 var(--panel-top-light), var(--panel-shadow);
+}
+
+.map-group {
+  position: absolute;
+  overflow: hidden;
+  border: 1px solid var(--bg);
+}
+
+.map-group-label {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1;
+  height: 15px;
+  padding: 0 6px;
+  overflow: hidden;
+  background: var(--surface-raised);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  line-height: 15px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.map-tile {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 3px 5px;
+  overflow: hidden;
+  border: 1px solid var(--bg);
+  background: var(--surface-soft);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.map-tile span {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.map-tile em {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-style: normal;
+  opacity: 0.85;
+}
+
+.map-tile:hover,
+.map-tile:focus-visible {
+  z-index: 2;
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.map-tile-small span {
+  font-size: 9.5px;
+}
+
+.map-tile-small em,
+.map-tile-tiny span,
+.map-tile-tiny em {
+  display: none;
+}
+
 .market-tools {
   display: flex;
   align-items: center;

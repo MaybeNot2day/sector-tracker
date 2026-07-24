@@ -16,6 +16,7 @@ const fringeBoard = document.querySelector("#fringe-board");
 const marketSearch = document.querySelector("#market-search");
 const marketFilterClear = document.querySelector("#market-filter-clear");
 const marketLayoutToggle = document.querySelector("#market-layout-toggle");
+const marketMapToggle = document.querySelector("#market-map-toggle");
 const marketFilterStatus = document.querySelector("#market-filter-status");
 const categoryButtons = Array.from(document.querySelectorAll(".category-tabs button"));
 const cryptoTapeElement = document.querySelector("#crypto-tape");
@@ -82,10 +83,11 @@ let chartResizeFrame = null;
 let marketSearchQuery = "";
 let activeGroupFilter = "";
 let marketSort = { key: "configured", direction: "default" };
-let marketLayout = "grouped"; // "grouped" | "flat"
+let marketLayout = "grouped"; // "grouped" | "flat" | "map"
 let marketCategory = "tradfi"; // "tradfi" | "crypto"
 let tapeSorts = {}; // per-basket { key, direction }
 let tapePages = {}; // per-basket page index
+let mapResizeTimer = null;
 let marketSearchTimer = null;
 let feedMode = "poll"; // flips to "ws" only once the socket actually opens
 let activeSocket = null; // live WS reference so wake-up checks can close a zombie
@@ -331,7 +333,7 @@ function syncUrlState() {
   if (activeView !== "daily") params.set("view", activeView);
   if (activeGroupFilter) params.set("group", activeGroupFilter);
   if (marketSearchQuery) params.set("q", marketSearchQuery);
-  if (marketLayout === "flat") params.set("layout", "flat");
+  if (marketLayout !== "grouped") params.set("layout", marketLayout);
   if (marketCategory !== "tradfi") params.set("cat", marketCategory);
   if (activeSymbol) {
     params.set("chart", activeSymbol);
@@ -363,12 +365,11 @@ function restoreUrlState() {
       marketCategory = cat;
       updateCategoryButtons();
     }
-    if (params.get("layout") === "flat") {
-      marketLayout = "flat";
-      marketSort = { key: "pct", direction: "desc" };
-      marketLayoutToggle.setAttribute("aria-pressed", "true");
-      marketLayoutToggle.textContent = "Grouped";
-      marketLayoutToggle.title = "Back to sector groups";
+    const layout = params.get("layout");
+    if (layout === "flat" || layout === "map") {
+      marketLayout = layout;
+      if (layout === "flat") marketSort = { key: "pct", direction: "desc" };
+      syncLayoutButtons();
     }
     const chartSymbol = params.get("chart");
     if (chartSymbol) {
@@ -522,6 +523,16 @@ function init() {
   });
   marketFilterClear.addEventListener("click", clearMarketFilters);
   marketLayoutToggle.addEventListener("click", toggleMarketLayout);
+  marketMapToggle.addEventListener("click", toggleMarketMap);
+  board.addEventListener("click", (event) => {
+    const tile = event.target.closest(".map-tile");
+    if (tile) openFringeTicker(tile.dataset.symbol || "");
+  });
+  window.addEventListener("resize", () => {
+    if (marketLayout !== "map" || marketsView.hidden) return;
+    if (mapResizeTimer !== null) window.clearTimeout(mapResizeTimer);
+    mapResizeTimer = window.setTimeout(() => renderBoard(latestData), 200);
+  });
   categoryButtons.forEach((button) => {
     button.addEventListener("click", () => selectCategory(button.dataset.category || "tradfi"));
   });
@@ -2583,6 +2594,14 @@ function renderBoard(payload) {
   const groups = marketLayout === "flat" ? flatGroups(categoryGroups) : visibleGroups(categoryGroups);
   board.classList.remove("board-loading");
   board.classList.toggle("flat", marketLayout === "flat");
+  board.classList.toggle("board-map", marketLayout === "map");
+  if (marketLayout === "map") {
+    cryptoTapeElement.hidden = true;
+    if (cryptoTapeElement.parentElement === board) cryptoTapeElement.remove();
+    renderMarketMap(categoryGroups, payload);
+    return;
+  }
+  board.querySelector(":scope > .market-map")?.remove();
   const showTape = marketCategory === "crypto";
   // Wider masonry columns fit the tape's six data columns; the tape flows
   // through the same multicol container as the Majors panel (display:
@@ -2667,6 +2686,206 @@ function renderBoard(payload) {
   }
   updateSortHeaders();
   updateMarketFilterStatus(visibleAssets, totalAssets);
+}
+
+// --- Markets treemap --------------------------------------------------------
+// Finviz-style map: sectors squarified by summed traded dollar notional
+// (volume x price; assets without volume take their group's median so they
+// stay visible), tiles colored by the same 1D% the row view shows. Crypto
+// includes the perp tape as one PERPS sector sized by 24h notional.
+function renderMarketMap(categoryGroups, payload) {
+  const sectors = visibleGroups(categoryGroups).map((group) => ({
+    name: displayGroupName(group.name),
+    tiles: group.assets.map(mapTileData),
+  }));
+  const query = marketSearchQuery.toLowerCase();
+  let tapeTotal = 0;
+  if (marketCategory === "crypto") {
+    const configured = new Set();
+    categoryGroups.forEach((group) =>
+      (group.assets || []).forEach((asset) => configured.add(asset.symbol))
+    );
+    const rows = (payload.crypto_tape || []).filter((row) => !configured.has(row.symbol));
+    tapeTotal = rows.length;
+    const perps = rows
+      .filter((row) => !query || matchesTapeQuery(row, query))
+      .map((row) => ({
+        symbol: row.symbol,
+        name: `${row.symbol} perp`,
+        pct: numericOrNull(row.change_pct),
+        value: numericOrNull(row.day_volume_usd),
+      }));
+    if (perps.length) sectors.push({ name: "Perps", tiles: perps });
+  }
+  const populated = sectors
+    .map((sector) => ({ ...sector, tiles: fillMissingTileValues(sector.tiles) }))
+    .filter((sector) => sector.tiles.length);
+
+  board.querySelectorAll(":scope > .group-panel:not(.tape-panel)").forEach((panel) => panel.remove());
+  board.querySelector(":scope > .empty-state")?.remove();
+  let host = board.querySelector(":scope > .market-map");
+  if (!host) {
+    host = document.createElement("div");
+    host.className = "market-map";
+    board.appendChild(host);
+  }
+  const visibleTiles = populated.reduce((sum, sector) => sum + sector.tiles.length, 0);
+  updateMarketFilterStatus(visibleTiles, countAssets(categoryGroups) + tapeTotal);
+  if (!visibleTiles) {
+    host.style.height = "auto";
+    host.innerHTML = '<div class="empty-state">No matching markets</div>';
+    return;
+  }
+
+  const width = Math.max(board.clientWidth, 320);
+  const height = Math.min(Math.max(Math.round(window.innerHeight * 0.72), 440), 860);
+  const sectorItems = populated.map((sector) => ({
+    ...sector,
+    value: sector.tiles.reduce((sum, tile) => sum + tile.value, 0),
+  }));
+  const chunks = [];
+  for (const placed of squarify(sectorItems, { x: 0, y: 0, w: width, h: height })) {
+    const sector = placed.item;
+    const labelled = placed.h >= 56 && placed.w >= 72;
+    const labelHeight = labelled ? 15 : 0;
+    chunks.push(
+      `<div class="map-group" style="left:${placed.x.toFixed(1)}px;top:${placed.y.toFixed(1)}px;width:${placed.w.toFixed(1)}px;height:${placed.h.toFixed(1)}px">` +
+        (labelled ? `<span class="map-group-label">${escapeHtml(sector.name)}</span>` : "")
+    );
+    const inner = squarify(sector.tiles, {
+      x: 0,
+      y: labelHeight,
+      w: placed.w,
+      h: Math.max(placed.h - labelHeight, 0),
+    });
+    for (const tile of inner) {
+      const item = tile.item;
+      const tiny = tile.w < 34 || tile.h < 16;
+      const small = tile.w < 58 || tile.h < 30;
+      const pctText = item.pct === null ? "" : formatSignedPct(item.pct);
+      chunks.push(
+        `<button type="button" class="map-tile${tiny ? " map-tile-tiny" : small ? " map-tile-small" : ""}"` +
+          ` style="left:${tile.x.toFixed(1)}px;top:${tile.y.toFixed(1)}px;width:${tile.w.toFixed(1)}px;height:${tile.h.toFixed(1)}px;background:${mapTileColor(item.pct)}"` +
+          ` data-symbol="${escapeHtml(item.symbol)}"` +
+          ` title="${escapeHtml(`${item.symbol} · ${item.name}${pctText ? ` · ${pctText}` : ""}`)}"` +
+          ` aria-label="Open ${escapeHtml(item.symbol)} chart">` +
+          `<span>${escapeHtml(item.symbol)}</span>${pctText ? `<em>${escapeHtml(pctText)}</em>` : ""}</button>`
+      );
+    }
+    chunks.push("</div>");
+  }
+  host.style.height = `${height}px`;
+  host.innerHTML = chunks.join("");
+}
+
+function mapTileData(asset) {
+  const quote = asset.quote || {};
+  const last = numericOrNull(displayQuoteValue(quote, "last"));
+  const pct = isCryptoAsset(asset.type)
+    ? numericOrNull(asset.summary?.open_change_pct)
+    : numericOrNull(displayQuoteValue(quote, "change_pct"));
+  const volume = numericOrNull(quote.volume);
+  return {
+    symbol: asset.symbol,
+    name: asset.name || asset.symbol,
+    pct,
+    value: volume !== null && last !== null && volume > 0 ? volume * last : null,
+  };
+}
+
+// Assets Yahoo serves without volume (some futures) take the sector median
+// notional: visible, honestly unglamorous, never dominant.
+function fillMissingTileValues(tiles) {
+  const known = tiles
+    .map((tile) => tile.value)
+    .filter((value) => typeof value === "number" && value > 0)
+    .sort((a, b) => a - b);
+  const median = known.length ? known[Math.floor(known.length / 2)] : 1;
+  return tiles.map((tile) => ({
+    ...tile,
+    value: typeof tile.value === "number" && tile.value > 0 ? tile.value : median,
+  }));
+}
+
+// Green/red wash deepening toward a +/-3% clamp; null marks stay neutral.
+function mapTileColor(pct) {
+  if (typeof pct !== "number") return "var(--surface-soft)";
+  const alpha = Math.min(Math.abs(pct) / 3, 1) * 0.58 + 0.1;
+  return pct >= 0
+    ? `rgba(45, 148, 106, ${alpha.toFixed(3)})`
+    : `rgba(196, 78, 74, ${alpha.toFixed(3)})`;
+}
+
+// Squarified treemap (Bruls et al.): places value-weighted items into rect,
+// keeping tile aspect ratios near 1. Returns {item, x, y, w, h} rows.
+function squarify(items, rect) {
+  const total = items.reduce((sum, item) => sum + item.value, 0);
+  if (total <= 0 || rect.w <= 4 || rect.h <= 4) return [];
+  const scale = (rect.w * rect.h) / total;
+  const sorted = [...items].sort((a, b) => b.value - a.value);
+  const placed = [];
+  let x = rect.x;
+  let y = rect.y;
+  let w = rect.w;
+  let h = rect.h;
+  let row = [];
+  let rowArea = 0;
+
+  const worst = (areaSum, minArea, maxArea, side) => {
+    const sumSq = areaSum * areaSum;
+    const sideSq = side * side;
+    return Math.max((sideSq * maxArea) / sumSq, sumSq / (sideSq * minArea));
+  };
+  const layoutRow = () => {
+    const side = Math.min(w, h);
+    if (side <= 0 || rowArea <= 0) {
+      row = [];
+      rowArea = 0;
+      return;
+    }
+    const thickness = rowArea / side;
+    let offset = 0;
+    for (const entry of row) {
+      const length = (entry.area / rowArea) * side;
+      if (w <= h) {
+        placed.push({ item: entry.item, x: x + offset, y, w: length, h: thickness });
+      } else {
+        placed.push({ item: entry.item, x, y: y + offset, w: thickness, h: length });
+      }
+      offset += length;
+    }
+    if (w <= h) {
+      y += thickness;
+      h -= thickness;
+    } else {
+      x += thickness;
+      w -= thickness;
+    }
+    row = [];
+    rowArea = 0;
+  };
+
+  for (const item of sorted) {
+    const area = Math.max(item.value * scale, 0.5);
+    const side = Math.min(w, h);
+    if (row.length) {
+      const areas = row.map((entry) => entry.area);
+      const minArea = Math.min(...areas);
+      const maxArea = Math.max(...areas);
+      const current = worst(rowArea, minArea, maxArea, side);
+      const next = worst(
+        rowArea + area,
+        Math.min(minArea, area),
+        Math.max(maxArea, area),
+        side
+      );
+      if (next > current) layoutRow();
+    }
+    row.push({ item, area });
+    rowArea += area;
+  }
+  layoutRow();
+  return placed;
 }
 
 // --- Crypto tape -----------------------------------------------------------
@@ -3014,14 +3233,31 @@ function toggleMarketLayout() {
   if (marketLayout === "flat" && marketSort.key === "configured") {
     marketSort = { key: "pct", direction: "desc" };
   }
+  syncLayoutButtons();
+  renderBoard(latestData);
+  syncUrlState();
+}
+
+function toggleMarketMap() {
+  marketLayout = marketLayout === "map" ? "grouped" : "map";
+  syncLayoutButtons();
+  renderBoard(latestData);
+  syncUrlState();
+}
+
+function syncLayoutButtons() {
   marketLayoutToggle.setAttribute("aria-pressed", String(marketLayout === "flat"));
   marketLayoutToggle.textContent = marketLayout === "flat" ? "Grouped" : "Flat";
   marketLayoutToggle.title =
     marketLayout === "flat"
       ? "Back to sector groups"
       : "Flatten all groups into one sortable movers table";
-  renderBoard(latestData);
-  syncUrlState();
+  marketMapToggle.setAttribute("aria-pressed", String(marketLayout === "map"));
+  marketMapToggle.textContent = marketLayout === "map" ? "Grouped" : "Map";
+  marketMapToggle.title =
+    marketLayout === "map"
+      ? "Back to sector groups"
+      : "Treemap: tiles sized by traded dollar volume, colored by 1D% move";
 }
 
 function flatGroups(groups) {

@@ -402,6 +402,42 @@ def test_markets_tabs_render_rows_and_open_canvas_chart(page: Page, base_url: st
     _expect_chart_canvas_content(page)
 
 
+def test_market_map_toggle_renders_treemap_and_opens_charts(
+    page: Page, base_url: str
+) -> None:
+    _goto_board(page, base_url)
+    page.locator("#markets-tab").click()
+    expect(page.locator("#markets-view")).to_be_visible()
+
+    toggle = page.locator("#market-map-toggle")
+    toggle.click()
+    expect(toggle).to_have_attribute("aria-pressed", "true")
+    expect(toggle).to_have_text("Grouped")
+    expect(page.locator("#board .market-map")).to_be_visible()
+    tiles = page.locator("#board .map-tile")
+    assert tiles.count() >= 1
+    expect(page.locator("#board .map-group-label").first).to_be_visible()
+    # Row panels are gone while the map owns the board.
+    expect(page.locator("#board .group-panel:not(.tape-panel)")).to_have_count(0)
+
+    spy = page.locator('#board .map-tile[data-symbol="SPY"]')
+    expect(spy).to_be_visible()
+    spy.click()
+    expect(page.locator("#chart-modal")).to_have_attribute("aria-hidden", "false")
+    page.keyboard.press("Escape")
+
+    # Back to grouped rows; the map container is removed.
+    toggle.click()
+    expect(page.locator("#board .market-map")).to_have_count(0)
+    _wait_for_visible_market_row(page)
+
+    # Deep link restores the map layout (query param forces a real reload —
+    # a hash-only goto is a same-document navigation and never re-boots).
+    page.goto(f"{base_url}/?deep=map#view=markets&layout=map", wait_until="domcontentloaded")
+    expect(page.locator("#board .market-map")).to_be_visible()
+    expect(page.locator("#market-map-toggle")).to_have_attribute("aria-pressed", "true")
+
+
 def test_crypto_panels_swap_open_column_for_rolling_24h(page: Page, base_url: str) -> None:
     _goto_board(page, base_url)
     page.locator("#markets-tab").click()
