@@ -2718,7 +2718,10 @@ function renderMarketMap(categoryGroups, payload) {
     if (perps.length) sectors.push({ name: "Perps", tiles: perps });
   }
   const populated = sectors
-    .map((sector) => ({ ...sector, tiles: fillMissingTileValues(sector.tiles) }))
+    .map((sector) => ({
+      ...sector,
+      tiles: scaleTileValues(fillMissingTileValues(sector.tiles)),
+    }))
     .filter((sector) => sector.tiles.length);
 
   board.querySelectorAll(":scope > .group-panel:not(.tape-panel)").forEach((panel) => panel.remove());
@@ -2805,6 +2808,21 @@ function fillMissingTileValues(tiles) {
     ...tile,
     value: typeof tile.value === "number" && tile.value > 0 ? tile.value : median,
   }));
+}
+
+
+// Raw notional is brutally skewed (BTC alone out-trades the whole alt
+// complex; gold dwarfs platinum), which renders as one mega-tile plus
+// unreadable dust in degenerate slivers. Square-root area keeps the
+// activity ORDERING while compressing the ratios into a readable mosaic,
+// and a small floor keeps the tail visible and clickable. Sector areas sum
+// the same scaled values, so the compression applies at both levels.
+function scaleTileValues(tiles) {
+  const scaled = tiles.map((tile) => ({ ...tile, value: Math.sqrt(tile.value) }));
+  const total = scaled.reduce((sum, tile) => sum + tile.value, 0);
+  if (total <= 0) return scaled;
+  const floor = total * Math.min(0.015, 0.5 / tiles.length);
+  return scaled.map((tile) => ({ ...tile, value: Math.max(tile.value, floor) }));
 }
 
 // Green/red wash deepening toward a +/-3% clamp; null marks stay neutral.
@@ -3257,7 +3275,7 @@ function syncLayoutButtons() {
   marketMapToggle.title =
     marketLayout === "map"
       ? "Back to sector groups"
-      : "Treemap: tiles sized by traded dollar volume, colored by 1D% move";
+      : "Treemap: tile area tracks traded dollar volume (square-root scale), color is the 1D% move";
 }
 
 function flatGroups(groups) {
