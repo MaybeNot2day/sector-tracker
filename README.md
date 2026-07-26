@@ -273,6 +273,18 @@ units in `deploy/` (lingering is enabled, so they run unattended):
   failure/recovery alerts through Hermes
 - `sector-tracker-stops.timer` / `.service` — the 5-minute, 24/7 auto-stop monitor
   described in the Fringe Corner section
+- `sector-tracker-backup.timer` / `.service` — nightly (04:10 UTC) off-box database
+  backup: pulls a consistent snapshot from the token-gated `GET /api/backup`
+  (`VACUUM INTO` on the droplet), verifies integrity and the irreplaceable tables,
+  gzips it into the Syncthing-mirrored vault (`~/hermes-research/.board-backups/`,
+  14 kept), and alerts through Hermes on failure. Restore: gunzip a snapshot over
+  `data/market_board.sqlite3` and restart the service. The chain gives three copies:
+  droplet (live) → Hermes box → Mac.
+
+`deploy/install-hermes.sh [host]` is the idempotent installer for everything above:
+it syncs the scripts and systemd user units from this repo to the Hermes box,
+verifies checksums, reloads systemd, and enables every trigger — the box matching
+git is a command, not a hope.
 
 ## Configuration
 
