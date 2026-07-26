@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly board database backup at 04:10 UTC
+
+[Timer]
+OnCalendar=*-*-* 04:10:00
+Persistent=true
+AccuracySec=5m
+
+[Install]
+WantedBy=timers.target

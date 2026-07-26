@@ -196,6 +196,7 @@ def test_gate_is_wired_to_exactly_the_mutation_routes() -> None:
         ("POST", "/api/reports"),
         ("DELETE", "/api/reports/{report_id}"),
         ("POST", "/api/fringe/{idea_id}/close"),
+        ("GET", "/api/backup"),
     }
 
 

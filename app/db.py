@@ -1051,6 +1051,20 @@ def close_fringe_idea(
     return cursor.rowcount > 0
 
 
+def snapshot_database(path: Path, destination: Path) -> None:
+    """Consistent point-in-time copy for off-box backups (VACUUM INTO).
+
+    VACUUM INTO writes a compact, transactionally consistent database file
+    even while other connections keep reading and writing the source.
+    """
+    init_db(path)
+    conn = sqlite3.connect(path.expanduser(), timeout=30)
+    try:
+        conn.execute("VACUUM INTO ?", (str(destination),))
+    finally:
+        conn.close()
+
+
 def latest_fringe_mention(path: Path) -> str | None:
     """Newest report date that fed the book; open ideas older than this
     were not refreshed by the latest report (the UI's `stale` flag)."""

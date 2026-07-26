@@ -1,0 +1,8 @@
+[Unit]
+Description=Pull a nightly off-box snapshot of the market board database
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/ds/.local/bin/board_backup.py

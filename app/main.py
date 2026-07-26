@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import shutil
+import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime
@@ -26,6 +27,7 @@ from fastapi import (
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
+from starlette.background import BackgroundTask
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import Response
 from starlette.types import Message, Receive, Scope, Send
@@ -660,6 +662,28 @@ async def close_fringe_position(
     except RuntimeError:
         raise HTTPException(status_code=503, detail="mark_unavailable") from None
     return {"closed": item}
+
+
+@app.get("/api/backup", dependencies=[Depends(require_edit_token)])
+async def database_backup() -> FileResponse:
+    """Stream a consistent SQLite snapshot for off-box backups.
+
+    The Fringe ledger and equity history are irreplaceable accumulated
+    state; the nightly hermes-box job pulls this into the Syncthing-mirrored
+    vault so the track record survives the droplet.
+    """
+    handle, temp_path = tempfile.mkstemp(prefix="board-backup-", suffix=".sqlite3")
+    os.close(handle)
+    os.unlink(temp_path)  # VACUUM INTO refuses an existing target
+    await asyncio.to_thread(
+        db.snapshot_database, app.state.settings.database_path, Path(temp_path)
+    )
+    return FileResponse(
+        temp_path,
+        media_type="application/octet-stream",
+        filename="market_board.sqlite3",
+        background=BackgroundTask(os.unlink, temp_path),
+    )
 
 
 @app.get("/api/market-context")
