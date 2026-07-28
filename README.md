@@ -267,7 +267,9 @@ units in `deploy/` (lingering is enabled, so they run unattended):
 - `sector-tracker-uploader.timer` — 30-minute sweep that catches in-place edits
 - `sector-tracker-uploader.service` — one upload pass posting to the HTTPS board
 - `sector-tracker-report-watchdog.timer` — checks each weekday delivery every 10 minutes
-  from 07:00–13:50 UTC, after staged per-report deadlines
+  from 09:00–15:50 Europe/Berlin, after staged per-report deadlines (the cron fleet
+  publishes on Berlin wall times: morning briefs 09:00, US&Asia Close 11:00, Macro
+  Tape 13:30, Fringe Corner 14:00 — DST-stable for the reader)
 - `sector-tracker-report-watchdog.service` — validates vault files, repairs missed
   uploads, compares dashboard bodies, checks the Fringe ledger, and sends edge-triggered
   failure/recovery alerts through Hermes

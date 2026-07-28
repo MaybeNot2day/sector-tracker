@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from pathlib import Path
 from typing import Any, cast
+from zoneinfo import ZoneInfo
 
 from vault_report_uploader import (
     CONFIG_PATH,
@@ -29,6 +30,9 @@ ALERT_STATE_PATH = (
 )
 CONTRACT_EFFECTIVE_DATE = date(2026, 7, 22)
 REQUEST_TIMEOUT = 20
+# The cron fleet publishes on Europe/Berlin wall times (DST-stable for the
+# reader); deadlines and the weekday gate follow the same clock.
+PUBLISH_TZ = ZoneInfo("Europe/Berlin")
 
 
 @dataclass(frozen=True)
@@ -38,11 +42,11 @@ class Stage:
 
 
 STAGES = (
-    Stage("AI Semis Morning Brief", time(7, 20)),
-    Stage("Biotech Pharma Brief", time(7, 20)),
-    Stage("US Asia Close", time(9, 20)),
-    Stage("Macro Tape Brief", time(11, 50)),
-    Stage("Fringe Corner", time(12, 20)),
+    Stage("AI Semis Morning Brief", time(9, 20)),
+    Stage("Biotech Pharma Brief", time(9, 20)),
+    Stage("US Asia Close", time(11, 20)),
+    Stage("Macro Tape Brief", time(13, 50)),
+    Stage("Fringe Corner", time(14, 20)),
 )
 
 
@@ -93,16 +97,17 @@ def _run_uploader() -> str | None:
 
 def audit_pipeline(now: datetime | None = None) -> list[str]:
     current = now or datetime.now(UTC)
-    if current.weekday() >= 5:
+    local = current.astimezone(PUBLISH_TZ)
+    if local.weekday() >= 5:
         return []
-    due = [stage for stage in STAGES if current.time() >= stage.deadline]
+    due = [stage for stage in STAGES if local.time() >= stage.deadline]
     if not due:
         return []
 
     config = load_config()
     base_url = config.get("BOARD_URL", "").rstrip("/")
     vault = Path(config.get("VAULT_DIR") or Path.home() / "hermes-research")
-    date_text = current.date().isoformat()
+    date_text = current.astimezone(UTC).date().isoformat()
     issues: list[str] = []
     bodies: dict[str, str] = {}
 

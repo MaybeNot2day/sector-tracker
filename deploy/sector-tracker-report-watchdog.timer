@@ -1,8 +1,8 @@
 [Unit]
-Description=Check each weekday Hermes report after its delivery deadline
+Description=Check each weekday Hermes report after its Berlin delivery deadline
 
 [Timer]
-OnCalendar=Mon..Fri *-*-* 07..13:00/10:00
+OnCalendar=Mon..Fri *-*-* 09..15:00/10:00 Europe/Berlin
 Persistent=true
 AccuracySec=30s
 
