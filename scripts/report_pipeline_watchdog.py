@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import subprocess
@@ -77,18 +78,21 @@ def _load_alert_state(path: Path = ALERT_STATE_PATH) -> dict[str, Any]:
 
 
 def _run_uploader() -> str | None:
-    result = subprocess.run(
-        [
-            "systemctl",
-            "--user",
-            "start",
-            "sector-tracker-uploader.service",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "systemctl",
+                "--user",
+                "start",
+                "sector-tracker-uploader.service",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"uploader repair failed ({exc})"
     if result.returncode == 0:
         return None
     detail = (result.stderr or result.stdout).strip()
@@ -145,11 +149,11 @@ def audit_pipeline(now: datetime | None = None) -> list[str]:
         upload_state = load_state()
 
     for stage in due:
-        body = bodies.get(stage.title)
-        if body is None:
+        cached = bodies.get(stage.title)
+        if cached is None:
             continue
         filename = f"{date_text} {stage.title}.md"
-        if upload_state.get(filename) != content_hash(body):
+        if upload_state.get(filename) != content_hash(cached):
             issues.append(f"{stage.title}: uploader state does not match vault content")
 
     try:
@@ -158,13 +162,13 @@ def audit_pipeline(now: datetime | None = None) -> list[str]:
         latest_by_title = {
             str(item.get("title")): item for item in reports if isinstance(item, dict)
         }
-    except (OSError, ValueError, urllib.error.URLError) as exc:
+    except (OSError, ValueError, urllib.error.URLError, http.client.HTTPException) as exc:
         issues.append(f"dashboard report listing unavailable ({exc})")
         latest_by_title = {}
 
     for stage in due:
-        body = bodies.get(stage.title)
-        if body is None or not latest_by_title:
+        cached = bodies.get(stage.title)
+        if cached is None or not latest_by_title:
             continue
         report = latest_by_title.get(stage.title)
         if report is None:
@@ -182,10 +186,17 @@ def audit_pipeline(now: datetime | None = None) -> list[str]:
             continue
         try:
             detail = _get_json(base_url + f"/api/reports/{int(report['id'])}")
-        except (KeyError, TypeError, ValueError, OSError, urllib.error.URLError) as exc:
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            OSError,
+            urllib.error.URLError,
+            http.client.HTTPException,
+        ) as exc:
             issues.append(f"{stage.title}: dashboard detail unavailable ({exc})")
             continue
-        if detail.get("body") != body:
+        if detail.get("body") != cached:
             issues.append(f"{stage.title}: dashboard body differs from vault content")
 
     if any(stage.title == "Fringe Corner" for stage in due):
@@ -209,29 +220,37 @@ def audit_pipeline(now: datetime | None = None) -> list[str]:
                     + ", ".join(stale_mentions)
                     + ")"
                 )
-        except (OSError, ValueError, urllib.error.URLError) as exc:
+        except (
+            OSError,
+            ValueError,
+            urllib.error.URLError,
+            http.client.HTTPException,
+        ) as exc:
             issues.append(f"Fringe Corner: ledger unavailable ({exc})")
 
     return sorted(set(issues))
 
 
 def _send_alert(target: str, subject: str, message: str) -> str | None:
-    result = subprocess.run(
-        [
-            str(Path.home() / ".local/bin/hermes"),
-            "send",
-            "--to",
-            target,
-            "--subject",
-            subject,
-            "--quiet",
-            message,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [
+                str(Path.home() / ".local/bin/hermes"),
+                "send",
+                "--to",
+                target,
+                "--subject",
+                subject,
+                "--quiet",
+                message,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return str(exc)
     if result.returncode == 0:
         return None
     detail = (result.stderr or result.stdout).strip()

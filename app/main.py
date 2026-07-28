@@ -9,7 +9,7 @@ import shutil
 import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from threading import Lock
 from time import monotonic
@@ -122,11 +122,16 @@ class ReportRequest(BaseModel):
     def _date_is_calendar(cls, value: str | None) -> str | None:
         # The regex admits non-calendar dates like 2025-02-31; reject them
         # here so a bad cron payload fails loudly instead of persisting.
-        if value is not None:
-            try:
-                date.fromisoformat(value)
-            except ValueError as exc:
-                raise ValueError(f"not a real calendar date: {value}") from exc
+        if value is None:
+            return None
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError(f"not a real calendar date: {value}") from exc
+        # Reports may be dated for the next session, but a farther-future typo
+        # would become the slug's "newest" brief and freeze all projections.
+        if parsed > datetime.now(UTC).date() + timedelta(days=1):
+            raise ValueError(f"report date is too far in the future: {value}")
         return value
 
 
@@ -538,8 +543,8 @@ async def crypto_etf_flows() -> dict[str, object]:
 async def create_report(request: ReportRequest) -> dict[str, object]:
     """Ingest one agent-written markdown report (e.g. a Hermes cron job).
 
-    Only the newest report per slug is kept: same-day re-runs replace
-    that day's report, and a new day's brief replaces the previous one.
+    Reports are archived by (slug, date); same-day re-runs replace that day's
+    row while prior days remain readable in the report library.
     Any "Economic Calendar"/"Key Dates" section in the body feeds the
     key-dates panel; its rows mirror the report, so a re-run without
     the section clears them. A section whose heading mentions "fringe"
@@ -680,9 +685,13 @@ async def database_backup() -> FileResponse:
     handle, temp_path = tempfile.mkstemp(prefix="board-backup-", suffix=".sqlite3")
     os.close(handle)
     os.unlink(temp_path)  # VACUUM INTO refuses an existing target
-    await asyncio.to_thread(
-        db.snapshot_database, app.state.settings.database_path, Path(temp_path)
-    )
+    try:
+        await asyncio.to_thread(
+            db.snapshot_database, app.state.settings.database_path, Path(temp_path)
+        )
+    except BaseException:
+        Path(temp_path).unlink(missing_ok=True)
+        raise
     return FileResponse(
         temp_path,
         media_type="application/octet-stream",

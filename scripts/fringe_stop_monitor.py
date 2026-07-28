@@ -20,9 +20,12 @@ ALERT_TARGET). State: ~/.local/state/sector-tracker/stop-monitor.json.
 
 from __future__ import annotations
 
+import http.client
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime
@@ -48,8 +51,11 @@ def load_state(path: Path = STATE_PATH) -> dict[str, Any]:
 
 def save_state(state: dict[str, Any], path: Path = STATE_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, indent=1, sort_keys=True), encoding="utf-8")
-
+    with tempfile.NamedTemporaryFile(
+        "w", dir=path.parent, encoding="utf-8", delete=False
+    ) as tmp:
+        json.dump(state, tmp, indent=1, sort_keys=True)
+    os.replace(tmp.name, path)
 
 def fetch_book(base_url: str) -> dict[str, Any]:
     request = urllib.request.Request(
@@ -71,17 +77,23 @@ def close_position(base_url: str, token: str, idea_id: int, reason: str) -> dict
         return cast(dict[str, Any], json.loads(response.read().decode("utf-8")))
 
 
-def send_alert(target: str, message: str) -> None:
-    result = subprocess.run(
-        [str(HERMES_BIN), "send", "--to", target, "--quiet", message],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
+def send_alert(target: str, message: str) -> bool:
+    try:
+        result = subprocess.run(
+            [str(HERMES_BIN), "send", "--to", target, "--quiet", message],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log(f"alert failed: {exc}")
+        return False
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
         log(f"alert failed: {detail or f'exit {result.returncode}'}")
+        return False
+    return True
 
 
 def stop_breached(direction: str, last: float, stop: float) -> bool:
@@ -107,7 +119,7 @@ def run() -> int:
 
     try:
         book = fetch_book(base_url)
-    except (OSError, ValueError, urllib.error.URLError) as exc:
+    except (OSError, ValueError, urllib.error.URLError, http.client.HTTPException) as exc:
         log(f"book unavailable ({exc}); retrying next tick")
         return 0
 
@@ -156,7 +168,12 @@ def run() -> int:
             )
             try:
                 result = close_position(base_url, token, int(str(idea_id)), reason)
-            except (OSError, ValueError, urllib.error.URLError) as exc:
+            except (
+                OSError,
+                ValueError,
+                urllib.error.URLError,
+                http.client.HTTPException,
+            ) as exc:
                 next_counts[skey] = streak  # keep armed; retry next tick
                 log(f"{skey}: close failed ({exc}); retrying next tick")
                 continue
@@ -201,13 +218,13 @@ def run() -> int:
         ):
             # No declared stop: nothing to enforce, but a double-digit adverse
             # move should never pass silently. One alert per day.
-            alerted[key] = today
-            send_alert(
+            if send_alert(
                 target,
                 f"Fringe book: {direction.upper()} {ticker} is {float(pct):+.2f}% "
                 f"against entry and has NO declared stop — unenforceable. "
                 f"Consider a manual review. {base_url}/#view=fringe",
-            )
+            ):
+                alerted[key] = today
 
     save_state({"breach": next_counts, "alerted": alerted})
     log(f"tick done: {len(open_ideas)} open, {closed} auto-closed")

@@ -126,3 +126,41 @@ def test_corrupt_snapshot_fails_loudly_and_leaves_no_archive(
     assert backup.run() == 1
     assert len(alerts) == 1 and "FAILED" in alerts[0]
     assert not list(backup_dir.glob("board-*"))
+
+
+
+def test_failed_replacement_preserves_existing_same_day_archive(
+    board_app: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = TestClient(app)
+    payload = client.get("/api/backup", headers={"X-Edit-Token": "sekrit"}).content
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+    today = datetime.now(UTC).date().isoformat()
+    archive = backup_dir / f"board-{today}.sqlite3.gz"
+    original = b"known-good-existing-archive"
+    archive.write_bytes(original)
+    alerts: list[str] = []
+
+    monkeypatch.setattr(backup, "fetch_snapshot", lambda base, token: payload)
+    monkeypatch.setattr(backup, "send_alert", lambda target, msg: alerts.append(msg))
+    monkeypatch.setattr(
+        backup,
+        "load_config",
+        lambda: {
+            "BOARD_URL": "https://board.test",
+            "EDIT_TOKEN": "sekrit",
+            "BACKUP_DIR": str(backup_dir),
+        },
+    )
+
+    class BrokenGzip:
+        def __init__(self, **kwargs: object) -> None:
+            raise OSError("disk full")
+
+    monkeypatch.setattr(backup.gzip, "GzipFile", BrokenGzip)
+
+    assert backup.run() == 1
+    assert archive.read_bytes() == original
+    assert not list(backup_dir.glob("*.tmp"))
+    assert len(alerts) == 1 and "FAILED" in alerts[0]

@@ -235,10 +235,10 @@ class LighterProvider(QuoteProvider):
         return tape
 
     async def _get_details(self) -> dict[str, dict[str, Any]]:
-        if monotonic() - self._details_time < DETAILS_TTL_SECONDS:
+        if self._details_time > 0 and monotonic() - self._details_time < DETAILS_TTL_SECONDS:
             return self._details
         async with self._details_lock:
-            if monotonic() - self._details_time < DETAILS_TTL_SECONDS:
+            if self._details_time > 0 and monotonic() - self._details_time < DETAILS_TTL_SECONDS:
                 return self._details
             payload = await self._get_json("/orderBookDetails", {})
             parsed = _parse_details(payload)
@@ -248,7 +248,7 @@ class LighterProvider(QuoteProvider):
             return self._details
 
     async def _get_funding(self) -> dict[str, float]:
-        if monotonic() - self._funding_time < FUNDING_TTL_SECONDS:
+        if self._funding_time > 0 and monotonic() - self._funding_time < FUNDING_TTL_SECONDS:
             return self._funding
         payload = await self._get_json("/funding-rates", {})
         parsed = _parse_funding(payload)
@@ -264,7 +264,7 @@ class LighterProvider(QuoteProvider):
         return self._funding
 
     async def _get_categories(self) -> dict[str, list[str]]:
-        if monotonic() - self._categories_time < CATEGORY_TTL_SECONDS:
+        if self._categories_time > 0 and monotonic() - self._categories_time < CATEGORY_TTL_SECONDS:
             return self._categories
         payload = await self._get_json("/tokenlist", {})
         parsed = _parse_categories(payload)

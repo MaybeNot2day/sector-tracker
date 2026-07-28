@@ -224,6 +224,30 @@ async def test_details_cached_within_ttl(monkeypatch: pytest.MonkeyPatch) -> Non
     assert first[0].last == second[0].last == 212.5
 
 
+
+@pytest.mark.asyncio
+async def test_empty_caches_fetch_even_when_process_monotonic_is_below_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeHTTP(
+        {
+            "/orderBookDetails": details_payload(),
+            "/funding-rates": funding_payload(),
+            "/tokenlist": {},
+        }
+    )
+    fake.install(monkeypatch)
+    monkeypatch.setattr(lighter_module, "monotonic", lambda: 1.0)
+    provider = LighterProvider()
+
+    await provider._get_details()
+    await provider._get_funding()
+    await provider._get_categories()
+
+    assert fake.count("/orderBookDetails") == 1
+    assert fake.count("/funding-rates") == 1
+    assert fake.count("/tokenlist") == 1
+
 @pytest.mark.asyncio
 async def test_http_client_is_reused_and_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeHTTP({"/orderBookDetails": details_payload()})

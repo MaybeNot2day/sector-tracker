@@ -500,6 +500,69 @@ def test_fringe_route_lazily_restamps_after_failed_ingest_stamp(
     assert stored == {"CIFR": 8.42, "BTC": None}  # BTC has no quote source here
 
 
+def test_fringe_route_rejects_levels_parsed_from_wrong_side_prose(
+    configure_app: Callable[..., Path],
+) -> None:
+    yahoo = ScriptedYahoo({"AMD": 500.0, "TSLA": 300.0})
+    configure_app({"yahoo": yahoo})
+    client = TestClient(app)
+    response = client.post(
+        "/api/reports",
+        json={
+            "title": "Fringe Corner",
+            "date": "2026-07-16",
+            "body": """## Fringe Corner
+
+- OPEN LONG AMD - momentum [target: 2x weekly ATR] [stop: $580]
+- OPEN SHORT TSLA - fade [target: $400] [stop: 2x weekly ATR]
+""",
+        },
+    )
+    assert response.status_code == 200
+
+    by_ticker = {
+        item["ticker"]: item for item in client.get("/api/fringe").json()["open"]
+    }
+    assert by_ticker["AMD"]["target"] == "2x weekly ATR"
+    assert by_ticker["AMD"]["stop"] == "$580"
+    assert by_ticker["AMD"]["target_price"] is None
+    assert by_ticker["AMD"]["stop_price"] is None
+    assert by_ticker["TSLA"]["target"] == "$400"
+    assert by_ticker["TSLA"]["stop"] == "2x weekly ATR"
+    assert by_ticker["TSLA"]["target_price"] is None
+    assert by_ticker["TSLA"]["stop_price"] is None
+
+
+def test_missing_marks_do_not_overwrite_last_complete_equity_snapshot(
+    configure_app: Callable[..., Path],
+) -> None:
+    yahoo = ScriptedYahoo({"CIFR": 8.0})
+    path = configure_app({"yahoo": yahoo})
+    client = TestClient(app)
+    report = {
+        "title": "Fringe Corner",
+        "date": "2026-07-16",
+        "body": "## Fringe Corner\n\n- OPEN LONG CIFR - miner squeeze\n",
+    }
+    assert client.post("/api/reports", json=report).status_code == 200
+
+    app.state.fringe_service.QUOTE_TTL_SECONDS = 0.0
+    yahoo.prices["CIFR"] = 10.0
+    complete = client.get("/api/fringe").json()
+    stored_before = db.load_fringe_equity(path)
+    assert complete["summary"]["portfolio"]["equity"] == 10125.0
+    assert stored_before[-1]["equity"] == 10125.0
+
+    yahoo.fail = True
+    incomplete = client.get("/api/fringe").json()
+    stored_after = db.load_fringe_equity(path)
+
+    assert incomplete["open"][0]["last"] is None
+    assert incomplete["summary"]["portfolio"]["equity"] == 10000.0
+    assert stored_after == stored_before
+    assert incomplete["equity_curve"][-1]["equity"] == 10125.0
+
+
 def test_fringe_route_flags_ideas_the_newest_report_did_not_refresh(
     configure_app: Callable[..., Path],
 ) -> None:

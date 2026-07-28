@@ -863,6 +863,25 @@ def test_report_deep_link_opens_reader_on_boot(page: Page, base_url: str) -> Non
     expect(page.locator("#reports-list .report-card")).to_have_count(3)
 
 
+
+def test_report_reader_pushes_history_and_browser_back_restores_library(
+    page: Page, base_url: str
+) -> None:
+    _goto_board(page, base_url)
+    page.locator("#reports-open").click()
+    page.locator("#reports-list .report-card").first.click()
+    expect(page.locator("#report-reader .report-head h2")).to_have_text(
+        "Hermes Daily Flows"
+    )
+    expect(page).to_have_url(re.compile(r"#report=7$"))
+
+    page.go_back()
+
+    expect(page.locator("#report-reader")).to_be_hidden()
+    expect(page.locator("#reports-list")).to_be_visible()
+    expect(page.locator("#reports-list .report-card")).to_have_count(3)
+    expect(page).not_to_have_url(re.compile(r"[?&#]report="))
+
 def test_report_library_filters_and_pages_the_archive(
     page: Page, base_url: str
 ) -> None:

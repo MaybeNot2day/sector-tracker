@@ -34,8 +34,10 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from math import sqrt
 from pathlib import Path
 from time import monotonic
+from typing import cast
 
 from app import db
 from app.models import AssetConfig, ProviderName, Quote
@@ -191,21 +193,34 @@ class FringeService:
         open_items = [_open_item(row, prices.get(str(row["ticker"])), latest) for row in open_rows]
         closed_items = [_closed_item(row) for row in closed_rows]
         summary = _performance_summary(open_items, closed_items)
-        portfolio = summary["portfolio"]
+        portfolio = cast(dict[str, object], summary["portfolio"])
         today = datetime.now(UTC).date().isoformat()
         equity_now = float(str(portfolio["equity"]))
-        await asyncio.to_thread(
-            db.upsert_fringe_equity,
-            self.database_path,
-            date_text=today,
-            equity=equity_now,
-            realized_usd=float(str(portfolio["realized_usd"])),
-            unrealized_usd=float(str(portfolio["unrealized_usd"])),
-            invested_notional=float(str(portfolio["invested_notional"])),
-            open_count=len(open_items),
+        marks_complete = all(
+            item["entry_price"] is None
+            or item["size_notional"] is None
+            or item["unrealized_usd"] is not None
+            for item in open_items
         )
+        if marks_complete:
+            await asyncio.to_thread(
+                db.upsert_fringe_equity,
+                self.database_path,
+                date_text=today,
+                equity=equity_now,
+                realized_usd=float(str(portfolio["realized_usd"])),
+                unrealized_usd=float(str(portfolio["unrealized_usd"])),
+                invested_notional=float(str(portfolio["invested_notional"])),
+                open_count=len(open_items),
+            )
         stored = await asyncio.to_thread(db.load_fringe_equity, self.database_path)
-        curve = _equity_curve(stored, open_items, closed_items, today, equity_now)
+        curve = _equity_curve(
+            stored,
+            open_items,
+            closed_items,
+            today,
+            equity_now if marks_complete else None,
+        )
         return {
             "as_of": datetime.now(UTC).isoformat(),
             "summary": summary,
@@ -396,9 +411,15 @@ def _open_item(
     row: dict[str, object], last: float | None, latest_mention: str | None
 ) -> dict[str, object]:
     entry = row["entry_price"]
+    direction = str(row["direction"])
     last_mentioned = str(row["last_mentioned"])
-    target_price = _target_price(row["target"])
-    unrealized_pct = _pnl_pct(str(row["direction"]), entry, last)
+    target_price = _directional_level(
+        direction, entry, _target_price(row["target"]), favorable=True
+    )
+    stop_price = _directional_level(
+        direction, entry, _target_price(row["stop"]), favorable=False
+    )
+    unrealized_pct = _pnl_pct(direction, entry, last)
     return {
         "id": row["id"],
         "ticker": row["ticker"],
@@ -416,10 +437,10 @@ def _open_item(
         "unrealized_pct": unrealized_pct,
         # Signed % from the current mark to the target in the idea's
         # direction — the move still on the table; null without both.
-        "to_target_pct": _pnl_pct(str(row["direction"]), last, target_price),
+        "to_target_pct": _pnl_pct(direction, last, target_price),
         "confidence": row["confidence"],
         "stop": row["stop"],
-        "stop_price": _round_price(_target_price(row["stop"])),
+        "stop_price": _round_price(stop_price),
         "size_notional": _round_usd(row["size_notional"]),
         "unrealized_usd": _position_usd(row["size_notional"], unrealized_pct),
         "source_slug": row["source_slug"],
@@ -589,6 +610,21 @@ def _target_price(target: object) -> float | None:
     return value * 1000.0 if match.group(2) else value
 
 
+def _directional_level(
+    direction: str,
+    entry: object,
+    value: float | None,
+    *,
+    favorable: bool,
+) -> float | None:
+    """Reject parsed prose numbers that sit on the wrong side of entry."""
+    if not isinstance(entry, int | float) or entry <= 0 or value is None or value <= 0:
+        return None
+    sign = -1.0 if direction == "short" else 1.0
+    delta = sign * (value - float(entry))
+    return value if (delta > 0 if favorable else delta < 0) else None
+
+
 def _round_price(value: object) -> float | None:
     return round(value, 4) if isinstance(value, int | float) else None
 
@@ -598,14 +634,14 @@ def _equity_curve(
     open_items: list[dict[str, object]],
     closed_items: list[dict[str, object]],
     today: str,
-    equity_now: float,
+    equity_now: float | None,
 ) -> list[dict[str, object]]:
     """Daily equity series for the tab's chart.
 
     Pre-snapshot history is a realized-step reconstruction: starting capital
     at the book's first open, stepped by cumulative realized dollars at each
     close date. Stored end-of-day mark-to-market snapshots override those
-    steps once they exist, and today always carries the live mark.
+    steps; today advances only when every sized open position has a mark.
     """
     points: dict[str, float] = {}
     opened_dates = [
@@ -630,7 +666,8 @@ def _equity_curve(
         points[date_text] = STARTING_CAPITAL + cumulative
     for row in stored:
         points[str(row["date"])] = float(str(row["equity"]))
-    points[today] = equity_now
+    if equity_now is not None:
+        points[today] = equity_now
     return [
         {"date": date_text, "equity": round(points[date_text], 2)}
         for date_text in sorted(points)
@@ -691,10 +728,10 @@ def _sharpe_ratio(curve: list[dict[str, object]]) -> float | None:
         return None
     mean = sum(returns) / len(returns)
     variance = sum((value - mean) ** 2 for value in returns) / (len(returns) - 1)
-    std = variance**0.5
+    std = sqrt(variance)
     if std == 0:
         return None
-    return round(mean / std * 252.0**0.5, 2)
+    return round(mean / std * sqrt(252.0), 2)
 
 
 def _stat_trade(item: dict[str, object] | None) -> dict[str, object] | None:

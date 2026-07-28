@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -322,14 +323,19 @@ def run(argv: list[str] | None = None) -> int:
 
     for path, date_text, title in reports:
         try:
-            age = max(0.0, time.time() - path.stat().st_mtime)
+            before = path.stat()
+            age = max(0.0, time.time() - before.st_mtime)
             settle_remaining = max(0.0, SETTLE_SECONDS - age)
             if settle_remaining:
                 # A burst ages while the first file settles; later files
                 # normally need no additional sleep.
                 time.sleep(settle_remaining)
             body = path.read_text(encoding="utf-8")
-        except OSError as exc:
+            after = path.stat()
+            if (after.st_mtime_ns, after.st_size) != (before.st_mtime_ns, before.st_size):
+                log(f"defer {path.name}: file changed while being read")
+                continue
+        except (OSError, UnicodeError) as exc:
             log(f"skip {path.name}: unreadable ({exc})")
             continue
         if not body.strip():
@@ -351,7 +357,12 @@ def run(argv: list[str] | None = None) -> int:
             continue
         try:
             result = post_report(base_url, token, title, date_text, body)
-        except (urllib.error.URLError, OSError, ValueError) as exc:
+        except (
+            urllib.error.URLError,
+            OSError,
+            ValueError,
+            http.client.HTTPException,
+        ) as exc:
             failed += 1
             log(f"upload failed {path.name}: {exc}")
             continue  # hash stays unrecorded -> retried on the next pass

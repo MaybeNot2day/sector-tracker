@@ -62,7 +62,11 @@ def wired(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         },
     )
     monkeypatch.setattr(monitor, "fetch_book", lambda base_url: book)
-    monkeypatch.setattr(monitor, "send_alert", lambda target, msg: calls["alerts"].append(msg))
+    def fake_alert(target: str, message: str) -> bool:
+        calls["alerts"].append(message)
+        return True
+
+    monkeypatch.setattr(monitor, "send_alert", fake_alert)
 
     def fake_close(base_url: str, token: str, idea_id: int, reason: str) -> dict[str, Any]:
         calls["closes"].append((idea_id, reason))
@@ -133,10 +137,34 @@ def test_stopless_big_move_alerts_once_per_day(wired: dict[str, Any]) -> None:
     assert len(wired["calls"]["alerts"]) == 1
 
 
+def test_stopless_alert_retries_after_delivery_failure(
+    wired: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wired["book"]["open"] = [
+        _idea(id=1, ticker="AAPL", direction="short", stop_price=None, unrealized_pct=-11.3)
+    ]
+    attempts: list[str] = []
+
+    def flaky_alert(target: str, message: str) -> bool:
+        attempts.append(message)
+        return len(attempts) > 1
+
+    monkeypatch.setattr(monitor, "send_alert", flaky_alert)
+
+    assert monitor.run() == 0
+    assert monitor.run() == 0
+    assert monitor.run() == 0
+    assert len(attempts) == 2
+
+
 def test_target_hit_harvests_after_two_ticks(wired: dict[str, Any]) -> None:
     winner = _idea(
-        id=6, ticker="AMD", stop_price=430.0, target_price=580.0,
-        last=584.5, unrealized_pct=16.1,
+        id=6,
+        ticker="AMD",
+        stop_price=430.0,
+        target_price=580.0,
+        last=584.5,
+        unrealized_pct=16.1,
     )
     wired["book"]["open"] = [winner]
 

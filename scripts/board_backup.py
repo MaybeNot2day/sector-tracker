@@ -15,9 +15,12 @@ ALERT_TARGET, BACKUP_DIR, BACKUP_KEEP).
 from __future__ import annotations
 
 import gzip
+import http.client
+import os
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime
@@ -37,7 +40,7 @@ def fetch_snapshot(base_url: str, token: str) -> bytes:
         base_url + "/api/backup", headers={"X-Edit-Token": token}
     )
     with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:  # nosec B310
-        return response.read()
+        return bytes(response.read())
 
 
 def verify_snapshot(path: Path) -> str | None:
@@ -73,13 +76,17 @@ def rotate(backup_dir: Path, keep: int) -> int:
 
 
 def send_alert(target: str, message: str) -> None:
-    result = subprocess.run(
-        [str(HERMES_BIN), "send", "--to", target, "--quiet", message],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [str(HERMES_BIN), "send", "--to", target, "--quiet", message],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log(f"alert failed: {exc}")
+        return
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
         log(f"alert failed: {detail or f'exit {result.returncode}'}")
@@ -98,24 +105,46 @@ def run() -> int:
     if not base_url or not token:
         log("missing BOARD_URL/EDIT_TOKEN; nothing to do")
         return 2
-
     stamp = datetime.now(UTC).date().isoformat()
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    raw_path = backup_dir / f"board-{stamp}.sqlite3.partial"
     final_path = backup_dir / f"board-{stamp}.sqlite3.gz"
 
+    temp_path: Path | None = None
     try:
         payload = fetch_snapshot(base_url, token)
-        raw_path.write_bytes(payload)
-        problem = verify_snapshot(raw_path)
-        if problem:
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            prefix=".board-snapshot.",
+            suffix=".sqlite3",
+            dir=backup_dir,
+        ) as raw:
+            raw.write(payload)
+            raw.flush()
+            problem = verify_snapshot(Path(raw.name))
+        if problem is not None:
             raise RuntimeError(problem)
-        with gzip.open(final_path, "wb", compresslevel=6) as archive:
-            archive.write(payload)
-        raw_path.unlink()
-    except (OSError, ValueError, RuntimeError, urllib.error.URLError) as exc:
-        raw_path.unlink(missing_ok=True)
-        final_path.unlink(missing_ok=True)
+        with tempfile.NamedTemporaryFile(
+            prefix=f".{final_path.name}.",
+            suffix=".tmp",
+            dir=backup_dir,
+            delete=False,
+        ) as tmp:
+            temp_path = Path(tmp.name)
+            with gzip.GzipFile(fileobj=tmp, mode="wb", compresslevel=6) as archive:
+                archive.write(payload)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        # The verified bytes are compressed completely before the atomic cutover.
+        os.replace(temp_path, final_path)
+        temp_path = None
+    except (
+        OSError,
+        ValueError,
+        RuntimeError,
+        urllib.error.URLError,
+        http.client.HTTPException,
+    ) as exc:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
         log(f"backup failed: {exc}")
         send_alert(
             target,

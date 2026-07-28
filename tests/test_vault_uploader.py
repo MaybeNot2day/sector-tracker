@@ -430,6 +430,36 @@ def test_partially_aged_report_sleeps_only_remaining_delta(
     assert sleeps == [uploader.SETTLE_SECONDS - 1.0]
 
 
+
+def test_file_changed_during_read_is_deferred_until_next_pass(
+    env: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = f"{_TODAY_TEXT} Morning Brief.md"
+    path = _write_report(env.vault, name, "first draft")
+    original_read_text = Path.read_text
+    raced = False
+
+    def racing_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        nonlocal raced
+        body = original_read_text(self, *args, **kwargs)
+        if self == path and not raced:
+            raced = True
+            self.write_text("complete second draft", encoding="utf-8")
+            stamp = time.time() - 120
+            os.utime(self, (stamp, stamp))
+        return body
+
+    monkeypatch.setattr(Path, "read_text", racing_read_text)
+
+    assert uploader.run([]) == 0
+    assert env.post.calls == []
+    assert _read_state(env) == {}
+
+    assert uploader.run([]) == 0
+    assert [call[4] for call in env.post.calls] == ["complete second draft"]
+    assert _read_state(env) == {name: _sha("complete second draft")}
+
 def test_new_file_uploads_once_then_skips(env: SimpleNamespace) -> None:
     body = "# Morning\n\nRotation continues.\n"
     name = f"{_TODAY_TEXT} Morning Brief.md"

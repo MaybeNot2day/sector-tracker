@@ -578,13 +578,6 @@ def _save_report(
     land in the archive but must never drive projections — the fringe book and
     key dates follow only the newest brief per slug.
     """
-    latest = conn.execute(
-        "SELECT report_date FROM reports WHERE slug = ?"
-        " ORDER BY report_date DESC LIMIT 1",
-        (slug,),
-    ).fetchone()
-    current = latest is None or report_date >= str(latest["report_date"])
-
     row = conn.execute(
         """
         INSERT INTO reports (slug, report_date, title, body, created_at)
@@ -596,6 +589,14 @@ def _save_report(
         """,
         (slug, report_date, title, body, _to_iso(datetime.now(UTC))),
     ).fetchone()
+    # Determine projection ownership only after the write transaction starts.
+    # Concurrent ingests now serialize on the INSERT, so an older brief can
+    # never race a newer one and overwrite its Fringe/key-date projections.
+    latest = conn.execute(
+        "SELECT MAX(report_date) AS report_date FROM reports WHERE slug = ?",
+        (slug,),
+    ).fetchone()
+    current = report_date == str(latest["report_date"])
     # Prior days are retained: the report library pages back through history
     # and deep-links briefs by id, so a slug's archive must stay readable.
     return int(row["id"]), current
@@ -609,7 +610,10 @@ def ingest_report(
     title: str,
     body: str,
     events: Sequence[tuple[str, str | None, str, str]],
-    fringe_actions: Sequence[tuple[str, str, str, str, str | None, str | None]] | None,
+    fringe_actions: Sequence[
+        tuple[str, str, str, str, str | None, str | None, float | None, str | None]
+    ]
+    | None,
 ) -> int:
     """Persist a report and every derived projection in one transaction."""
     init_db(path)
@@ -698,17 +702,23 @@ def load_report(path: Path, report_id: int) -> dict[str, object] | None:
         "body": str(row["body"]),
     }
 
-
 def delete_report(path: Path, report_id: int) -> bool:
-    """Remove one report and only its calendar attribution."""
+    """Remove one report; only the current slug owner may clear projections."""
     init_db(path)
     with _connect(path) as conn:
-        row = conn.execute("SELECT slug FROM reports WHERE id = ?", (report_id,)).fetchone()
+        row = conn.execute(
+            "SELECT slug, report_date FROM reports WHERE id = ?", (report_id,)
+        ).fetchone()
         if row is None:
             return False
         slug = str(row["slug"])
-        conn.execute("DELETE FROM key_date_sources WHERE source_slug = ?", (slug,))
-        _rebuild_key_dates(conn)
+        latest = conn.execute(
+            "SELECT MAX(report_date) AS report_date FROM reports WHERE slug = ?",
+            (slug,),
+        ).fetchone()
+        if latest is not None and str(row["report_date"]) == str(latest["report_date"]):
+            conn.execute("DELETE FROM key_date_sources WHERE source_slug = ?", (slug,))
+            _rebuild_key_dates(conn)
         conn.execute("DELETE FROM reports WHERE id = ?", (report_id,))
         return True
 

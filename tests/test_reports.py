@@ -14,9 +14,12 @@ directly on app.state with a tmp database path (mirrors test_edit_token).
 """
 
 import sqlite3
+import threading
+import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -214,6 +217,35 @@ def test_create_report_rejects_malformed_payload(
     assert response.status_code == 422
 
 
+
+def test_report_date_allows_next_session_but_rejects_far_future(
+    configure_app: Callable[[str], None],
+) -> None:
+    configure_app("")
+    client = TestClient(app)
+    today = datetime.now(UTC).date()
+
+    accepted = client.post(
+        "/api/reports",
+        json={
+            "title": "Next Session",
+            "body": "overnight brief",
+            "date": (today + timedelta(days=1)).isoformat(),
+        },
+    )
+    rejected = client.post(
+        "/api/reports",
+        json={
+            "title": "Future Typo",
+            "body": "bad date",
+            "date": (today + timedelta(days=2)).isoformat(),
+        },
+    )
+
+    assert accepted.status_code == 200
+    assert rejected.status_code == 422
+    assert "report date is too far in the future" in rejected.text
+
 # --- upsert semantics keyed by (slug, date) ---
 
 
@@ -334,6 +366,67 @@ def test_older_date_is_archived_without_driving_projections(
         ("hermes-flows", "2026-07-08"),
     ]
     assert client.get("/api/key-dates").json()["key_dates"] == []
+
+
+def test_concurrent_report_ingests_leave_newest_projections_in_control(
+    configure_app: Callable[[str], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure_app("")
+    path = app.state.settings.database_path
+    db.init_db(path)
+    barrier = threading.Barrier(2)
+    original_save = db._save_report
+
+    def synchronized_save(
+        conn: sqlite3.Connection,
+        *,
+        slug: str,
+        report_date: str,
+        title: str,
+        body: str,
+    ) -> tuple[int, bool]:
+        barrier.wait(timeout=5)
+        if report_date == "2026-07-08":
+            time.sleep(0.05)
+        return original_save(
+            conn,
+            slug=slug,
+            report_date=report_date,
+            title=title,
+            body=body,
+        )
+
+    monkeypatch.setattr(db, "_save_report", synchronized_save)
+
+    def ingest(report_date: str, event_title: str) -> None:
+        db.ingest_report(
+            path,
+            slug="hermes-flows",
+            report_date=report_date,
+            title="Flows",
+            body=event_title,
+            events=[("2026-08-01", None, event_title, "macro")],
+            fringe_actions=None,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(ingest, "2026-07-08", "Older event"),
+            pool.submit(ingest, "2026-07-09", "Newest event"),
+        ]
+        for future in futures:
+            future.result(timeout=10)
+
+    with sqlite3.connect(path) as conn:
+        titles = [
+            str(row[0])
+            for row in conn.execute(
+                "SELECT title FROM key_dates WHERE source_slug = ?",
+                ("hermes-flows",),
+            )
+        ]
+    assert titles == ["Newest event"]
 
 
 # --- GET /api/reports: ordering, item shape, limit, previews ---
@@ -525,6 +618,42 @@ def test_delete_removes_report_and_unknown_delete_404s(
     again = client.delete(f"/api/reports/{report_id}")
     assert again.status_code == 404
     assert again.json()["detail"] == "report_not_found"
+
+
+def test_deleting_archived_report_does_not_clear_current_key_dates(
+    configure_app: Callable[[str], None],
+) -> None:
+    configure_app("")
+    client = TestClient(app)
+    older = client.post(
+        "/api/reports",
+        json={
+            "title": "Macro Tape",
+            "slug": "macro-tape",
+            "date": "2026-07-08",
+            "body": "## Key Dates\n- 2026-08-20 - Older Event\n",
+        },
+    )
+    newer = client.post(
+        "/api/reports",
+        json={
+            "title": "Macro Tape",
+            "slug": "macro-tape",
+            "date": "2026-07-09",
+            "body": "## Key Dates\n- 2026-08-21 - Current Event\n",
+        },
+    )
+    assert older.status_code == newer.status_code == 200
+    assert [item["title"] for item in client.get("/api/key-dates").json()["key_dates"]] == [
+        "Current Event"
+    ]
+
+    deleted = client.delete(f"/api/reports/{older.json()['id']}")
+
+    assert deleted.status_code == 200
+    assert [item["title"] for item in client.get("/api/key-dates").json()["key_dates"]] == [
+        "Current Event"
+    ]
 
 
 def test_report_ingest_rolls_back_when_a_projection_fails(

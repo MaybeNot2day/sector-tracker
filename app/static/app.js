@@ -96,6 +96,8 @@ let wsReconnectDelayMs = 3000; // doubles per failed reconnect, capped at 30s
 let activeView = "daily";
 let pendingChartFromUrl = null;
 let restoringUrlState = false;
+let activeReportId = null;
+let reportOpenToken = 0;
 const BOARD_CACHE_KEY = "board-cache-v1";
 const BOARD_CACHE_WRITE_INTERVAL_MS = 30000;
 let lastBoardCacheWriteAt = 0;
@@ -325,9 +327,9 @@ function setTheme(theme, persist = false) {
 init();
 
 // --- URL state ------------------------------------------------------------
-// View, filters, and open chart mirror into the hash so any board state is
-// bookmarkable/shareable. replaceState keeps history clean.
-function syncUrlState() {
+// View and filter changes replace in place; opening a report pushes one
+// history entry so browser Back returns from the reader to the library.
+function syncUrlState({ push = false } = {}) {
   if (restoringUrlState) return;
   const params = new URLSearchParams();
   if (activeView !== "daily") params.set("view", activeView);
@@ -339,10 +341,11 @@ function syncUrlState() {
     params.set("chart", activeSymbol);
     if (activeInterval !== "1d") params.set("tf", activeInterval);
   }
+  if (activeReportId !== null) params.set("report", String(activeReportId));
   const hash = params.toString();
   const next = hash ? `#${hash}` : window.location.pathname + window.location.search;
   if (`#${hash}` === window.location.hash || (!hash && !window.location.hash)) return;
-  history.replaceState(null, "", hash ? `#${hash}` : next);
+  history[push ? "pushState" : "replaceState"](null, "", hash ? `#${hash}` : next);
 }
 
 function restoreUrlState() {
@@ -380,11 +383,9 @@ function restoreUrlState() {
     }
     const reportId = params.get("report");
     if (/^\d+$/.test(reportId || "")) {
-      // Deferred: restoreUrlState runs mid-evaluation, before the reader's
-      // module-level state (reportOpenToken) initializes.
       queueMicrotask(() => {
         openReports();
-        openReport(Number(reportId));
+        openReport(Number(reportId), { pushHistory: false });
       });
     }
   } finally {
@@ -429,6 +430,7 @@ function init() {
   // icons are inline SVG; no icon library needed
   setConnection("connecting");
   restoreUrlState();
+  window.addEventListener("popstate", restoreReportNavigation);
   restoreCachedBoard();
   fetchQuotes();
   fetchCryptoEtfFlows();
@@ -935,10 +937,17 @@ function openReports() {
 }
 
 function closeReports() {
+  if (activeReportId !== null) reportOpenToken += 1;
+  activeReportId = null;
+  syncUrlState();
   closeDialog(reportsModal);
 }
 
 function showReportsList({ focus = false } = {}) {
+  const hadOpenReport = activeReportId !== null;
+  if (hadOpenReport) reportOpenToken += 1;
+  activeReportId = null;
+  if (hadOpenReport) syncUrlState();
   reportReaderElement.hidden = true;
   reportReaderElement.removeAttribute("aria-busy");
   reportsListElement.hidden = false;
@@ -975,6 +984,10 @@ async function fetchReports({ append = false } = {}) {
     markReportsSeen(reportsItems);
   } catch (error) {
     if (seq !== reportsFetchSeq) return;
+    if (append && reportsItems.length) {
+      renderReportsList();
+      return;
+    }
     reportsListElement.innerHTML = '<div class="empty-state">Reports unavailable</div>';
   }
 }
@@ -1043,17 +1056,39 @@ function wireReportsListEvents() {
   });
 }
 
-let reportOpenToken = 0;
+
 
 // "#report=12" (bare or trailing a full board URL) -> 12, else null.
 function reportIdFromHref(href) {
   const hashIndex = href.indexOf("#");
   if (hashIndex === -1) return null;
-  const id = new URLSearchParams(href.slice(hashIndex + 1)).get("report");
-  return /^\d+$/.test(id || "") ? Number(id) : null;
+  const value = new URLSearchParams(href.slice(hashIndex + 1)).get("report");
+  if (!/^\d+$/.test(value || "")) return null;
+  const id = Number(value);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
-async function openReport(reportId) {
+function restoreReportNavigation() {
+  const reportId = reportIdFromHref(window.location.href);
+  restoringUrlState = true;
+  try {
+    if (reportId !== null) {
+      openDialog(reportsModal, reportsCloseButton);
+      openReport(reportId, { pushHistory: false });
+    } else if (activeReportId !== null) {
+      showReportsList();
+    }
+  } finally {
+    restoringUrlState = false;
+  }
+}
+
+async function openReport(reportId, { pushHistory = true } = {}) {
+  reportId = Number(reportId);
+  if (!Number.isSafeInteger(reportId) || reportId <= 0) return;
+  const changed = activeReportId !== reportId;
+  activeReportId = reportId;
+  syncUrlState({ push: pushHistory && changed });
   // Rapid clicks race: the slower response must not render over the newer.
   const token = ++reportOpenToken;
   reportsListElement.hidden = true;
