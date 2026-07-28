@@ -71,14 +71,18 @@ BOARD_E2E_BASE_URL=http://127.0.0.1:8000 python -m pytest tests/test_playwright_
 
 ## Agent Reports
 
-The Reports button in the top bar opens a modal that renders markdown reports pushed by
-external agents (e.g. Hermes cron jobs). Reports are stored in SQLite keyed by
-`(slug, date)`: a re-run of the same job replaces that day's report in place (keeping
-its original `created_at` stamp), while prior days are retained as history — Weekly
-Recaps deep-link past briefs by id, so a slug's archive must stay readable. Same-slug
-uploads dated older than the newest brief are ignored as stale. Obsidian-style YAML
-frontmatter is stripped from previews and the rendered view; the renderer escapes all
-HTML.
+The Reports button in the top bar opens the report library: every brief ever
+pushed, grouped by date newest first, filterable by brief via facet chips, with
+"Load older reports" paging back through the archive (`GET
+/api/reports?limit=&offset=&slug=` serves the pages plus `has_more` and the
+distinct-slug `filters` facets). Reports are stored in SQLite keyed by
+`(slug, date)`: a re-run of the same job replaces that day's report in place
+(keeping its original `created_at` stamp), while prior days are retained as the
+archive. Same-slug uploads dated older than the newest brief are ignored as
+stale. `#report=<id>` deep links work everywhere: markdown links inside a
+report body navigate the reader in place, and a bare `https://<board>/#report=<id>`
+URL boots the dashboard with that report open. Obsidian-style YAML frontmatter
+is stripped from previews and the rendered view; the renderer escapes all HTML.
 
 Push a report (the write routes honor `EDIT_TOKEN` via `X-Edit-Token`, same as watchlist
 edits):
@@ -240,19 +244,6 @@ Reference skeleton for the Hermes cron job:
    Unmentioned ideas stay open
    but go stale.
 ```
-
-### Weekly Recap
-
-A Friday 15:00 Europe/Berlin Hermes cron closes the week: it pulls the week's
-briefs back off the board (`GET /api/reports` + per-id bodies), synthesizes one
-recap ordered most-important-first, and ships it through the same
-vault -> uploader -> board pipeline as `YYYY-MM-DD Weekly Recap.md`. The contract
-(enforced by the uploader validator) requires a `## The Week in Brief` lead, a
-closing `## Coverage Index`, and at least one `#report=<id>` deep link. Links use
-the board's `#report=<id>` hash: the report reader intercepts them and navigates
-in place, and a bare `https://<board>/#report=<id>` URL boots the dashboard with
-that report open. The watchdog audits the recap Friday-only (15:40 Berlin
-deadline).
 
 ### Automatic vault uploads
 

@@ -29,7 +29,6 @@ _WATCHDOG_SPEC.loader.exec_module(watchdog)
 
 DATE_TEXT = "2026-07-22"
 NOW = datetime(2026, 7, 22, 12, 30, tzinfo=UTC)  # Wednesday 14:30 Berlin
-FRIDAY_NOW = datetime(2026, 7, 24, 14, 0, tzinfo=UTC)  # Friday 16:00 Berlin
 
 
 def _body(title: str, date_text: str = DATE_TEXT) -> str:
@@ -55,10 +54,6 @@ def _body(title: str, date_text: str = DATE_TEXT) -> str:
             "## Fringe Corner\n"
             "- HOLD LONG AMD - thesis intact [horizon: 2w]\n"
             "## Rationale\nEvidence.\n"
-        ),
-        "Weekly Recap": (
-            "## The Week in Brief\nSemis led; macro cooled.\n"
-            "## Coverage Index\n- Semis: [Mon](#report=1)\n"
         ),
     }
     return frontmatter + sections[title]
@@ -104,7 +99,7 @@ def test_audit_accepts_complete_end_to_end_delivery(
 ) -> None:
     vault = tmp_path / "vault"
     vault.mkdir()
-    titles = [stage.title for stage in watchdog.STAGES if stage.weekday is None]
+    titles = [stage.title for stage in watchdog.STAGES]
     bodies = _write_due_reports(vault, titles)
     upload_state = {
         f"{DATE_TEXT} {title}.md": uploader.content_hash(body)
@@ -131,45 +126,6 @@ def test_audit_accepts_complete_end_to_end_delivery(
     assert calls[0].endswith("/api/reports?limit=20")
     assert calls[-1].endswith("/api/fringe")
     assert len(calls) == len(titles) + 2
-
-
-def test_weekly_recap_is_gated_to_friday_and_audited_there(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    vault = tmp_path / "vault"
-    vault.mkdir()
-    friday = "2026-07-24"
-    titles = [stage.title for stage in watchdog.STAGES]
-    assert "Weekly Recap" in titles
-    bodies = _write_due_reports(vault, titles, friday)
-    upload_state = {
-        f"{friday} {title}.md": uploader.content_hash(body)
-        for title, body in bodies.items()
-    }
-    calls: list[str] = []
-    monkeypatch.setattr(
-        watchdog,
-        "load_config",
-        lambda: {"BOARD_URL": "https://board.test", "VAULT_DIR": str(vault)},
-    )
-    monkeypatch.setattr(watchdog, "load_state", lambda: upload_state)
-    monkeypatch.setattr(watchdog, "_run_uploader", lambda: True)
-    monkeypatch.setattr(watchdog, "_get_json", _dashboard_stub(bodies, calls, friday))
-
-    # Friday after the recap deadline: all six stages due, delivery complete.
-    assert watchdog.audit_pipeline(FRIDAY_NOW) == []
-
-    # A missing recap file is a Friday failure...
-    (vault / f"{friday} Weekly Recap.md").unlink()
-    issues = watchdog.audit_pipeline(FRIDAY_NOW)
-    assert any(issue.startswith("Weekly Recap") for issue in issues)
-
-    # ...but never audited on other weekdays (Wednesday same wall time).
-    wednesday = FRIDAY_NOW.replace(day=22)
-    monkeypatch.setattr(watchdog, "_get_json", _dashboard_stub({}, [], "2026-07-22"))
-    monkeypatch.setattr(watchdog, "load_state", lambda: {})
-    issues = watchdog.audit_pipeline(wednesday)
-    assert not any("Weekly Recap" in issue for issue in issues)
 
 
 def test_audit_repairs_an_unuploaded_valid_report(

@@ -592,8 +592,8 @@ def _save_report(
         """,
         (slug, report_date, title, body, _to_iso(datetime.now(UTC))),
     ).fetchone()
-    # Prior days are retained: Weekly Recaps deep-link past briefs by id, so
-    # a slug's history must outlive the day it was written.
+    # Prior days are retained: the report library pages back through history
+    # and deep-links briefs by id, so a slug's archive must stay readable.
     return int(row["id"]), True
 
 
@@ -630,26 +630,48 @@ def ingest_report(
         return report_id
 
 
-def load_reports(path: Path, limit: int) -> list[dict[str, object]]:
-    """Report metadata plus a short plain-text preview, newest first."""
+def load_reports(
+    path: Path, limit: int, *, offset: int = 0, slug: str | None = None
+) -> dict[str, object]:
+    """One library page: metadata + preview newest first, plus filter facets.
+
+    Fetches limit+1 rows to derive `has_more` without a COUNT scan; `filters`
+    lists every distinct (slug, title) so the UI can offer facets that exist
+    beyond the current page.
+    """
     init_db(path)
+    where = " WHERE slug = ?" if slug else ""
+    args: tuple[object, ...] = (slug,) if slug else ()
     with _connect(path) as conn:
         rows = conn.execute(
-            "SELECT id, slug, report_date, title, substr(body, 1, 16384) AS body, created_at"
-            " FROM reports ORDER BY report_date DESC, created_at DESC LIMIT ?",
-            (limit,),
+            "SELECT id, slug, report_date, title, substr(body, 1, 16384) AS body,"
+            f" created_at FROM reports{where}"
+            " ORDER BY report_date DESC, created_at DESC LIMIT ? OFFSET ?",
+            (*args, limit + 1, offset),
         ).fetchall()
-    return [
-        {
-            "id": int(row["id"]),
-            "slug": str(row["slug"]),
-            "date": str(row["report_date"]),
-            "title": str(row["title"]),
-            "created_at": str(row["created_at"]),
-            "preview": _report_preview(str(row["body"])),
-        }
-        for row in rows
-    ]
+        facets = conn.execute(
+            """
+            SELECT slug, title FROM reports GROUP BY slug
+            HAVING report_date = MAX(report_date) ORDER BY slug
+            """
+        ).fetchall()
+    return {
+        "reports": [
+            {
+                "id": int(row["id"]),
+                "slug": str(row["slug"]),
+                "date": str(row["report_date"]),
+                "title": str(row["title"]),
+                "created_at": str(row["created_at"]),
+                "preview": _report_preview(str(row["body"])),
+            }
+            for row in rows[:limit]
+        ],
+        "has_more": len(rows) > limit,
+        "filters": [
+            {"slug": str(row["slug"]), "title": str(row["title"])} for row in facets
+        ],
+    }
 
 
 def load_report(path: Path, report_id: int) -> dict[str, object] | None:

@@ -594,9 +594,14 @@ async def create_report(request: ReportRequest) -> dict[str, object]:
 
 
 @app.get("/api/reports")
-async def reports(limit: int = Query(default=30, ge=1, le=200)) -> dict[str, object]:
-    items = await asyncio.to_thread(db.load_reports, app.state.settings.database_path, limit)
-    return {"reports": items}
+async def reports(
+    limit: int = Query(default=30, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    slug: str | None = Query(default=None, min_length=1, max_length=64),
+) -> dict[str, object]:
+    return await asyncio.to_thread(
+        db.load_reports, app.state.settings.database_path, limit, offset=offset, slug=slug
+    )
 
 
 @app.get("/api/reports/{report_id}")

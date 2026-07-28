@@ -948,30 +948,64 @@ function showReportsList({ focus = false } = {}) {
   }
 }
 
-async function fetchReports() {
+// --- Report library state: facet filter + cursor over the full archive ----
+const REPORTS_PAGE_SIZE = 60;
+let reportsFilterSlug = null;
+let reportsItems = [];
+let reportsHasMore = false;
+let reportsFacets = [];
+let reportsFetchSeq = 0;
+
+async function fetchReports({ append = false } = {}) {
+  const seq = ++reportsFetchSeq;
   try {
-    const response = await fetch("/api/reports?limit=60");
+    const params = new URLSearchParams({ limit: String(REPORTS_PAGE_SIZE) });
+    if (append) params.set("offset", String(reportsItems.length));
+    if (reportsFilterSlug) params.set("slug", reportsFilterSlug);
+    const response = await fetch(`/api/reports?${params}`);
     if (!response.ok) throw new Error("reports_failed");
     const payload = await response.json();
-    renderReportsList(payload?.reports || []);
-    markReportsSeen(payload?.reports || []);
+    if (seq !== reportsFetchSeq) return;
+    reportsItems = append
+      ? reportsItems.concat(payload?.reports || [])
+      : payload?.reports || [];
+    reportsHasMore = Boolean(payload?.has_more);
+    if (Array.isArray(payload?.filters)) reportsFacets = payload.filters;
+    renderReportsList();
+    markReportsSeen(reportsItems);
   } catch (error) {
+    if (seq !== reportsFetchSeq) return;
     reportsListElement.innerHTML = '<div class="empty-state">Reports unavailable</div>';
   }
 }
 
-function renderReportsList(reports) {
-  if (!reports.length) {
-    reportsListElement.innerHTML =
-      '<div class="empty-state">No reports yet — point an agent cron job at POST /api/reports</div>';
+function renderReportsList() {
+  const sections = [];
+  if (reportsFacets.length > 1 || reportsFilterSlug) {
+    const chips = [
+      `<button type="button" class="report-filter${reportsFilterSlug ? "" : " active"}" data-slug="">All</button>`,
+    ];
+    for (const facet of reportsFacets) {
+      const active = facet.slug === reportsFilterSlug ? " active" : "";
+      chips.push(
+        `<button type="button" class="report-filter${active}" data-slug="${escapeHtml(facet.slug)}">${escapeHtml(facet.title)}</button>`
+      );
+    }
+    sections.push(`<div class="report-filters" role="group" aria-label="Filter reports">${chips.join("")}</div>`);
+  }
+  if (!reportsItems.length) {
+    sections.push(
+      '<div class="empty-state">No reports yet — point an agent cron job at POST /api/reports</div>'
+    );
+    reportsListElement.innerHTML = sections.join("");
+    wireReportsListEvents();
     return;
   }
   const byDate = new Map();
-  for (const item of reports) {
+  for (const item of reportsItems) {
     if (!byDate.has(item.date)) byDate.set(item.date, []);
     byDate.get(item.date).push(item);
   }
-  const sections = [];
   for (const [date, items] of byDate) {
     sections.push(`<h3 class="reports-date">${escapeHtml(formatReportDate(date))}</h3>`);
     for (const item of items) {
@@ -984,9 +1018,28 @@ function renderReportsList(reports) {
         </button>`);
     }
   }
+  if (reportsHasMore) {
+    sections.push(
+      '<button type="button" class="report-load-more" id="reports-load-more">Load older reports</button>'
+    );
+  }
   reportsListElement.innerHTML = sections.join("");
+  wireReportsListEvents();
+}
+
+function wireReportsListEvents() {
   reportsListElement.querySelectorAll(".report-card").forEach((card) => {
     card.addEventListener("click", () => openReport(Number(card.dataset.reportId)));
+  });
+  reportsListElement.querySelectorAll(".report-filter").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      reportsFilterSlug = chip.dataset.slug || null;
+      fetchReports();
+    });
+  });
+  document.querySelector("#reports-load-more")?.addEventListener("click", (event) => {
+    event.target.disabled = true;
+    fetchReports({ append: true });
   });
 }
 
@@ -1045,8 +1098,11 @@ function refreshReportsBadge() {
 }
 
 function markReportsSeen(reports) {
+  // Watermark only advances: a filtered or paged view of older reports must
+  // never regress "seen" and resurrect the badge.
   const newest = reports[0]?.created_at;
-  if (newest) localStorage.setItem(REPORTS_SEEN_KEY, newest);
+  const seen = localStorage.getItem(REPORTS_SEEN_KEY) || "";
+  if (newest && newest > seen) localStorage.setItem(REPORTS_SEEN_KEY, newest);
   reportsBadge.hidden = true;
 }
 

@@ -3740,6 +3740,63 @@ a.key-date-row:focus-visible {
 .reports-date:first-child {
   margin-top: 0;
 }
+.report-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.report-filter {
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted-strong);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.report-filter:hover,
+.report-filter:focus-visible {
+  border-color: var(--accent-dim);
+  color: var(--text);
+  outline: none;
+}
+
+.report-filter.active {
+  border-color: var(--accent-dim);
+  background: var(--surface-raised);
+  color: var(--text);
+}
+
+.report-load-more {
+  width: 100%;
+  margin-top: 10px;
+  padding: 8px 12px;
+  border: 1px dashed var(--line);
+  background: transparent;
+  color: var(--muted-strong);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+}
+
+.report-load-more:hover,
+.report-load-more:focus-visible {
+  border-color: var(--accent-dim);
+  color: var(--text);
+  outline: none;
+}
+
+.report-load-more:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
 
 .report-card {
   display: grid;

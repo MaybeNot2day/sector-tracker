@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from urllib.error import URLError
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 from urllib.request import urlopen
 
 import pytest
@@ -863,6 +863,47 @@ def test_report_deep_link_opens_reader_on_boot(page: Page, base_url: str) -> Non
     expect(page.locator("#reports-list .report-card")).to_have_count(3)
 
 
+def test_report_library_filters_and_pages_the_archive(
+    page: Page, base_url: str
+) -> None:
+    _goto_board(page, base_url)
+    page.locator("#reports-open").click()
+
+    # Facet chips: All + one per distinct slug, All active by default.
+    chips = page.locator("#reports-list .report-filter")
+    expect(chips).to_have_count(3)
+    expect(chips.first).to_have_text("All")
+    expect(chips.first).to_have_class(re.compile("active"))
+    expect(page.locator("#reports-list .report-card")).to_have_count(3)
+
+    # Paging: the archive holds one older page; loading it appends and the
+    # button disappears once exhausted.
+    load_more = page.locator("#reports-load-more")
+    expect(load_more).to_be_visible()
+    load_more.click()
+    expect(page.locator("#reports-list .report-card")).to_have_count(4)
+    expect(page.locator("#reports-list .report-card").nth(3)).to_contain_text(
+        "Archive flows"
+    )
+    expect(page.locator("#reports-load-more")).to_have_count(0)
+
+    # Facet filter narrows to one brief's history and stays on one page.
+    page.locator('#reports-list .report-filter[data-slug="levels-watch"]').click()
+    expect(page.locator("#reports-list .report-card")).to_have_count(1)
+    expect(page.locator("#reports-list .report-card").first).to_contain_text(
+        "Levels Watch"
+    )
+    expect(
+        page.locator('#reports-list .report-filter[data-slug="levels-watch"]')
+    ).to_have_class(re.compile("active"))
+    expect(page.locator("#reports-load-more")).to_have_count(0)
+
+    # Back to the full archive.
+    page.locator('#reports-list .report-filter[data-slug=""]').click()
+    expect(page.locator("#reports-list .report-card")).to_have_count(3)
+    expect(page.locator("#reports-load-more")).to_be_visible()
+
+
 @pytest.mark.parametrize(
     ("width", "height"),
     [(390, 844), (768, 900), (800, 900), (1440, 1100)],
@@ -1092,7 +1133,7 @@ def _stub_board_apis(page: Page) -> None:
                 route, REPORT_DETAILS.get(report_id, REPORT_DETAIL_PAYLOAD)
             )
         elif path == "/api/reports":
-            _fulfill_json(route, REPORTS_LIST_PAYLOAD)
+            _fulfill_json(route, _reports_page(parsed.query))
         else:
             route.continue_()
 
@@ -1674,34 +1715,63 @@ FRINGE_PAYLOAD: dict[str, Any] = {
     ],
 }
 
-REPORTS_LIST_PAYLOAD: dict[str, Any] = {
-    "reports": [
-        {
-            "id": 7,
-            "slug": "hermes-daily-flows",
-            "date": "2026-07-09",
-            "title": "Hermes Daily Flows",
-            "created_at": "2026-07-09T14:00:00+00:00",
-            "preview": "Position sizing check and net flows",
-        },
-        {
-            "id": 6,
-            "slug": "levels-watch",
-            "date": "2026-07-09",
-            "title": "Levels Watch",
-            "created_at": "2026-07-09T06:00:00+00:00",
-            "preview": "Key levels for the session",
-        },
-        {
-            "id": 5,
-            "slug": "hermes-daily-flows",
-            "date": "2026-07-08",
-            "title": "Hermes Daily Flows",
-            "created_at": "2026-07-08T14:00:00+00:00",
-            "preview": "Prior session flows",
-        },
-    ]
-}
+REPORTS_ARCHIVE: list[dict[str, Any]] = [
+    {
+        "id": 7,
+        "slug": "hermes-daily-flows",
+        "date": "2026-07-09",
+        "title": "Hermes Daily Flows",
+        "created_at": "2026-07-09T14:00:00+00:00",
+        "preview": "Position sizing check and net flows",
+    },
+    {
+        "id": 6,
+        "slug": "levels-watch",
+        "date": "2026-07-09",
+        "title": "Levels Watch",
+        "created_at": "2026-07-09T06:00:00+00:00",
+        "preview": "Key levels for the session",
+    },
+    {
+        "id": 5,
+        "slug": "hermes-daily-flows",
+        "date": "2026-07-08",
+        "title": "Hermes Daily Flows",
+        "created_at": "2026-07-08T14:00:00+00:00",
+        "preview": "Prior session flows",
+    },
+    {
+        "id": 4,
+        "slug": "hermes-daily-flows",
+        "date": "2026-07-07",
+        "title": "Hermes Daily Flows",
+        "created_at": "2026-07-07T14:00:00+00:00",
+        "preview": "Archive flows",
+    },
+]
+
+REPORTS_FACETS: list[dict[str, str]] = [
+    {"slug": "hermes-daily-flows", "title": "Hermes Daily Flows"},
+    {"slug": "levels-watch", "title": "Levels Watch"},
+]
+
+# The UI asks for limit=60; the stub pages by 3 so "Load older reports" is
+# exercisable with a four-item archive.
+_STUB_PAGE_SIZE = 3
+
+
+def _reports_page(query: str) -> dict[str, Any]:
+    params = parse_qs(query)
+    slug = params.get("slug", [None])[0]
+    offset = int(params.get("offset", ["0"])[0])
+    pool = [item for item in REPORTS_ARCHIVE if not slug or item["slug"] == slug]
+    page = pool[offset : offset + _STUB_PAGE_SIZE]
+    return {
+        "reports": page,
+        "has_more": offset + _STUB_PAGE_SIZE < len(pool),
+        "filters": REPORTS_FACETS,
+    }
+
 
 REPORT_BODY_MARKDOWN = "\n".join(
     [

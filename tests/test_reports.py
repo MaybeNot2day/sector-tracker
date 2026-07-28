@@ -77,7 +77,7 @@ def test_report_mutations_reject_bad_token_and_persist_nothing(
     # Reads stay open with a token configured, and the rejected mutation left no row.
     listing = client.get("/api/reports")
     assert listing.status_code == 200
-    assert listing.json() == {"reports": []}
+    assert listing.json() == {"reports": [], "has_more": False, "filters": []}
 
 
 def test_report_mutations_accept_exact_token(
@@ -183,7 +183,7 @@ def test_create_report_rejects_unslugifiable_input(
 
     assert response.status_code == 422
     assert response.json()["detail"] == "report_slug_invalid"
-    assert client.get("/api/reports").json() == {"reports": []}
+    assert client.get("/api/reports").json()["reports"] == []
 
 
 @pytest.mark.parametrize(
@@ -259,8 +259,8 @@ def test_same_slug_on_new_date_keeps_prior_days_readable(
         json={"title": "Flows", "body": "tuesday", "slug": "hermes-flows", "date": "2026-07-09"},
     )
 
-    # History is retained newest-first: Weekly Recaps deep-link prior days by
-    # id, so yesterday's brief must stay listed and readable.
+    # History is retained newest-first: the library pages back through the
+    # archive by id, so yesterday's brief must stay listed and readable.
     reports = client.get("/api/reports").json()["reports"]
     assert [(item["slug"], item["date"]) for item in reports] == [
         ("hermes-flows", "2026-07-09"),
@@ -268,6 +268,40 @@ def test_same_slug_on_new_date_keeps_prior_days_readable(
     ]
     assert client.get(f"/api/reports/{second.json()['id']}").json()["body"] == "tuesday"
     assert client.get(f"/api/reports/{first.json()['id']}").json()["body"] == "monday"
+
+
+def test_library_paginates_and_filters_by_slug(
+    configure_app: Callable[[str], None],
+) -> None:
+    configure_app("")
+    client = TestClient(app)
+    for day in range(1, 6):
+        date = f"2026-07-{day:02d}"
+        for slug, title in (("macro-tape", "Macro Tape"), ("fringe-corner", "Fringe Corner")):
+            client.post(
+                "/api/reports",
+                json={"title": title, "body": f"{title} {date}", "slug": slug, "date": date},
+            )
+
+    # Facets list every distinct slug regardless of the current page.
+    page = client.get("/api/reports?limit=3").json()
+    assert [f["slug"] for f in page["filters"]] == ["fringe-corner", "macro-tape"]
+    assert len(page["reports"]) == 3
+    assert page["has_more"] is True
+
+    # Offset pages continue where the previous page stopped, newest first.
+    rest = client.get("/api/reports?limit=200&offset=3").json()
+    assert len(rest["reports"]) == 7
+    assert rest["has_more"] is False
+    dates = [item["date"] for item in page["reports"] + rest["reports"]]
+    assert dates == sorted(dates, reverse=True)
+
+    # Slug filter narrows to one brief's history without disturbing facets.
+    filtered = client.get("/api/reports?slug=macro-tape").json()
+    assert {item["slug"] for item in filtered["reports"]} == {"macro-tape"}
+    assert len(filtered["reports"]) == 5
+    assert filtered["has_more"] is False
+    assert [f["slug"] for f in filtered["filters"]] == ["fringe-corner", "macro-tape"]
 
 
 def test_stale_older_date_cannot_displace_newer_brief(
@@ -480,7 +514,7 @@ def test_delete_removes_report_and_unknown_delete_404s(
     assert deleted.status_code == 200
     assert deleted.json() == {"status": "deleted"}
     assert client.get(f"/api/reports/{report_id}").status_code == 404
-    assert client.get("/api/reports").json() == {"reports": []}
+    assert client.get("/api/reports").json()["reports"] == []
 
     again = client.delete(f"/api/reports/{report_id}")
     assert again.status_code == 404
@@ -509,7 +543,7 @@ def test_report_ingest_rolls_back_when_a_projection_fails(
     )
 
     assert response.status_code == 500
-    assert db.load_reports(app.state.settings.database_path, 10) == []
+    assert db.load_reports(app.state.settings.database_path, 10)["reports"] == []
 
 
 # --- db helper: the 40-line frontmatter scan window ---
