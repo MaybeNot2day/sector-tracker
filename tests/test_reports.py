@@ -244,7 +244,7 @@ def test_upsert_same_slug_and_date_replaces_body_and_title(
     assert detail["body"] == "new body"
 
 
-def test_same_slug_on_new_date_replaces_previous_days_brief(
+def test_same_slug_on_new_date_keeps_prior_days_readable(
     configure_app: Callable[[str], None],
 ) -> None:
     configure_app("")
@@ -259,11 +259,15 @@ def test_same_slug_on_new_date_replaces_previous_days_brief(
         json={"title": "Flows", "body": "tuesday", "slug": "hermes-flows", "date": "2026-07-09"},
     )
 
-    # Only the newest brief per slug survives; yesterday's is gone entirely.
+    # History is retained newest-first: Weekly Recaps deep-link prior days by
+    # id, so yesterday's brief must stay listed and readable.
     reports = client.get("/api/reports").json()["reports"]
-    assert [(item["slug"], item["date"]) for item in reports] == [("hermes-flows", "2026-07-09")]
+    assert [(item["slug"], item["date"]) for item in reports] == [
+        ("hermes-flows", "2026-07-09"),
+        ("hermes-flows", "2026-07-08"),
+    ]
     assert client.get(f"/api/reports/{second.json()['id']}").json()["body"] == "tuesday"
-    assert client.get(f"/api/reports/{first.json()['id']}").status_code == 404
+    assert client.get(f"/api/reports/{first.json()['id']}").json()["body"] == "monday"
 
 
 def test_stale_older_date_cannot_displace_newer_brief(

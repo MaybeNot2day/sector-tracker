@@ -592,10 +592,8 @@ def _save_report(
         """,
         (slug, report_date, title, body, _to_iso(datetime.now(UTC))),
     ).fetchone()
-    conn.execute(
-        "DELETE FROM reports WHERE slug = ? AND report_date < ?",
-        (slug, report_date),
-    )
+    # Prior days are retained: Weekly Recaps deep-link past briefs by id, so
+    # a slug's history must outlive the day it was written.
     return int(row["id"]), True
 
 

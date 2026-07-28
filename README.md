@@ -72,10 +72,13 @@ BOARD_E2E_BASE_URL=http://127.0.0.1:8000 python -m pytest tests/test_playwright_
 ## Agent Reports
 
 The Reports button in the top bar opens a modal that renders markdown reports pushed by
-external agents (e.g. Hermes cron jobs). Reports are stored in SQLite; only the newest
-report per slug is kept — a re-run of the same job replaces that day's report, and a new
-day's brief replaces the previous day's entirely. Obsidian-style YAML frontmatter is
-stripped from previews and the rendered view; the renderer escapes all HTML.
+external agents (e.g. Hermes cron jobs). Reports are stored in SQLite keyed by
+`(slug, date)`: a re-run of the same job replaces that day's report in place (keeping
+its original `created_at` stamp), while prior days are retained as history — Weekly
+Recaps deep-link past briefs by id, so a slug's archive must stay readable. Same-slug
+uploads dated older than the newest brief are ignored as stale. Obsidian-style YAML
+frontmatter is stripped from previews and the rendered view; the renderer escapes all
+HTML.
 
 Push a report (the write routes honor `EDIT_TOKEN` via `X-Edit-Token`, same as watchlist
 edits):
