@@ -552,7 +552,7 @@ def load_board_snapshots(path: Path, limit: int) -> list[dict[str, object]]:
 
 
 def save_report(path: Path, *, slug: str, report_date: str, title: str, body: str) -> int:
-    """Upsert one agent report, ignoring stale dates older than the current brief."""
+    """Upsert one agent report into the archive (projections not applied)."""
     init_db(path)
     with _connect(path) as conn:
         report_id, _ = _save_report(
@@ -573,13 +573,17 @@ def _save_report(
     title: str,
     body: str,
 ) -> tuple[int, bool]:
+    """Upsert by (slug, date); the bool reports whether this is the slug's
+    current brief. Older-dated uploads (vault backfills, stale re-syncs) still
+    land in the archive but must never drive projections — the fringe book and
+    key dates follow only the newest brief per slug.
+    """
     latest = conn.execute(
-        "SELECT id, report_date FROM reports WHERE slug = ?"
+        "SELECT report_date FROM reports WHERE slug = ?"
         " ORDER BY report_date DESC LIMIT 1",
         (slug,),
     ).fetchone()
-    if latest is not None and report_date < str(latest["report_date"]):
-        return int(latest["id"]), False
+    current = latest is None or report_date >= str(latest["report_date"])
 
     row = conn.execute(
         """
@@ -594,7 +598,7 @@ def _save_report(
     ).fetchone()
     # Prior days are retained: the report library pages back through history
     # and deep-links briefs by id, so a slug's archive must stay readable.
-    return int(row["id"]), True
+    return int(row["id"]), current
 
 
 def ingest_report(
@@ -610,14 +614,16 @@ def ingest_report(
     """Persist a report and every derived projection in one transaction."""
     init_db(path)
     with _connect(path) as conn:
-        report_id, accepted = _save_report(
+        report_id, current = _save_report(
             conn,
             slug=slug,
             report_date=report_date,
             title=title,
             body=body,
         )
-        if not accepted:
+        if not current:
+            # Archived backfill: the row landed, but projections stay pinned
+            # to the slug's newest brief.
             return report_id
         _replace_key_dates(conn, slug=slug, events=events)
         if fringe_actions is not None:

@@ -78,8 +78,10 @@ pushed, grouped by date newest first, filterable by brief via facet chips, with
 distinct-slug `filters` facets). Reports are stored in SQLite keyed by
 `(slug, date)`: a re-run of the same job replaces that day's report in place
 (keeping its original `created_at` stamp), while prior days are retained as the
-archive. Same-slug uploads dated older than the newest brief are ignored as
-stale. `#report=<id>` deep links work everywhere: markdown links inside a
+archive. Same-slug uploads dated older than the newest brief are archived under
+their own date but never drive projections — the fringe book and key dates
+follow only the newest brief per slug, so vault backfills are always safe.
+`#report=<id>` deep links work everywhere: markdown links inside a
 report body navigate the reader in place, and a bare `https://<board>/#report=<id>`
 URL boots the dashboard with that report open. Obsidian-style YAML frontmatter
 is stripped from previews and the rendered view; the renderer escapes all HTML.

@@ -304,7 +304,7 @@ def test_library_paginates_and_filters_by_slug(
     assert [f["slug"] for f in filtered["filters"]] == ["fringe-corner", "macro-tape"]
 
 
-def test_stale_older_date_cannot_displace_newer_brief(
+def test_older_date_is_archived_without_driving_projections(
     configure_app: Callable[[str], None],
 ) -> None:
     configure_app("")
@@ -314,20 +314,26 @@ def test_stale_older_date_cannot_displace_newer_brief(
         "/api/reports",
         json={"title": "Flows", "body": "tuesday", "slug": "hermes-flows", "date": "2026-07-09"},
     )
-    # A late edit to an older vault file re-uploads with its old date; the
-    # newer brief must win, not the stale re-upload.
+    # A vault backfill (or a late edit to an older file) uploads with its old
+    # date: it lands in the archive under that date but the newest brief keeps
+    # the top slot, and projections (key dates, fringe book) never replay from
+    # it — its calendar line must not become a key-dates row.
     client.post(
         "/api/reports",
         json={
             "title": "Flows",
-            "body": "monday edit",
+            "body": "monday edit\n2027-01-15 - Backfilled Ghost Event\n",
             "slug": "hermes-flows",
             "date": "2026-07-08",
         },
     )
 
     reports = client.get("/api/reports").json()["reports"]
-    assert [(item["slug"], item["date"]) for item in reports] == [("hermes-flows", "2026-07-09")]
+    assert [(item["slug"], item["date"]) for item in reports] == [
+        ("hermes-flows", "2026-07-09"),
+        ("hermes-flows", "2026-07-08"),
+    ]
+    assert client.get("/api/key-dates").json()["key_dates"] == []
 
 
 # --- GET /api/reports: ordering, item shape, limit, previews ---
