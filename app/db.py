@@ -587,8 +587,7 @@ def _save_report(
         VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(slug, report_date) DO UPDATE SET
             title = excluded.title,
-            body = excluded.body,
-            created_at = excluded.created_at
+            body = excluded.body
         RETURNING id
         """,
         (slug, report_date, title, body, _to_iso(datetime.now(UTC))),

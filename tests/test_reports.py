@@ -225,6 +225,7 @@ def test_upsert_same_slug_and_date_replaces_body_and_title(
     key = {"slug": "hermes-flows", "date": "2026-07-09"}
 
     first = client.post("/api/reports", json={"title": "Flows v1", "body": "old body", **key})
+    first_created = client.get("/api/reports").json()["reports"][0]["created_at"]
     second = client.post("/api/reports", json={"title": "Flows v2", "body": "new body", **key})
 
     assert first.status_code == 200
@@ -234,6 +235,9 @@ def test_upsert_same_slug_and_date_replaces_body_and_title(
     reports = client.get("/api/reports").json()["reports"]
     assert len(reports) == 1
     assert reports[0]["title"] == "Flows v2"
+    # The card timestamp is "first landed", not "last repaired": same-day
+    # replacements (watchdog repairs, cron re-runs) keep the original stamp.
+    assert reports[0]["created_at"] == first_created
 
     detail = client.get(f"/api/reports/{first.json()['id']}").json()
     assert detail["title"] == "Flows v2"
