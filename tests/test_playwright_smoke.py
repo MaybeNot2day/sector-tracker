@@ -838,10 +838,28 @@ def test_reports_modal_lists_reports_and_renders_escaped_markdown_reader(
         "(https://example.com/oil-prices-jump)"
     )
 
+    # Cross-report hash links navigate the reader in place: no reload, no new
+    # tab, back button still returns to the list.
+    body.locator('a[href="#report=6"]').click()
+    expect(reader.locator(".report-head h2")).to_have_text("Levels Watch")
+    expect(reader.locator(".report-body h2")).to_have_text("Levels")
+
     page.locator("#reports-back").click()
     expect(cards.first).to_be_focused()
     expect(page.locator("#report-reader")).to_be_hidden()
     expect(page.locator("#reports-back")).to_be_hidden()
+    expect(page.locator("#reports-list .report-card")).to_have_count(3)
+
+
+def test_report_deep_link_opens_reader_on_boot(page: Page, base_url: str) -> None:
+    _stub_board_apis(page)
+    page.goto(f"{base_url}/?deep=1#report=6", wait_until="domcontentloaded")
+    expect(page.locator("#reports-modal")).to_have_attribute("aria-hidden", "false")
+    reader = page.locator("#report-reader")
+    expect(reader).to_be_visible()
+    expect(reader.locator(".report-head h2")).to_have_text("Levels Watch")
+    # Back still reaches the full list.
+    page.locator("#reports-back").click()
     expect(page.locator("#reports-list .report-card")).to_have_count(3)
 
 
@@ -1069,7 +1087,10 @@ def _stub_board_apis(page: Page) -> None:
             symbol = unquote(path.rsplit("/", 1)[1]).upper()
             _fulfill_json(route, _profile_payload(symbol))
         elif path.startswith("/api/reports/"):
-            _fulfill_json(route, REPORT_DETAIL_PAYLOAD)
+            report_id = int(path.rsplit("/", 1)[-1])
+            _fulfill_json(
+                route, REPORT_DETAILS.get(report_id, REPORT_DETAIL_PAYLOAD)
+            )
         elif path == "/api/reports":
             _fulfill_json(route, REPORTS_LIST_PAYLOAD)
         else:
@@ -1716,6 +1737,9 @@ REPORT_BODY_MARKDOWN = "\n".join(
         "",
         "~~stale claim~~ replaced by ![[chart alias.png|chart alias]] and [[Chart Note]].",
         "",
+        "Coverage: [Levels Watch](#report=6) and",
+        "[board link](https://dashboard.example/#report=6).",
+        "",
         "<script>alert(1)</script>",
     ]
 )
@@ -1727,4 +1751,16 @@ REPORT_DETAIL_PAYLOAD: dict[str, Any] = {
     "title": "Hermes Daily Flows",
     "created_at": "2026-07-09T14:00:00+00:00",
     "body": REPORT_BODY_MARKDOWN,
+}
+
+REPORT_DETAILS: dict[int, dict[str, Any]] = {
+    7: REPORT_DETAIL_PAYLOAD,
+    6: {
+        "id": 6,
+        "slug": "levels-watch",
+        "date": "2026-07-09",
+        "title": "Levels Watch",
+        "created_at": "2026-07-09T06:00:00+00:00",
+        "body": "## Levels\nSupport at 100.",
+    },
 }

@@ -378,6 +378,15 @@ function restoreUrlState() {
         interval: params.get("tf") || "1d",
       };
     }
+    const reportId = params.get("report");
+    if (/^\d+$/.test(reportId || "")) {
+      // Deferred: restoreUrlState runs mid-evaluation, before the reader's
+      // module-level state (reportOpenToken) initializes.
+      queueMicrotask(() => {
+        openReports();
+        openReport(Number(reportId));
+      });
+    }
   } finally {
     restoringUrlState = false;
   }
@@ -551,6 +560,16 @@ function init() {
   reportsBackButton.addEventListener("click", () => showReportsList({ focus: true }));
   reportsModal.addEventListener("click", (event) => {
     if (event.target === reportsModal) closeReports();
+  });
+  // Cross-report links inside a report body ("#report=12" hash, bare or on a
+  // full board URL) navigate the reader in place instead of reloading.
+  reportReaderElement.addEventListener("click", (event) => {
+    const anchor = event.target.closest("a[href]");
+    if (!anchor) return;
+    const id = reportIdFromHref(anchor.getAttribute("href") || "");
+    if (id === null) return;
+    event.preventDefault();
+    openReport(id);
   });
   document.addEventListener("keydown", (event) => {
     if (event.key === "Tab" && activeDialog) {
@@ -973,6 +992,14 @@ function renderReportsList(reports) {
 
 let reportOpenToken = 0;
 
+// "#report=12" (bare or trailing a full board URL) -> 12, else null.
+function reportIdFromHref(href) {
+  const hashIndex = href.indexOf("#");
+  if (hashIndex === -1) return null;
+  const id = new URLSearchParams(href.slice(hashIndex + 1)).get("report");
+  return /^\d+$/.test(id || "") ? Number(id) : null;
+}
+
 async function openReport(reportId) {
   // Rapid clicks race: the slower response must not render over the newer.
   const token = ++reportOpenToken;
@@ -1237,6 +1264,9 @@ function mdInline(text) {
     /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
     '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>'
   );
+  // Hash-only links ([Mon](#report=12)) stay in-app: the report reader
+  // intercepts anchors carrying a report id and navigates without a reload.
+  out = out.replace(/\[([^\]]+)\]\((#[^)\s]+)\)/g, '<a href="$2">$1</a>');
   // Bare URLs (agents cite sources as "Name (https://...)") become links
   // too. Split around anchors/code the passes above produced so hrefs and
   // code spans are never re-linkified. Parens and trailing punctuation stay

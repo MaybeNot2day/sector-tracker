@@ -57,7 +57,7 @@ DATED_NAME = re.compile(r"^(\d{4}-\d{2}-\d{2}) (.+)\.md$")
 # Vault-writing cron jobs; extend via REPORT_TITLES instead of editing this.
 DEFAULT_REPORT_TITLES = (
     "Biotech Pharma Brief, AI Semis Morning Brief, Macro Tape Brief, "
-    "US Asia Close, Fringe Corner"
+    "US Asia Close, Fringe Corner, Weekly Recap"
 )
 HERMES_BIN = Path.home() / ".local/bin/hermes"
 NOTIFY_TIMEOUT = 20
@@ -148,6 +148,7 @@ KNOWN_REPORT_TITLES = {
     "macro tape brief",
     "us asia close",
     "fringe corner",
+    "weekly recap",
 }
 
 REPORT_CONTRACT_EFFECTIVE_DATE = date(2026, 7, 22)
@@ -187,6 +188,9 @@ def validate_report_body(title: str, date_text: str, body: str) -> str | None:
             "Feed Status",
         ),
         "fringe corner": ("## Fringe Corner", "## Rationale"),
+        # The recap must lead with the week's synthesis, carry the per-brief
+        # trace index, and deep-link at least one source brief.
+        "weekly recap": ("## The Week in Brief", "## Coverage Index", "#report="),
     }
     for marker in required_markers[title_key]:
         if marker not in report:

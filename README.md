@@ -238,6 +238,19 @@ Reference skeleton for the Hermes cron job:
    but go stale.
 ```
 
+### Weekly Recap
+
+A Friday 15:00 Europe/Berlin Hermes cron closes the week: it pulls the week's
+briefs back off the board (`GET /api/reports` + per-id bodies), synthesizes one
+recap ordered most-important-first, and ships it through the same
+vault -> uploader -> board pipeline as `YYYY-MM-DD Weekly Recap.md`. The contract
+(enforced by the uploader validator) requires a `## The Week in Brief` lead, a
+closing `## Coverage Index`, and at least one `#report=<id>` deep link. Links use
+the board's `#report=<id>` hash: the report reader intercepts them and navigates
+in place, and a bare `https://<board>/#report=<id>` URL boots the dashboard with
+that report open. The watchdog audits the recap Friday-only (15:40 Berlin
+deadline).
+
 ### Automatic vault uploads
 
 `scripts/vault_report_uploader.py` makes the pipeline hands-off: it scans a vault

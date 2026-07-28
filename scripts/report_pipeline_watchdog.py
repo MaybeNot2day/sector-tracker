@@ -39,6 +39,7 @@ PUBLISH_TZ = ZoneInfo("Europe/Berlin")
 class Stage:
     title: str
     deadline: time
+    weekday: int | None = None  # None = every weekday; 0=Mon .. 4=Fri
 
 
 STAGES = (
@@ -47,6 +48,7 @@ STAGES = (
     Stage("US Asia Close", time(11, 20)),
     Stage("Macro Tape Brief", time(13, 50)),
     Stage("Fringe Corner", time(14, 20)),
+    Stage("Weekly Recap", time(15, 40), weekday=4),
 )
 
 
@@ -100,7 +102,12 @@ def audit_pipeline(now: datetime | None = None) -> list[str]:
     local = current.astimezone(PUBLISH_TZ)
     if local.weekday() >= 5:
         return []
-    due = [stage for stage in STAGES if local.time() >= stage.deadline]
+    due = [
+        stage
+        for stage in STAGES
+        if (stage.weekday is None or stage.weekday == local.weekday())
+        and local.time() >= stage.deadline
+    ]
     if not due:
         return []
 

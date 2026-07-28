@@ -28,12 +28,13 @@ sys.modules["report_pipeline_watchdog"] = watchdog
 _WATCHDOG_SPEC.loader.exec_module(watchdog)
 
 DATE_TEXT = "2026-07-22"
-NOW = datetime(2026, 7, 22, 12, 30, tzinfo=UTC)
+NOW = datetime(2026, 7, 22, 12, 30, tzinfo=UTC)  # Wednesday 14:30 Berlin
+FRIDAY_NOW = datetime(2026, 7, 24, 14, 0, tzinfo=UTC)  # Friday 16:00 Berlin
 
 
-def _body(title: str) -> str:
+def _body(title: str, date_text: str = DATE_TEXT) -> str:
     frontmatter = (
-        f"---\ndate: {DATE_TEXT}\ntype: research\n"
+        f"---\ndate: {date_text}\ntype: research\n"
         "tags: [daily-brief, market-brief]\nstatus: draft\n---\n"
     )
     sections = {
@@ -55,19 +56,25 @@ def _body(title: str) -> str:
             "- HOLD LONG AMD - thesis intact [horizon: 2w]\n"
             "## Rationale\nEvidence.\n"
         ),
+        "Weekly Recap": (
+            "## The Week in Brief\nSemis led; macro cooled.\n"
+            "## Coverage Index\n- Semis: [Mon](#report=1)\n"
+        ),
     }
     return frontmatter + sections[title]
 
 
-def _write_due_reports(vault: Path, titles: list[str]) -> dict[str, str]:
-    bodies = {title: _body(title) for title in titles}
+def _write_due_reports(
+    vault: Path, titles: list[str], date_text: str = DATE_TEXT
+) -> dict[str, str]:
+    bodies = {title: _body(title, date_text) for title in titles}
     for title, body in bodies.items():
-        (vault / f"{DATE_TEXT} {title}.md").write_text(body, encoding="utf-8")
+        (vault / f"{date_text} {title}.md").write_text(body, encoding="utf-8")
     return bodies
 
 
 def _dashboard_stub(
-    bodies: dict[str, str], calls: list[str]
+    bodies: dict[str, str], calls: list[str], date_text: str = DATE_TEXT
 ) -> Any:
     ids = {title: index for index, title in enumerate(bodies, start=1)}
 
@@ -76,14 +83,14 @@ def _dashboard_stub(
         if url.endswith("/api/reports?limit=20"):
             return {
                 "reports": [
-                    {"id": ids[title], "title": title, "date": DATE_TEXT}
+                    {"id": ids[title], "title": title, "date": date_text}
                     for title in bodies
                 ]
             }
         if url.endswith("/api/fringe"):
             return {
                 "summary": {"open_count": 1},
-                "open": [{"ticker": "AMD", "last_mentioned": DATE_TEXT}],
+                "open": [{"ticker": "AMD", "last_mentioned": date_text}],
             }
         report_id = int(url.rsplit("/", 1)[-1])
         title = next(title for title, item_id in ids.items() if item_id == report_id)
@@ -97,7 +104,7 @@ def test_audit_accepts_complete_end_to_end_delivery(
 ) -> None:
     vault = tmp_path / "vault"
     vault.mkdir()
-    titles = [stage.title for stage in watchdog.STAGES]
+    titles = [stage.title for stage in watchdog.STAGES if stage.weekday is None]
     bodies = _write_due_reports(vault, titles)
     upload_state = {
         f"{DATE_TEXT} {title}.md": uploader.content_hash(body)
@@ -124,6 +131,45 @@ def test_audit_accepts_complete_end_to_end_delivery(
     assert calls[0].endswith("/api/reports?limit=20")
     assert calls[-1].endswith("/api/fringe")
     assert len(calls) == len(titles) + 2
+
+
+def test_weekly_recap_is_gated_to_friday_and_audited_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    friday = "2026-07-24"
+    titles = [stage.title for stage in watchdog.STAGES]
+    assert "Weekly Recap" in titles
+    bodies = _write_due_reports(vault, titles, friday)
+    upload_state = {
+        f"{friday} {title}.md": uploader.content_hash(body)
+        for title, body in bodies.items()
+    }
+    calls: list[str] = []
+    monkeypatch.setattr(
+        watchdog,
+        "load_config",
+        lambda: {"BOARD_URL": "https://board.test", "VAULT_DIR": str(vault)},
+    )
+    monkeypatch.setattr(watchdog, "load_state", lambda: upload_state)
+    monkeypatch.setattr(watchdog, "_run_uploader", lambda: True)
+    monkeypatch.setattr(watchdog, "_get_json", _dashboard_stub(bodies, calls, friday))
+
+    # Friday after the recap deadline: all six stages due, delivery complete.
+    assert watchdog.audit_pipeline(FRIDAY_NOW) == []
+
+    # A missing recap file is a Friday failure...
+    (vault / f"{friday} Weekly Recap.md").unlink()
+    issues = watchdog.audit_pipeline(FRIDAY_NOW)
+    assert any(issue.startswith("Weekly Recap") for issue in issues)
+
+    # ...but never audited on other weekdays (Wednesday same wall time).
+    wednesday = FRIDAY_NOW.replace(day=22)
+    monkeypatch.setattr(watchdog, "_get_json", _dashboard_stub({}, [], "2026-07-22"))
+    monkeypatch.setattr(watchdog, "load_state", lambda: {})
+    issues = watchdog.audit_pipeline(wednesday)
+    assert not any("Weekly Recap" in issue for issue in issues)
 
 
 def test_audit_repairs_an_unuploaded_valid_report(
