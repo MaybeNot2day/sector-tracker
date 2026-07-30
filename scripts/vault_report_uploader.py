@@ -152,15 +152,70 @@ KNOWN_REPORT_TITLES = {
 }
 
 REPORT_CONTRACT_EFFECTIVE_DATE = date(2026, 7, 22)
+# First run of the research-vetted Fringe prompt; older briefs predate the section.
+DUE_DILIGENCE_EFFECTIVE_DATE = date(2026, 7, 31)
+
+# Mirrors the board's bullet grammar: verbs case-insensitive, ticker strict
+# uppercase, separator required — bullets the board would skip are not gated.
+_FRINGE_OPEN_BULLET = re.compile(
+    r"^\s*[-*]\s+(?i:OPEN)\s+(?i:LONG|SHORT)\s+([A-Z0-9.\-=]{1,15})\s*[—:-]",
+    re.MULTILINE,
+)
+
+
+def _report_section(report: str, title: str) -> str | None:
+    """Body of the first `## <title>` section; None when the heading is absent."""
+    lines = report.splitlines()
+    heading = re.compile(rf"##\s+{re.escape(title)}\s*", re.IGNORECASE)
+    start = next(
+        (i + 1 for i, line in enumerate(lines) if heading.fullmatch(line)), None
+    )
+    if start is None:
+        return None
+    body = lines[start:]
+    end = next((j for j, line in enumerate(body) if line.startswith("## ")), len(body))
+    return "\n".join(body[:end])
+
+
+def _due_diligence_violation(report: str) -> str | None:
+    """Every OPEN must carry a CONFIRMED, source-linked due-diligence block."""
+    fringe = _report_section(report, "Fringe Corner") or ""
+    tickers = list(dict.fromkeys(_FRINGE_OPEN_BULLET.findall(fringe)))
+    if not tickers:
+        return None
+    diligence = _report_section(report, "Due Diligence")
+    if diligence is None:
+        return "OPEN ideas require a '## Due Diligence' section"
+    blocks: dict[str, list[str]] = {}
+    current: list[str] | None = None
+    for line in diligence.splitlines():
+        if line.startswith("### "):
+            current = blocks.setdefault(line[4:].strip(), [])
+        if current is not None:
+            current.append(line)
+    for ticker in tickers:
+        heading = next(
+            (
+                name
+                for name in blocks
+                if re.match(rf"{re.escape(ticker)}(?![A-Z0-9.\-=])", name)
+            ),
+            None,
+        )
+        if heading is None:
+            return f"OPEN {ticker} has no due-diligence block"
+        if not re.search(r"\bCONFIRMED\b", heading, re.IGNORECASE):
+            return f"OPEN {ticker} due-diligence verdict is not CONFIRMED"
+        if "http" not in "\n".join(blocks[heading]):
+            return f"due-diligence for OPEN {ticker} cites no source link"
+    return None
 
 
 def validate_report_body(title: str, date_text: str, body: str) -> str | None:
     """Return a contract violation for a current known cron report, otherwise None."""
     title_key = title.casefold()
-    if (
-        title_key not in KNOWN_REPORT_TITLES
-        or date.fromisoformat(date_text) < REPORT_CONTRACT_EFFECTIVE_DATE
-    ):
+    report_date = date.fromisoformat(date_text)
+    if title_key not in KNOWN_REPORT_TITLES or report_date < REPORT_CONTRACT_EFFECTIVE_DATE:
         return None
     if not body.startswith("---\n"):
         return "missing YAML frontmatter"
@@ -198,6 +253,8 @@ def validate_report_body(title: str, date_text: str, body: str) -> str | None:
         "us asia close",
     } and report.count("---FEED-STATUS---") != 1:
         return "report must contain exactly one FEED-STATUS delimiter"
+    if title_key == "fringe corner" and report_date >= DUE_DILIGENCE_EFFECTIVE_DATE:
+        return _due_diligence_violation(report)
     return None
 
 

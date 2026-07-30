@@ -632,6 +632,95 @@ def test_validate_report_body_contract(
     assert uploader.validate_report_body(title, date_text, body) == expected
 
 
+def _fringe_body(fringe: str, extra_sections: str = "") -> str:
+    return (
+        "---\ndate: 2026-07-31\ntype: research\ntags: [fringe]\nstatus: draft\n---\n"
+        f"## Fringe Corner\n{fringe}{extra_sections}## Rationale\nEvidence.\n"
+    )
+
+
+_MU_CONFIRMED = (
+    "## Due Diligence\n"
+    "### MU — CONFIRMED\n"
+    "- 2026-07-31: HBM4 qualification ahead of schedule (https://example.com/mu-hbm4)\n"
+    "- Filings: no shelf, 8-K clean (https://www.sec.gov/cgi-bin/browse-edgar?ticker=MU)\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("fringe", "extra", "expected"),
+    [
+        pytest.param(
+            "- HOLD LONG AMD - thesis intact\n- CLOSE SHORT XLU - done\n",
+            "",
+            None,
+            id="no-opens-no-section-needed",
+        ),
+        pytest.param(
+            "- OPEN LONG MU — HBM repricing [conf: 60%] [stop: $95] [target: $140]\n",
+            "",
+            "OPEN ideas require a '## Due Diligence' section",
+            id="open-without-section",
+        ),
+        pytest.param(
+            "- OPEN LONG MU — HBM repricing\n",
+            "## Due Diligence\n### BTC — CONFIRMED\n- flows (https://x.test)\n",
+            "OPEN MU has no due-diligence block",
+            id="open-ticker-missing-block",
+        ),
+        pytest.param(
+            "- OPEN LONG MU — HBM repricing\n",
+            "## Due Diligence\n### MU — REJECTED — earnings in 4 sessions\n"
+            "- too late (https://x.test)\n",
+            "OPEN MU due-diligence verdict is not CONFIRMED",
+            id="open-contradicts-rejected-verdict",
+        ),
+        pytest.param(
+            "- OPEN LONG MU — HBM repricing\n",
+            "## Due Diligence\n### MU — CONFIRMED\n- gut feel, no sources\n",
+            "due-diligence for OPEN MU cites no source link",
+            id="confirmed-block-without-link",
+        ),
+        pytest.param(
+            "- open long MU — verbs lowercase parse fine\n",
+            _MU_CONFIRMED,
+            None,
+            id="lowercase-verbs-still-gated-and-satisfied",
+        ),
+        pytest.param(
+            "- OPEN LONG mu — lowercase ticker never reaches the board\n",
+            "",
+            None,
+            id="bullet-the-board-skips-is-not-gated",
+        ),
+        pytest.param(
+            "- OPEN LONG MU — HBM repricing\n- HOLD SHORT XLU — crowded\n",
+            _MU_CONFIRMED,
+            None,
+            id="confirmed-linked-block-passes",
+        ),
+        pytest.param(
+            "- OPEN SHORT GC=F — real yields turning\n",
+            "## Due Diligence\n### GC=F — CONFIRMED\n- TIC data (https://x.test)\n",
+            None,
+            id="futures-ticker-block-matches",
+        ),
+    ],
+)
+def test_fringe_open_requires_confirmed_due_diligence(
+    fringe: str, extra: str, expected: str | None
+) -> None:
+    body = _fringe_body(fringe, extra)
+    assert uploader.validate_report_body("Fringe Corner", "2026-07-31", body) == expected
+
+
+def test_due_diligence_gate_spares_briefs_before_effective_date() -> None:
+    body = (
+        "---\ndate: 2026-07-30\ntype: research\ntags: [fringe]\nstatus: draft\n---\n"
+        "## Fringe Corner\n- OPEN LONG MU — pre-contract brief\n## Rationale\nEvidence.\n"
+    )
+    assert uploader.validate_report_body("Fringe Corner", "2026-07-30", body) is None
+
 def test_invalid_current_cron_report_is_not_uploaded(env: SimpleNamespace) -> None:
     env.config.write_text(
         env.config.read_text(encoding="utf-8").replace(

@@ -204,6 +204,17 @@ re-opened next brief as a fresh, re-sized bet. Positions without a declared stop
 cannot be stop-enforced; those trigger one alert per day when the mark sits 10%+
 against entry. New ideas still open only through the daily brief.
 
+New ideas pass a **mandatory due-diligence stage** before they may open (briefs dated
+2026-07-31 onward). The cron agent researches each candidate independently of the
+morning briefs — fresh web searches for the latest coverage plus, for US
+equities/ETFs, the ticker's recent SEC filings from EDGAR (8-K material events,
+S-3/424B dilution, 13D/G activists, earnings timing) — and records a per-ticker
+verdict in a `## Due Diligence` section: `### <TICKER> — CONFIRMED` with dated,
+source-linked findings, or `— REJECTED` with the disqualifier. The uploader (and the
+pipeline watchdog behind it) enforces the contract: a brief whose `## Fringe Corner`
+section OPENs a ticker without a matching CONFIRMED, source-linked block is rejected
+before it reaches the board. HOLD/CLOSE-only briefs need no section.
+
 Hermes manages its own book explicitly — unlike Key Dates the ledger **accrues**
 instead of mirroring. `OPEN` on an already-open `(ticker, direction)` idea just
 refreshes the thesis/horizon/target (entry price and opened date are preserved); `HOLD`
@@ -239,12 +250,15 @@ Reference skeleton for the Hermes cron job:
 1. GET $BOARD/api/market-context?days=30 — regime/breadth history, movers,
    ETF flows, upcoming key dates, and your current book with P&L.
 2. Read today's research briefs.
-3. Write the daily report with a "## Fringe Corner" section that manages the
+3. Vet every OPEN candidate with independent research: web-search the last
+   week of coverage, pull recent EDGAR filings for US equities/ETFs, and
+   record a CONFIRMED/REJECTED verdict per ticker in "## Due Diligence"
+   (dated findings with source links; REJECTED stays on the record).
+4. Write the daily report with a "## Fringe Corner" section that manages the
    open book EXPLICITLY: HOLD every idea you still like (updated note),
-   CLOSE what is done or invalidated (reason), OPEN new ideas sparingly
+   CLOSE what is done or invalidated (reason), OPEN only CONFIRMED ideas
    (thesis + [conf: ...] + [stop: ...] + [target: ...] + [horizon: ...]).
-   Unmentioned ideas stay open
-   but go stale.
+   Unmentioned ideas stay open but go stale.
 ```
 
 ### Automatic vault uploads
