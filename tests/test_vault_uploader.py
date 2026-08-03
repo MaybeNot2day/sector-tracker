@@ -15,7 +15,7 @@ import urllib.error
 from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -264,6 +264,7 @@ def test_load_state_tolerates_bad_files(
 def test_load_state_missing_file_returns_empty(tmp_path: Path) -> None:
     assert uploader.load_state(tmp_path / "absent.json") == {}
 
+
 def test_prune_state_drops_only_expired_dated_reports() -> None:
     today = date(2026, 7, 10)
     state = {
@@ -392,10 +393,7 @@ def test_burst_of_fresh_reports_settles_once(
         encoding="utf-8",
     )
     clock = [time.time()]
-    paths = [
-        env.vault / f"{_TODAY_TEXT} Brief {index}.md"
-        for index in range(4)
-    ]
+    paths = [env.vault / f"{_TODAY_TEXT} Brief {index}.md" for index in range(4)]
     for path in paths:
         path.write_text(f"body {path.stem}", encoding="utf-8")
         os.utime(path, (clock[0], clock[0]))
@@ -430,7 +428,6 @@ def test_partially_aged_report_sleeps_only_remaining_delta(
     assert sleeps == [uploader.SETTLE_SECONDS - 1.0]
 
 
-
 def test_file_changed_during_read_is_deferred_until_next_pass(
     env: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
@@ -440,7 +437,7 @@ def test_file_changed_during_read_is_deferred_until_next_pass(
     original_read_text = Path.read_text
     raced = False
 
-    def racing_read_text(self: Path, *args: object, **kwargs: object) -> str:
+    def racing_read_text(self: Path, *args: Any, **kwargs: Any) -> str:
         nonlocal raced
         body = original_read_text(self, *args, **kwargs)
         if self == path and not raced:
@@ -460,6 +457,7 @@ def test_file_changed_during_read_is_deferred_until_next_pass(
     assert [call[4] for call in env.post.calls] == ["complete second draft"]
     assert _read_state(env) == {name: _sha("complete second draft")}
 
+
 def test_new_file_uploads_once_then_skips(env: SimpleNamespace) -> None:
     body = "# Morning\n\nRotation continues.\n"
     name = f"{_TODAY_TEXT} Morning Brief.md"
@@ -467,9 +465,7 @@ def test_new_file_uploads_once_then_skips(env: SimpleNamespace) -> None:
     _write_report(env.vault, f"{_STALE_TEXT} Ancient.md", "past the age window")
 
     assert uploader.run([]) == 0
-    assert env.post.calls == [
-        ("https://board.test", "sekrit", "Morning Brief", _TODAY_TEXT, body)
-    ]
+    assert env.post.calls == [("https://board.test", "sekrit", "Morning Brief", _TODAY_TEXT, body)]
     assert _read_state(env) == {name: _sha(body)}
 
     assert uploader.run([]) == 0  # second pass: hash matches, nothing re-sent
@@ -564,9 +560,7 @@ def test_run_star_allowlist_uploads_everything(env: SimpleNamespace) -> None:
 
 def test_run_malformed_max_age_days_falls_back_to_30(env: SimpleNamespace) -> None:
     env.config.write_text(
-        env.config.read_text(encoding="utf-8").replace(
-            "MAX_AGE_DAYS=30", "MAX_AGE_DAYS=30 days"
-        ),
+        env.config.read_text(encoding="utf-8").replace("MAX_AGE_DAYS=30", "MAX_AGE_DAYS=30 days"),
         encoding="utf-8",
     )
     _write_report(env.vault, f"{_TODAY_TEXT} Morning Brief.md", "fresh body")
@@ -599,7 +593,7 @@ def test_run_malformed_max_age_days_falls_back_to_30(env: SimpleNamespace) -> No
             "2026-07-22",
             "---\ndate: 2026-07-22\ntype: research\ntags: [macro]\n"
             "status: draft\n---\n## Executive Tape Read\n## Feed Status\n",
-            "report missing \"Today's Calendar\"",
+            'report missing "Today\'s Calendar"',
         ),
         (
             "AI Semis Morning Brief",
@@ -720,6 +714,7 @@ def test_due_diligence_gate_spares_briefs_before_effective_date() -> None:
         "## Fringe Corner\n- OPEN LONG MU — pre-contract brief\n## Rationale\nEvidence.\n"
     )
     assert uploader.validate_report_body("Fringe Corner", "2026-07-30", body) is None
+
 
 def test_invalid_current_cron_report_is_not_uploaded(env: SimpleNamespace) -> None:
     env.config.write_text(

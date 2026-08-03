@@ -63,6 +63,26 @@ async def test_history_service_fetches_and_caches_bars(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_history_service_fetches_unconfigured_explicit_fallback(
+    tmp_path: Path,
+) -> None:
+    provider = CountingHistoryProvider()
+    service = HistoryService(tmp_path / "board.sqlite3", {"yahoo": provider})
+    fallback = AssetConfig(symbol="CIFR", type="equity", source="yahoo")
+
+    bars = await service.get_history(
+        [],
+        "CIFR",
+        interval="1d",
+        range_="1y",
+        fallback_asset=fallback,
+    )
+
+    assert provider.calls == 1
+    assert [bar.symbol for bar in bars] == ["CIFR"]
+
+
+@pytest.mark.asyncio
 async def test_history_service_collapses_concurrent_identical_fetches(tmp_path: Path) -> None:
     groups = [
         GroupConfig(

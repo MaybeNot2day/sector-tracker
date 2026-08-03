@@ -20,6 +20,11 @@ class EmptyProvider(QuoteProvider):
         return []
 
 
+class ExplodingProvider(EmptyProvider):
+    async def get_quotes(self, assets: list[AssetConfig]) -> list[Quote]:
+        raise RuntimeError("provider exploded")
+
+
 class WorkingProvider(QuoteProvider):
     name = "yahoo"
 
@@ -188,6 +193,64 @@ async def test_quote_service_loads_cache_once_for_prioritization_and_fallback(
     assert grouped["ONE"][0] == db.mark_stale(cached)
     assert grouped["ONE"][1].error == "no_quote_available"
     assert grouped["TWO"][0] == db.mark_stale(cached)
+
+
+@pytest.mark.asyncio
+async def test_quote_service_rejects_cached_symbol_with_different_asset_type(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "board.sqlite3"
+    db.save_quotes(
+        database,
+        [
+            Quote.from_last_and_prev_close(
+                symbol="ROBO",
+                asset_type="etf",
+                provider="yahoo",
+                last=60.0,
+                previous_close=59.0,
+                timestamp=datetime.now(UTC),
+            )
+        ],
+    )
+    groups = [
+        GroupConfig(
+            name="CRYPTO",
+            assets=[
+                AssetConfig(symbol="ROBO", type="crypto_perp", source="lighter")
+            ],
+        )
+    ]
+    service = QuoteService(database, {"lighter": EmptyProvider()})
+
+    quote = (await service.get_board_quotes(groups))["CRYPTO"][0]
+
+    assert quote.asset_type == "crypto_perp"
+    assert quote.provider == "lighter"
+    assert quote.last == 0.0
+    assert quote.error == "no_quote_available"
+
+
+@pytest.mark.asyncio
+async def test_quote_service_logs_provider_exceptions(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    groups = [
+        GroupConfig(
+            name="TEST",
+            assets=[AssetConfig(symbol="AAPL", type="equity", source="yahoo")],
+        )
+    ]
+    service = QuoteService(
+        tmp_path / "board.sqlite3",
+        {"yahoo": ExplodingProvider()},
+    )
+
+    await service.get_board_quotes(groups)
+
+    assert "quote fetch via yahoo failed for 1 assets" in caplog.text
+    assert "provider exploded" in caplog.text
 
 
 def test_quote_payload_exposes_display_fields() -> None:

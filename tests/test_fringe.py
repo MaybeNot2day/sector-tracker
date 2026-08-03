@@ -281,6 +281,26 @@ def test_rerun_of_a_different_slug_never_retracts_anothers_ideas(tmp_path: Path)
     assert [idea["ticker"] for idea in open_ideas(path)] == ["AAA"]
 
 
+@pytest.mark.asyncio
+async def test_fringe_asset_resolution_is_limited_to_ledger_symbols(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "board.sqlite3"
+    service = FringeService(path, {})
+
+    assert await service.resolve_known_asset("CIFR") is None
+
+    db.apply_fringe_actions(
+        path,
+        slug="fringe",
+        report_date="2026-07-16",
+        actions=[act("open", "CIFR", "long")],
+    )
+    asset = await service.resolve_known_asset("CIFR")
+
+    assert asset == AssetConfig(symbol="CIFR", type="equity", source="yahoo")
+
+
 # --- P&L math ----------------------------------------------------------------
 
 

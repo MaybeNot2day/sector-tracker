@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,6 +12,8 @@ from app import db
 from app.models import AssetConfig, GroupConfig, ProviderName, Quote
 from app.providers.base import QuoteProvider
 from app.providers.lighter import LighterProvider
+
+logger = logging.getLogger(__name__)
 
 GroupsCacheKey: TypeAlias = tuple[tuple[str, tuple[tuple[str, str, str], ...]], ...]
 
@@ -48,8 +51,17 @@ class QuoteService:
             cached_by_symbol = await asyncio.to_thread(
                 db.load_latest_quotes, self.database_path, requested_symbols
             )
+            matching_cached_symbols = {
+                asset.symbol
+                for group in groups
+                for asset in group.assets
+                if (
+                    cached_quote := cached_by_symbol.get(asset.symbol.upper())
+                ) is not None
+                and _cached_quote_matches(asset, cached_quote)
+            }
             fresh_by_symbol = await self._fetch_fresh_quotes(
-                groups, set(cached_by_symbol)
+                groups, matching_cached_symbols
             )
             await asyncio.to_thread(
                 db.save_quotes, self.database_path, list(fresh_by_symbol.values())
@@ -147,6 +159,11 @@ class QuoteService:
         try:
             live_prices = await lighter.live_prices(candidates)
         except Exception:
+            logger.warning(
+                "Lighter equity overlay failed for %d symbols",
+                len(candidates),
+                exc_info=True,
+            )
             return
         now = datetime.now(UTC)
         for symbol, live in live_prices.items():
@@ -188,13 +205,19 @@ class QuoteService:
         try:
             return await provider.get_quotes(assets)
         except Exception:
+            logger.warning(
+                "quote fetch via %s failed for %d assets",
+                source,
+                len(assets),
+                exc_info=True,
+            )
             return []
 
     def _stale_or_error(
         self, asset: AssetConfig, cached_by_symbol: dict[str, Quote]
     ) -> Quote:
         cached = cached_by_symbol.get(asset.symbol.upper())
-        if cached:
+        if cached is not None and _cached_quote_matches(asset, cached):
             return db.mark_stale(cached)
         return Quote(
             symbol=asset.symbol,
@@ -208,6 +231,11 @@ class QuoteService:
             is_stale=True,
             error="no_quote_available",
         )
+
+
+def _cached_quote_matches(asset: AssetConfig, cached: Quote) -> bool:
+    """Reject symbol collisions after a watchlist asset changes identity."""
+    return cached.asset_type == asset.type
 
 
 # A listing-venue quote older than this means the session (incl. pre/post

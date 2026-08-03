@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS reports (
     title TEXT NOT NULL,
     body TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
     UNIQUE (slug, report_date)
 );
 
@@ -183,6 +184,10 @@ def init_db(path: Path) -> None:
             _ensure_column(conn, "latest_quotes", "volume", "REAL")
             _ensure_column(conn, "latest_quotes", "funding_rate", "REAL")
             _ensure_column(conn, "latest_quotes", "open_interest_usd", "REAL")
+            _ensure_column(conn, "reports", "updated_at", "TEXT")
+            conn.execute(
+                "UPDATE reports SET updated_at = created_at WHERE updated_at IS NULL"
+            )
             _ensure_column(conn, "fringe_ideas", "target", "TEXT")
             _ensure_column(conn, "fringe_ideas", "confidence", "REAL")
             _ensure_column(conn, "fringe_ideas", "stop", "TEXT")
@@ -578,16 +583,22 @@ def _save_report(
     land in the archive but must never drive projections — the fringe book and
     key dates follow only the newest brief per slug.
     """
+    updated_at = _to_iso(datetime.now(UTC))
     row = conn.execute(
         """
-        INSERT INTO reports (slug, report_date, title, body, created_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO reports (slug, report_date, title, body, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(slug, report_date) DO UPDATE SET
             title = excluded.title,
-            body = excluded.body
+            body = excluded.body,
+            updated_at = CASE
+                WHEN reports.title != excluded.title OR reports.body != excluded.body
+                THEN excluded.updated_at
+                ELSE reports.updated_at
+            END
         RETURNING id
         """,
-        (slug, report_date, title, body, _to_iso(datetime.now(UTC))),
+        (slug, report_date, title, body, updated_at, updated_at),
     ).fetchone()
     # Determine projection ownership only after the write transaction starts.
     # Concurrent ingests now serialize on the INSERT, so an older brief can
@@ -641,22 +652,47 @@ def ingest_report(
 
 
 def load_reports(
-    path: Path, limit: int, *, offset: int = 0, slug: str | None = None
+    path: Path,
+    limit: int,
+    *,
+    offset: int = 0,
+    slug: str | None = None,
+    before: tuple[str, str, int] | None = None,
 ) -> dict[str, object]:
     """One library page: metadata + preview newest first, plus filter facets.
 
-    Fetches limit+1 rows to derive `has_more` without a COUNT scan; `filters`
-    lists every distinct (slug, title) so the UI can offer facets that exist
-    beyond the current page.
+    Cursor pages are stable while new reports land; offset remains available
+    for API compatibility but the dashboard uses ``before``.
     """
     init_db(path)
-    where = " WHERE slug = ?" if slug else ""
-    args: tuple[object, ...] = (slug,) if slug else ()
+    conditions: list[str] = []
+    args: list[object] = []
+    if slug:
+        conditions.append("slug = ?")
+        args.append(slug)
+    if before is not None:
+        before_date, before_created_at, before_id = before
+        conditions.append(
+            "(report_date < ?"
+            " OR (report_date = ? AND created_at < ?)"
+            " OR (report_date = ? AND created_at = ? AND id < ?))"
+        )
+        args.extend(
+            (
+                before_date,
+                before_date,
+                before_created_at,
+                before_date,
+                before_created_at,
+                before_id,
+            )
+        )
+    where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
     with _connect(path) as conn:
         rows = conn.execute(
             "SELECT id, slug, report_date, title, substr(body, 1, 16384) AS body,"
-            f" created_at FROM reports{where}"
-            " ORDER BY report_date DESC, created_at DESC LIMIT ? OFFSET ?",
+            f" created_at, updated_at FROM reports{where}"
+            " ORDER BY report_date DESC, created_at DESC, id DESC LIMIT ? OFFSET ?",
             (*args, limit + 1, offset),
         ).fetchall()
         facets = conn.execute(
@@ -665,6 +701,13 @@ def load_reports(
             HAVING report_date = MAX(report_date) ORDER BY slug
             """
         ).fetchall()
+        revision = conn.execute(
+            "SELECT MAX(updated_at) AS updated_at FROM reports"
+            + (" WHERE slug = ?" if slug else ""),
+            (slug,) if slug else (),
+        ).fetchone()
+    page_rows = rows[:limit]
+    cursor_row = page_rows[-1] if len(rows) > limit and page_rows else None
     return {
         "reports": [
             {
@@ -673,11 +716,26 @@ def load_reports(
                 "date": str(row["report_date"]),
                 "title": str(row["title"]),
                 "created_at": str(row["created_at"]),
+                "updated_at": str(row["updated_at"]),
                 "preview": _report_preview(str(row["body"])),
             }
-            for row in rows[:limit]
+            for row in page_rows
         ],
         "has_more": len(rows) > limit,
+        "latest_update": (
+            str(revision["updated_at"])
+            if revision is not None and revision["updated_at"] is not None
+            else None
+        ),
+        "next_cursor": (
+            {
+                "date": str(cursor_row["report_date"]),
+                "created_at": str(cursor_row["created_at"]),
+                "id": int(cursor_row["id"]),
+            }
+            if cursor_row is not None
+            else None
+        ),
         "filters": [
             {"slug": str(row["slug"]), "title": str(row["title"])} for row in facets
         ],
@@ -688,7 +746,8 @@ def load_report(path: Path, report_id: int) -> dict[str, object] | None:
     init_db(path)
     with _connect(path) as conn:
         row = conn.execute(
-            "SELECT id, slug, report_date, title, body, created_at FROM reports WHERE id = ?",
+            "SELECT id, slug, report_date, title, body, created_at, updated_at"
+            " FROM reports WHERE id = ?",
             (report_id,),
         ).fetchone()
     if row is None:
@@ -699,6 +758,7 @@ def load_report(path: Path, report_id: int) -> dict[str, object] | None:
         "date": str(row["report_date"]),
         "title": str(row["title"]),
         "created_at": str(row["created_at"]),
+        "updated_at": str(row["updated_at"]),
         "body": str(row["body"]),
     }
 
@@ -935,6 +995,17 @@ def _apply_fringe_actions(
     conn.executemany("DELETE FROM fringe_ideas WHERE id = ?", orphaned)
     counts["removed"] = len(orphaned)
     return counts
+
+
+def fringe_ticker_exists(path: Path, ticker: str) -> bool:
+    """Whether a symbol belongs to the accrued Fringe ledger."""
+    init_db(path)
+    with _connect(path) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM fringe_ideas WHERE ticker = ? LIMIT 1",
+            (ticker.upper(),),
+        ).fetchone()
+    return row is not None
 
 
 def load_fringe_ideas(

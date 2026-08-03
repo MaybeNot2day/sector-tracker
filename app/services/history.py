@@ -38,10 +38,13 @@ class HistoryService:
         *,
         interval: str,
         range_: str,
+        fallback_asset: AssetConfig | None = None,
     ) -> list[Bar]:
         asset = find_asset(groups, symbol)
         if asset is None:
             asset = await self._tape_asset(symbol)
+        if asset is None:
+            asset = fallback_asset
         if asset is None:
             return []
         cache_key = (asset.symbol, asset.source, interval, range_)

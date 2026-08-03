@@ -4,6 +4,7 @@ import gzip
 import importlib.util
 import sqlite3
 import sys
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,16 +25,14 @@ _uploader = importlib.util.module_from_spec(_UPLOADER_SPEC)
 sys.modules.setdefault("vault_report_uploader", _uploader)
 _UPLOADER_SPEC.loader.exec_module(_uploader)
 
-_BACKUP_SPEC = importlib.util.spec_from_file_location(
-    "board_backup", _SCRIPTS / "board_backup.py"
-)
+_BACKUP_SPEC = importlib.util.spec_from_file_location("board_backup", _SCRIPTS / "board_backup.py")
 assert _BACKUP_SPEC is not None and _BACKUP_SPEC.loader is not None
 backup = importlib.util.module_from_spec(_BACKUP_SPEC)
 _BACKUP_SPEC.loader.exec_module(backup)
 
 
 @pytest.fixture()
-def board_app(tmp_path: Path):
+def board_app(tmp_path: Path) -> Iterator[Path]:
     had = hasattr(app.state, "settings")
     saved = app.state.settings if had else None
     path = tmp_path / "board.sqlite3"
@@ -51,9 +50,7 @@ def board_app(tmp_path: Path):
         delattr(app.state, "settings")
 
 
-def test_backup_endpoint_streams_verifiable_snapshot(
-    board_app: Path, tmp_path: Path
-) -> None:
+def test_backup_endpoint_streams_verifiable_snapshot(board_app: Path, tmp_path: Path) -> None:
     client = TestClient(app)
     assert client.get("/api/backup").status_code == 401  # token required
 
@@ -126,7 +123,6 @@ def test_corrupt_snapshot_fails_loudly_and_leaves_no_archive(
     assert backup.run() == 1
     assert len(alerts) == 1 and "FAILED" in alerts[0]
     assert not list(backup_dir.glob("board-*"))
-
 
 
 def test_failed_replacement_preserves_existing_same_day_archive(

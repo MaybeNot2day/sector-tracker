@@ -603,9 +603,33 @@ async def reports(
     limit: int = Query(default=30, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     slug: str | None = Query(default=None, min_length=1, max_length=64),
+    before_date: str | None = Query(
+        default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"
+    ),
+    before_created_at: str | None = Query(default=None, max_length=64),
+    before_id: int | None = Query(default=None, ge=1),
 ) -> dict[str, object]:
+    cursor_values = (before_date, before_created_at, before_id)
+    if any(value is not None for value in cursor_values) and not all(
+        value is not None for value in cursor_values
+    ):
+        raise HTTPException(status_code=422, detail="report_cursor_incomplete")
+    if offset and before_date is not None:
+        raise HTTPException(status_code=422, detail="report_cursor_with_offset")
+    before = (
+        (before_date, before_created_at, before_id)
+        if before_date is not None
+        and before_created_at is not None
+        and before_id is not None
+        else None
+    )
     return await asyncio.to_thread(
-        db.load_reports, app.state.settings.database_path, limit, offset=offset, slug=slug
+        db.load_reports,
+        app.state.settings.database_path,
+        limit,
+        offset=offset,
+        slug=slug,
+        before=before,
     )
 
 
@@ -781,11 +805,16 @@ async def history(
     clean = clean_symbol(symbol)
     if not clean or len(clean) > 24 or "/" in clean or "\\" in clean:
         raise HTTPException(status_code=422, detail="symbol_invalid")
+    fallback_asset = None
+    if find_asset(app.state.groups, clean) is None:
+        fringe_service: FringeService = app.state.fringe_service
+        fallback_asset = await fringe_service.resolve_known_asset(clean)
     bars = await app.state.history_service.get_history(
         app.state.groups,
         clean,
         interval=interval,
         range_=range_,
+        fallback_asset=fallback_asset,
     )
     return {
         "symbol": clean,
@@ -797,7 +826,11 @@ async def history(
 
 @app.get("/api/profile/{symbol}")
 async def profile(symbol: str) -> dict[str, object]:
-    asset = find_asset(app.state.groups, clean_symbol(symbol))
+    clean = clean_symbol(symbol)
+    asset = find_asset(app.state.groups, clean)
+    if asset is None:
+        fringe_service: FringeService = app.state.fringe_service
+        asset = await fringe_service.resolve_known_asset(clean)
     if asset is None:
         raise HTTPException(status_code=404, detail="asset_not_found")
     service: AssetProfileService = app.state.asset_profile_service

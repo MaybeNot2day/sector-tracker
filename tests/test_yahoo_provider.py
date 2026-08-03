@@ -56,6 +56,24 @@ def test_quote_from_chart_result_falls_back_to_last_close() -> None:
     assert quote.currency == "KRW"
 
 
+def test_quote_from_chart_result_rejects_malformed_currency() -> None:
+    asset = AssetConfig(symbol="XME", type="etf", source="yahoo")
+    result = {
+        "meta": {
+            "regularMarketPrice": 100.0,
+            "regularMarketTime": 1_788_000_000,
+            "chartPreviousClose": 98.0,
+            "currency": 'USD"><img src=x onerror=alert(1)>',
+        },
+        "indicators": {"quote": [{"close": [99.0, 100.0]}]},
+    }
+
+    quote = _quote_from_chart_result(asset, result)
+
+    assert quote is not None
+    assert quote.currency is None
+
+
 def test_quotes_from_spark_payload_maps_responses_to_assets() -> None:
     asset = AssetConfig(symbol="XLU", type="etf", source="yahoo")
     payload = {

@@ -570,7 +570,7 @@ def _currency(meta: dict[str, Any]) -> str | None:
     if not isinstance(value, str):
         return None
     value = value.strip().upper()
-    return value or None
+    return value if len(value) == 3 and value.isascii() and value.isalpha() else None
 
 
 def _latest_market_price(meta: dict[str, Any]) -> tuple[float, datetime] | None:

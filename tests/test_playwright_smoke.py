@@ -195,13 +195,24 @@ def test_daily_board_loads_without_page_errors_and_renders_core_sections(
     assert key_date_rows.nth(2).evaluate("row => row.tagName") == "DIV"
     assert key_date_rows.nth(2).get_attribute("href") is None
 
+    # The compact ribbon excludes today's already-released CPI, then surfaces
+    # the next two actionable events without duplicating the full calendar.
+    catalyst_strip = page.locator("#catalyst-strip")
+    expect(catalyst_strip).to_be_visible()
+    expect(catalyst_strip.locator(".catalyst-item")).to_have_count(2)
+    expect(catalyst_strip).to_contain_text("Tomorrow · 08:30 ET")
+    expect(catalyst_strip).to_contain_text("US Retail Sales")
+    expect(catalyst_strip).to_contain_text("TSLA earnings")
+
     # Fringe Corner: Hermes' $10k paper book — equity heading from the
     # portfolio block, Kelly-sized notionals, direction chip, marked P&L,
     # target + distance-to-go, a missing price rendering as an em dash, the
     # in-row thesis and stale marker, and the compact closed footer.
-    fringe_heading = page.locator("#daily-board .analytics-panel").filter(
-        has=page.get_by_role("heading", name="Fringe Corner")
-    ).locator(".panel-heading > span")
+    fringe_heading = (
+        page.locator("#daily-board .analytics-panel")
+        .filter(has=page.get_by_role("heading", name="Fringe Corner"))
+        .locator(".panel-heading > span")
+    )
     expect(fringe_heading).to_have_text("equity $10,247 (+2.47%) · 3 open · 2 closed")
     fringe_rows = page.locator("#daily-board .fringe-row")
     expect(fringe_rows).to_have_count(3)
@@ -255,9 +266,7 @@ def test_fringe_tab_renders_portfolio_curve_and_history(page: Page, base_url: st
     cells = board.locator(".regime-cell")
     expect(cells.filter(has_text="Equity")).to_contain_text("$10,247")
     expect(cells.filter(has_text="Equity")).to_contain_text("+2.47% since inception")
-    expect(
-        cells.filter(has=page.get_by_text("Realized", exact=True))
-    ).to_contain_text("+$171")
+    expect(cells.filter(has=page.get_by_text("Realized", exact=True))).to_contain_text("+$171")
     expect(cells.filter(has_text="Invested")).to_contain_text("$2,450")
     expect(cells.filter(has_text="Win rate")).to_contain_text("50%")
     expect(cells.filter(has_text="Sharpe")).to_contain_text("1.85")
@@ -373,9 +382,9 @@ def test_daily_board_hides_fringe_panel_when_book_is_empty(page: Page, base_url:
     # No empty shell: the panel does not exist at all, and the rest of the
     # daily board renders unchanged.
     expect(page.locator("#daily-board .benchmark-card").nth(0)).to_be_visible()
-    expect(
-        page.locator("#daily-board").get_by_role("heading", name="Fringe Corner")
-    ).to_have_count(0)
+    expect(page.locator("#daily-board").get_by_role("heading", name="Fringe Corner")).to_have_count(
+        0
+    )
     expect(page.locator("#daily-board .fringe-row")).to_have_count(0)
 
 
@@ -402,9 +411,7 @@ def test_markets_tabs_render_rows_and_open_canvas_chart(page: Page, base_url: st
     _expect_chart_canvas_content(page)
 
 
-def test_market_map_toggle_renders_treemap_and_opens_charts(
-    page: Page, base_url: str
-) -> None:
+def test_market_map_toggle_renders_treemap_and_opens_charts(page: Page, base_url: str) -> None:
     _goto_board(page, base_url)
     page.locator("#markets-tab").click()
     expect(page.locator("#markets-view")).to_be_visible()
@@ -414,6 +421,10 @@ def test_market_map_toggle_renders_treemap_and_opens_charts(
     expect(toggle).to_have_attribute("aria-pressed", "true")
     expect(toggle).to_have_text("Grouped")
     expect(page.locator("#board .market-map")).to_be_visible()
+    legend = page.locator("#market-map-legend")
+    expect(legend).to_be_visible()
+    expect(legend).to_contain_text("Area traded value square-root scale")
+    expect(legend).to_contain_text("Color 1D move")
     tiles = page.locator("#board .map-tile")
     assert tiles.count() >= 1
     expect(page.locator("#board .map-group-label").first).to_be_visible()
@@ -429,6 +440,7 @@ def test_market_map_toggle_renders_treemap_and_opens_charts(
     # Back to grouped rows; the map container is removed.
     toggle.click()
     expect(page.locator("#board .market-map")).to_have_count(0)
+    expect(legend).to_be_hidden()
     _wait_for_visible_market_row(page)
 
     # Deep link restores the map layout (query param forces a real reload —
@@ -436,6 +448,7 @@ def test_market_map_toggle_renders_treemap_and_opens_charts(
     page.goto(f"{base_url}/?deep=map#view=markets&layout=map", wait_until="domcontentloaded")
     expect(page.locator("#board .market-map")).to_be_visible()
     expect(page.locator("#market-map-toggle")).to_have_attribute("aria-pressed", "true")
+    expect(page.locator("#market-map-legend")).to_be_visible()
 
 
 def test_crypto_panels_swap_open_column_for_rolling_24h(page: Page, base_url: str) -> None:
@@ -617,6 +630,111 @@ def test_unchanged_news_keeps_nodes_and_refreshes_age_text(
     assert identity["age"] != "stale age"
 
 
+def test_news_relevance_deduplication_and_symbol_focus(
+    page: Page,
+    base_url: str,
+) -> None:
+    _goto_board(page, base_url)
+    payload = {
+        "status": "ok",
+        "updated_at": _iso(),
+        "failed_channels": [],
+        "channels": ["alpha", "beta"],
+        "items": [
+            {
+                "id": "alpha/5",
+                "channel": "alpha",
+                "channel_title": "Alpha",
+                "timestamp": _iso(),
+                "link": "https://example.com/alpha/5",
+                "text": "BTC jumps after spot ETF inflows accelerate",
+            },
+            {
+                "id": "beta/4",
+                "channel": "beta",
+                "channel_title": "Beta",
+                "timestamp": _iso(),
+                "link": "https://example.com/beta/4",
+                "text": "BREAKING: BTC jumps after spot ETF inflows accelerate",
+            },
+            {
+                "id": "alpha/3",
+                "channel": "alpha",
+                "channel_title": "Alpha",
+                "timestamp": _iso(),
+                "link": "https://example.com/alpha/3",
+                "text": "Fed watches CPI as Treasury yields rise",
+            },
+            {
+                "id": "alpha/2",
+                "channel": "alpha",
+                "channel_title": "Alpha",
+                "timestamp": _iso(),
+                "link": "https://example.com/alpha/2",
+                "text": "SPY reaches a fresh session high",
+            },
+            {
+                "id": "beta/1",
+                "channel": "beta",
+                "channel_title": "Beta",
+                "timestamp": _iso(),
+                "link": "https://example.com/beta/1",
+                "text": "Local company opens a new office",
+            },
+        ],
+    }
+    page.route("**/api/news", lambda route: _fulfill_json(route, payload))
+    page.evaluate("() => fetchNews()")
+    page.locator("#news-toggle").click()
+
+    rows = page.locator("#news-list .news-item")
+    expect(rows).to_have_count(4)
+    expect(page.locator("#news-result-count")).to_have_text("4/5")
+    expect(rows.filter(has_text="BTC jumps")).to_have_count(1)
+
+    search = page.locator("#news-search")
+    search.fill("inflows")
+    expect(rows).to_have_count(1)
+    expect(page.locator("#news-result-count")).to_have_text("1/5")
+    search.fill("")
+
+    page.locator('button[data-news-filter="macro"]').click()
+    expect(rows).to_have_count(1)
+    expect(rows).to_contain_text("Fed watches CPI")
+
+    page.locator('button[data-news-filter="universe"]').click()
+    expect(rows).to_have_count(2)
+    expect(rows.filter(has_text="BTC")).to_have_count(1)
+    expect(rows.filter(has_text="SPY")).to_have_count(1)
+    focus_filter = page.locator('button[data-news-filter="focus"]')
+    expect(focus_filter).to_be_disabled()
+
+    page.locator("#news-close").click()
+    page.locator('.benchmark-card[data-symbol="SPY"]').click()
+    expect(page.locator("#chart-modal")).to_have_attribute("aria-hidden", "false")
+    page.locator("#modal-close").click()
+
+    focus_chip = page.locator("#focus-chip")
+    expect(focus_chip).to_be_visible()
+    expect(focus_chip).to_have_text("FocusSPY")
+    assert "focus=SPY" in page.url
+    assert "chart=" not in page.url
+
+    focus_chip.click()
+    expect(page.locator("#chart-modal")).to_have_attribute("aria-hidden", "false")
+    page.locator("#modal-close").click()
+    page.locator("#news-toggle").click()
+    expect(focus_filter).to_be_enabled()
+    focus_filter.click()
+    expect(rows).to_have_count(1)
+    expect(rows).to_contain_text("SPY reaches")
+
+    page.locator("#news-close").click()
+    page.reload(wait_until="domcontentloaded")
+    expect(page.locator("#focus-chip")).to_be_visible()
+    expect(page.locator("#focus-chip")).to_contain_text("SPY")
+
+
 def test_news_refresh_keeps_reading_position_when_items_prepend(
     page: Page,
     base_url: str,
@@ -710,7 +828,6 @@ def test_daily_board_rebuild_preserves_page_scroll(page: Page, base_url: str) ->
     assert result["after"] == result["before"]
 
 
-
 @pytest.mark.parametrize("selector", [".key-dates-list", ".fringe-scroll"])
 def test_daily_board_inner_panels_chain_upward_wheel_to_page(
     page: Page, base_url: str, selector: str
@@ -726,6 +843,7 @@ def test_daily_board_inner_panels_chain_upward_wheel_to_page(
     page.wait_for_timeout(100)
 
     assert page.evaluate("() => window.scrollY") < before
+
 
 def test_tape_deep_link_restores_crypto_chart_when_tape_row_exists(
     page: Page,
@@ -765,6 +883,27 @@ def test_editor_failed_save_preserves_typed_asset_fields(page: Page, base_url: s
 
     page.locator("#editor-close").click()
     expect(page.locator("#editor-modal")).to_have_attribute("aria-hidden", "true")
+
+
+def test_visible_zombie_websocket_triggers_poll_and_close(page: Page, base_url: str) -> None:
+    _goto_board(page, base_url)
+
+    recovered = page.evaluate(
+        """
+        () => {
+          let closed = false;
+          activeSocket = {
+            readyState: WebSocket.OPEN,
+            close() { closed = true; },
+          };
+          feedMode = "ws";
+          lastWsFrameAt = Date.now() - WS_STALE_FRAME_MS - 1;
+          return { recovered: recoverStaleWebSocket(), closed };
+        }
+        """
+    )
+
+    assert recovered == {"recovered": True, "closed": True}
 
 
 def test_reports_modal_lists_reports_and_renders_escaped_markdown_reader(
@@ -863,16 +1002,13 @@ def test_report_deep_link_opens_reader_on_boot(page: Page, base_url: str) -> Non
     expect(page.locator("#reports-list .report-card")).to_have_count(3)
 
 
-
 def test_report_reader_pushes_history_and_browser_back_restores_library(
     page: Page, base_url: str
 ) -> None:
     _goto_board(page, base_url)
     page.locator("#reports-open").click()
     page.locator("#reports-list .report-card").first.click()
-    expect(page.locator("#report-reader .report-head h2")).to_have_text(
-        "Hermes Daily Flows"
-    )
+    expect(page.locator("#report-reader .report-head h2")).to_have_text("Hermes Daily Flows")
     expect(page).to_have_url(re.compile(r"#report=7$"))
 
     page.go_back()
@@ -882,9 +1018,8 @@ def test_report_reader_pushes_history_and_browser_back_restores_library(
     expect(page.locator("#reports-list .report-card")).to_have_count(3)
     expect(page).not_to_have_url(re.compile(r"[?&#]report="))
 
-def test_report_library_filters_and_pages_the_archive(
-    page: Page, base_url: str
-) -> None:
+
+def test_report_library_filters_and_pages_the_archive(page: Page, base_url: str) -> None:
     _goto_board(page, base_url)
     page.locator("#reports-open").click()
 
@@ -901,20 +1036,16 @@ def test_report_library_filters_and_pages_the_archive(
     expect(load_more).to_be_visible()
     load_more.click()
     expect(page.locator("#reports-list .report-card")).to_have_count(4)
-    expect(page.locator("#reports-list .report-card").nth(3)).to_contain_text(
-        "Archive flows"
-    )
+    expect(page.locator("#reports-list .report-card").nth(3)).to_contain_text("Archive flows")
     expect(page.locator("#reports-load-more")).to_have_count(0)
 
     # Facet filter narrows to one brief's history and stays on one page.
     page.locator('#reports-list .report-filter[data-slug="levels-watch"]').click()
     expect(page.locator("#reports-list .report-card")).to_have_count(1)
-    expect(page.locator("#reports-list .report-card").first).to_contain_text(
-        "Levels Watch"
+    expect(page.locator("#reports-list .report-card").first).to_contain_text("Levels Watch")
+    expect(page.locator('#reports-list .report-filter[data-slug="levels-watch"]')).to_have_class(
+        re.compile("active")
     )
-    expect(
-        page.locator('#reports-list .report-filter[data-slug="levels-watch"]')
-    ).to_have_class(re.compile("active"))
     expect(page.locator("#reports-load-more")).to_have_count(0)
 
     # Back to the full archive.
@@ -972,6 +1103,11 @@ def test_viewport_portals_and_modals_never_expand_the_document(
     assert shell_box["x"] + shell_box["width"] <= width
     assert page.evaluate("() => document.documentElement.scrollWidth") == width
     page.locator("#editor-close").click()
+
+    page.locator("#markets-tab").click()
+    page.locator("#market-map-toggle").click()
+    expect(page.locator("#market-map-legend")).to_be_visible()
+    assert page.evaluate("() => document.documentElement.scrollWidth") == width
 
 
 def test_tablet_market_toolbar_and_category_group_fit_viewport(
@@ -1094,7 +1230,7 @@ def _visible_market_row_count(page: Page) -> int:
     return cast(
         int,
         page.locator("#markets-view .asset-row").evaluate_all(
-        """
+            """
         (rows) => rows.filter((row) => {
           const style = window.getComputedStyle(row);
           const rect = row.getBoundingClientRect();
@@ -1148,9 +1284,7 @@ def _stub_board_apis(page: Page) -> None:
             _fulfill_json(route, _profile_payload(symbol))
         elif path.startswith("/api/reports/"):
             report_id = int(path.rsplit("/", 1)[-1])
-            _fulfill_json(
-                route, REPORT_DETAILS.get(report_id, REPORT_DETAIL_PAYLOAD)
-            )
+            _fulfill_json(route, REPORT_DETAILS.get(report_id, REPORT_DETAIL_PAYLOAD))
         elif path == "/api/reports":
             _fulfill_json(route, _reports_page(parsed.query))
         else:
@@ -1782,12 +1916,35 @@ _STUB_PAGE_SIZE = 3
 def _reports_page(query: str) -> dict[str, Any]:
     params = parse_qs(query)
     slug = params.get("slug", [None])[0]
-    offset = int(params.get("offset", ["0"])[0])
     pool = [item for item in REPORTS_ARCHIVE if not slug or item["slug"] == slug]
+    before_id = params.get("before_id", [None])[0]
+    if before_id is not None:
+        matching = next(
+            (index for index, item in enumerate(pool) if item["id"] == int(before_id)),
+            len(pool) - 1,
+        )
+        offset = matching + 1
+    else:
+        offset = int(params.get("offset", ["0"])[0])
     page = pool[offset : offset + _STUB_PAGE_SIZE]
+    has_more = offset + _STUB_PAGE_SIZE < len(pool)
+    cursor_item = page[-1] if has_more and page else None
     return {
         "reports": page,
-        "has_more": offset + _STUB_PAGE_SIZE < len(pool),
+        "has_more": has_more,
+        "latest_update": max(
+            (item["created_at"] for item in pool),
+            default=None,
+        ),
+        "next_cursor": (
+            {
+                "date": cursor_item["date"],
+                "created_at": cursor_item["created_at"],
+                "id": cursor_item["id"],
+            }
+            if cursor_item is not None
+            else None
+        ),
         "filters": REPORTS_FACETS,
     }
 

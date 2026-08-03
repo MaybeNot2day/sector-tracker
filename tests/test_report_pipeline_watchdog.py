@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -70,7 +71,7 @@ def _write_due_reports(
 
 def _dashboard_stub(
     bodies: dict[str, str], calls: list[str], date_text: str = DATE_TEXT
-) -> Any:
+) -> Callable[[str], dict[str, Any]]:
     ids = {title: index for index, title in enumerate(bodies, start=1)}
 
     def get_json(url: str) -> dict[str, Any]:
@@ -78,8 +79,7 @@ def _dashboard_stub(
         if url.endswith("/api/reports?limit=20"):
             return {
                 "reports": [
-                    {"id": ids[title], "title": title, "date": date_text}
-                    for title in bodies
+                    {"id": ids[title], "title": title, "date": date_text} for title in bodies
                 ]
             }
         if url.endswith("/api/fringe"):
@@ -102,8 +102,7 @@ def test_audit_accepts_complete_end_to_end_delivery(
     titles = [stage.title for stage in watchdog.STAGES]
     bodies = _write_due_reports(vault, titles)
     upload_state = {
-        f"{DATE_TEXT} {title}.md": uploader.content_hash(body)
-        for title, body in bodies.items()
+        f"{DATE_TEXT} {title}.md": uploader.content_hash(body) for title, body in bodies.items()
     }
     calls: list[str] = []
     monkeypatch.setattr(
@@ -126,6 +125,42 @@ def test_audit_accepts_complete_end_to_end_delivery(
     assert calls[0].endswith("/api/reports?limit=20")
     assert calls[-1].endswith("/api/fringe")
     assert len(calls) == len(titles) + 2
+
+
+def test_audit_uses_newest_report_when_listing_contains_prior_days(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    titles = [stage.title for stage in watchdog.STAGES]
+    bodies = _write_due_reports(vault, titles)
+    upload_state = {
+        f"{DATE_TEXT} {title}.md": uploader.content_hash(body) for title, body in bodies.items()
+    }
+    calls: list[str] = []
+    get_json = _dashboard_stub(bodies, calls)
+
+    def listing_with_prior_day(url: str) -> dict[str, Any]:
+        payload = get_json(url)
+        if url.endswith("/api/reports?limit=20"):
+            payload["reports"] = [
+                *payload["reports"],
+                *[
+                    {"id": 100 + index, "title": title, "date": "2026-07-21"}
+                    for index, title in enumerate(titles)
+                ],
+            ]
+        return payload
+
+    monkeypatch.setattr(
+        watchdog,
+        "load_config",
+        lambda: {"BOARD_URL": "https://board.test", "VAULT_DIR": str(vault)},
+    )
+    monkeypatch.setattr(watchdog, "load_state", lambda: upload_state)
+    monkeypatch.setattr(watchdog, "_get_json", listing_with_prior_day)
+
+    assert watchdog.audit_pipeline(NOW) == []
 
 
 def test_audit_repairs_an_unuploaded_valid_report(

@@ -181,6 +181,13 @@ class FringeService:
         # symbol -> (last price, fetched monotonic); mark-to-market cache.
         self._quote_cache: dict[str, tuple[float, float]] = {}
 
+    async def resolve_known_asset(self, ticker: str) -> AssetConfig | None:
+        """Resolve only symbols already present in the Fringe ledger."""
+        known = await asyncio.to_thread(
+            db.fringe_ticker_exists, self.database_path, ticker
+        )
+        return await self._asset_for(ticker) if known else None
+
     async def stamp_prices(self) -> None:
         """Stamp missing entry/exit prices right after ingest (freshest fill)."""
         await self._load_and_restamp()

@@ -80,7 +80,13 @@ def test_report_mutations_reject_bad_token_and_persist_nothing(
     # Reads stay open with a token configured, and the rejected mutation left no row.
     listing = client.get("/api/reports")
     assert listing.status_code == 200
-    assert listing.json() == {"reports": [], "has_more": False, "filters": []}
+    assert listing.json() == {
+        "reports": [],
+        "has_more": False,
+        "latest_update": None,
+        "next_cursor": None,
+        "filters": [],
+    }
 
 
 def test_report_mutations_accept_exact_token(
@@ -258,6 +264,7 @@ def test_upsert_same_slug_and_date_replaces_body_and_title(
 
     first = client.post("/api/reports", json={"title": "Flows v1", "body": "old body", **key})
     first_created = client.get("/api/reports").json()["reports"][0]["created_at"]
+    first_updated = client.get("/api/reports").json()["reports"][0]["updated_at"]
     second = client.post("/api/reports", json={"title": "Flows v2", "body": "new body", **key})
 
     assert first.status_code == 200
@@ -270,6 +277,8 @@ def test_upsert_same_slug_and_date_replaces_body_and_title(
     # The card timestamp is "first landed", not "last repaired": same-day
     # replacements (watchdog repairs, cron re-runs) keep the original stamp.
     assert reports[0]["created_at"] == first_created
+    assert reports[0]["updated_at"] > first_updated
+    assert client.get("/api/reports").json()["latest_update"] == reports[0]["updated_at"]
 
     detail = client.get(f"/api/reports/{first.json()['id']}").json()
     assert detail["title"] == "Flows v2"
@@ -328,12 +337,43 @@ def test_library_paginates_and_filters_by_slug(
     dates = [item["date"] for item in page["reports"] + rest["reports"]]
     assert dates == sorted(dates, reverse=True)
 
+    # Cursor pages remain stable when a newer report lands between requests.
+    cursor = page["next_cursor"]
+    assert cursor is not None
+    inserted = client.post(
+        "/api/reports",
+        json={
+            "title": "Macro Tape",
+            "body": "new arrival",
+            "slug": "macro-tape",
+            "date": "2026-07-06",
+        },
+    )
+    assert inserted.status_code == 200
+    inserted_id = inserted.json()["id"]
+    cursor_page = client.get(
+        "/api/reports",
+        params={
+            "limit": 200,
+            "before_date": cursor["date"],
+            "before_created_at": cursor["created_at"],
+            "before_id": cursor["id"],
+        },
+    ).json()
+    first_ids = {item["id"] for item in page["reports"]}
+    cursor_ids = {item["id"] for item in cursor_page["reports"]}
+    assert len(cursor_ids) == 7
+    assert first_ids.isdisjoint(cursor_ids)
+    assert inserted_id not in cursor_ids
+    assert cursor_page["next_cursor"] is None
+
     # Slug filter narrows to one brief's history without disturbing facets.
     filtered = client.get("/api/reports?slug=macro-tape").json()
     assert {item["slug"] for item in filtered["reports"]} == {"macro-tape"}
-    assert len(filtered["reports"]) == 5
+    assert len(filtered["reports"]) == 6
     assert filtered["has_more"] is False
     assert [f["slug"] for f in filtered["filters"]] == ["fringe-corner", "macro-tape"]
+    assert filtered["latest_update"] == filtered["reports"][0]["updated_at"]
 
 
 def test_older_date_is_archived_without_driving_projections(
@@ -453,7 +493,15 @@ def test_list_orders_reports_newest_date_first(
 
     assert [item["date"] for item in reports] == ["2026-07-10", "2026-07-09", "2026-07-08"]
     # List items carry metadata plus preview; the full body stays on the detail route.
-    assert set(reports[0]) == {"id", "slug", "date", "title", "created_at", "preview"}
+    assert set(reports[0]) == {
+        "id",
+        "slug",
+        "date",
+        "title",
+        "created_at",
+        "updated_at",
+        "preview",
+    }
 
 
 def test_list_limit_caps_results_to_newest(
@@ -581,7 +629,15 @@ def test_read_report_returns_verbatim_body_and_cleaned_title(
 
     assert detail.status_code == 200
     data = detail.json()
-    assert set(data) == {"id", "slug", "date", "title", "created_at", "body"}
+    assert set(data) == {
+        "id",
+        "slug",
+        "date",
+        "title",
+        "created_at",
+        "updated_at",
+        "body",
+    }
     # Frontmatter stripping applies to list previews only; the reader gets the raw markdown.
     assert data["body"] == body
     assert data["title"] == "Hermes Flows"

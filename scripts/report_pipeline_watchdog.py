@@ -159,9 +159,14 @@ def audit_pipeline(now: datetime | None = None) -> list[str]:
     try:
         listing = _get_json(base_url + "/api/reports?limit=20")
         reports = listing.get("reports", [])
-        latest_by_title = {
-            str(item.get("title")): item for item in reports if isinstance(item, dict)
-        }
+        latest_by_title: dict[str, dict[str, Any]] = {}
+        if isinstance(reports, list):
+            for item in reports:
+                if not isinstance(item, dict):
+                    continue
+                # /api/reports is newest-first. Preserve the first report for
+                # each title; assignment would let an older page row replace it.
+                latest_by_title.setdefault(str(item.get("title")), item)
     except (OSError, ValueError, urllib.error.URLError, http.client.HTTPException) as exc:
         issues.append(f"dashboard report listing unavailable ({exc})")
         latest_by_title = {}

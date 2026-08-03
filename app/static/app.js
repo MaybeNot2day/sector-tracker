@@ -3,6 +3,8 @@ const dailyBoard = document.querySelector("#daily-board");
 const boardMeta = document.querySelector("#board-meta");
 const statusCopy = document.querySelector("#status-copy");
 const statusStrip = document.querySelector("#status-strip");
+const focusChip = document.querySelector("#focus-chip");
+const focusSymbolText = document.querySelector("#focus-symbol");
 const connectionState = document.querySelector("#connection-state");
 const liveFreshness = document.querySelector("#live-freshness");
 const feedModeLabel = document.querySelector("#feed-mode");
@@ -17,6 +19,7 @@ const marketSearch = document.querySelector("#market-search");
 const marketFilterClear = document.querySelector("#market-filter-clear");
 const marketLayoutToggle = document.querySelector("#market-layout-toggle");
 const marketMapToggle = document.querySelector("#market-map-toggle");
+const marketMapLegend = document.querySelector("#market-map-legend");
 const marketFilterStatus = document.querySelector("#market-filter-status");
 const categoryButtons = Array.from(document.querySelectorAll(".category-tabs button"));
 const cryptoTapeElement = document.querySelector("#crypto-tape");
@@ -44,12 +47,16 @@ const assetExchangeInput = document.querySelector("#asset-exchange");
 const assetNameInput = document.querySelector("#asset-name");
 const editorList = document.querySelector("#editor-list");
 const macroStrip = document.querySelector("#macro-strip");
+const catalystStrip = document.querySelector("#catalyst-strip");
 const newsPanel = document.querySelector("#news-panel");
 const newsList = document.querySelector("#news-list");
 const newsStatus = document.querySelector("#news-status");
 const newsToggle = document.querySelector("#news-toggle");
 const newsClose = document.querySelector("#news-close");
 const newsChannelsBar = document.querySelector("#news-channels");
+const newsSearch = document.querySelector("#news-search");
+const newsFilters = document.querySelector("#news-filters");
+const newsResultCount = document.querySelector("#news-result-count");
 const reportsModal = document.querySelector("#reports-modal");
 const reportsOpenButton = document.querySelector("#reports-open");
 const reportsCloseButton = document.querySelector("#reports-close");
@@ -93,6 +100,7 @@ let feedMode = "poll"; // flips to "ws" only once the socket actually opens
 let activeSocket = null; // live WS reference so wake-up checks can close a zombie
 let lastWsFrameAt = 0; // Date.now() of the last WS frame, for zombie detection
 let wsReconnectDelayMs = 3000; // doubles per failed reconnect, capped at 30s
+const WS_STALE_FRAME_MS = 30000;
 let activeView = "daily";
 let pendingChartFromUrl = null;
 let restoringUrlState = false;
@@ -106,6 +114,9 @@ let boardCacheWriteTimer = null;
 let latestNews = null;
 let lastNewsRenderKey = "";
 let knownNewsIds = new Set();
+let newsFilter = "all";
+let newsSearchQuery = "";
+let focusedSymbol = null;
 const NEWS_OPEN_KEY = "news-open";
 // Muted news channels, persisted per browser.
 const NEWS_MUTED_KEY = "news-muted-channels-v1";
@@ -135,6 +146,7 @@ let snapshotsFetchApplied = 0;
 let snapshotRevision = 0;
 let fringeFetchSeq = 0;
 let fringeFetchApplied = 0;
+let reportsBadgeFetchSeq = 0;
 
 const sourceLabels = {
   yahoo: "YH",
@@ -337,6 +349,7 @@ function syncUrlState({ push = false } = {}) {
   if (marketSearchQuery) params.set("q", marketSearchQuery);
   if (marketLayout !== "grouped") params.set("layout", marketLayout);
   if (marketCategory !== "tradfi") params.set("cat", marketCategory);
+  if (focusedSymbol) params.set("focus", focusedSymbol);
   if (activeSymbol) {
     params.set("chart", activeSymbol);
     if (activeInterval !== "1d") params.set("tf", activeInterval);
@@ -374,6 +387,8 @@ function restoreUrlState() {
       if (layout === "flat") marketSort = { key: "pct", direction: "desc" };
       syncLayoutButtons();
     }
+    const focus = params.get("focus");
+    if (focus) setFocusedSymbol(focus, { sync: false });
     const chartSymbol = params.get("chart");
     if (chartSymbol) {
       pendingChartFromUrl = {
@@ -400,6 +415,18 @@ function findAssetConfig(symbol) {
     if (asset) return asset;
   }
   return null;
+}
+
+function setFocusedSymbol(symbol, { sync = true } = {}) {
+  const next = String(symbol || "").trim().toUpperCase();
+  if (!next) return;
+  focusedSymbol = next;
+  focusSymbolText.textContent = next;
+  focusChip.hidden = false;
+  focusChip.title = `Open ${next} chart`;
+  focusChip.setAttribute("aria-label", `Open focused asset ${next}`);
+  if (latestNews) renderNews(latestNews);
+  if (sync) syncUrlState();
 }
 
 function openPendingChartFromUrl() {
@@ -440,6 +467,9 @@ function init() {
   setNewsOpen(localStorage.getItem(NEWS_OPEN_KEY) === "1", { focus: false });
   fetchNews();
   refreshReportsBadge();
+  window.setInterval(() => {
+    if (!document.hidden) refreshReportsBadge();
+  }, 60000);
   // Stay in "poll" until the socket's open handler flips to "ws" — assigning
   // "ws" here gates off the 10s poll while the socket hangs in CONNECTING.
   updateFeedModeLabel();
@@ -449,7 +479,12 @@ function init() {
   // stream in; polling would double-fetch and risk stale overwrites
   // (feedMode flips to "poll" if the socket dies, resuming this timer).
   window.setInterval(() => {
-    if (!document.hidden && feedMode !== "ws") fetchQuotes();
+    if (document.hidden) return;
+    if (feedMode === "ws") {
+      recoverStaleWebSocket();
+    } else {
+      fetchQuotes();
+    }
   }, 10000);
   window.setInterval(() => {
     if (!document.hidden) {
@@ -468,7 +503,9 @@ function init() {
   }, 30000);
   // WS pushes news instantly; polling is the fallback for serverless hosts.
   window.setInterval(() => {
-    if (!document.hidden && feedMode !== "ws") fetchNews();
+    if (document.hidden) return;
+    updateNewsAges();
+    if (feedMode !== "ws") fetchNews();
   }, 20000);
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
@@ -480,23 +517,29 @@ function init() {
       // Reconnects are not scheduled while hidden; reopen on return
       // (openSocket no-ops if a socket is already OPEN/CONNECTING).
       if (shouldUseWebSocket()) openSocket();
-    } else if (Date.now() - lastWsFrameAt > 30000) {
-      // Laptop sleep can leave a zombie socket that never errors: fetch
-      // once for freshness and close it so the reconnect logic takes over.
-      fetchQuotes();
-      try {
-        if (activeSocket && activeSocket.readyState === WebSocket.OPEN) activeSocket.close();
-      } catch (error) {
-        // Socket already dying; the close handler's reconnect covers it.
-      }
+    } else {
+      recoverStaleWebSocket();
     }
     fetchCryptoEtfFlows();
     fetchKeyDates();
     fetchFringe();
+    refreshReportsBadge();
   });
   window.addEventListener("pagehide", flushBoardCache);
   newsToggle.addEventListener("click", () => setNewsOpen(!document.body.classList.contains("news-open")));
   newsClose.addEventListener("click", () => setNewsOpen(false));
+  newsSearch.addEventListener("input", () => {
+    newsSearchQuery = newsSearch.value.trim().toLowerCase();
+    newsList.scrollTop = 0;
+    if (latestNews) renderNews(latestNews);
+  });
+  newsFilters.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-news-filter]");
+    if (!button || button.disabled) return;
+    newsFilter = button.dataset.newsFilter || "all";
+    newsList.scrollTop = 0;
+    if (latestNews) renderNews(latestNews);
+  });
   themeToggle.addEventListener("click", () => {
     setTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light", true);
   });
@@ -512,6 +555,15 @@ function init() {
     localStorage.setItem(NEWS_MUTED_KEY, JSON.stringify([...mutedNewsChannels]));
     if (latestNews) renderNews(latestNews);
   });
+  focusChip.addEventListener("click", () => openFringeTicker(focusedSymbol));
+  catalystStrip.addEventListener("click", () => {
+    selectView("daily");
+    const panel = dailyBoard.querySelector('[data-panel="key-dates"]');
+    if (panel) {
+      panel.scrollIntoView({ behavior: "smooth", block: "start" });
+      panel.querySelector("a, button")?.focus({ preventScroll: true });
+    }
+  });
   cryptoTapeElement.addEventListener("click", handleCryptoTapeClick);
   refreshButton.addEventListener("click", () => {
     fetchQuotes();
@@ -519,6 +571,7 @@ function init() {
     fetchSnapshots();
     fetchKeyDates();
     fetchFringe();
+    refreshReportsBadge();
   });
   viewButtons.forEach((button) => {
     button.addEventListener("click", () => selectView(button.dataset.view || "daily"));
@@ -816,6 +869,26 @@ function openSocket() {
   socket.addEventListener("error", () => setConnection("error"));
 }
 
+function recoverStaleWebSocket() {
+  if (
+    feedMode !== "ws" ||
+    Date.now() - lastWsFrameAt <= WS_STALE_FRAME_MS
+  ) {
+    return false;
+  }
+  // Suppress duplicate recovery polls while close propagation is pending.
+  lastWsFrameAt = Date.now();
+  fetchQuotes();
+  try {
+    if (activeSocket && activeSocket.readyState === WebSocket.OPEN) {
+      activeSocket.close();
+    }
+  } catch (error) {
+    // Socket already dying; the close handler's reconnect covers it.
+  }
+  return true;
+}
+
 function updateFeedModeLabel() {
   feedModeLabel.textContent = feedMode === "ws" ? "WS Live" : "Poll 10s";
   feedModeLabel.title =
@@ -933,6 +1006,7 @@ const REPORTS_SEEN_KEY = "reports-last-seen-v1";
 function openReports() {
   openDialog(reportsModal, reportsCloseButton);
   showReportsList();
+  resetReportsQuery();
   fetchReports();
 }
 
@@ -963,27 +1037,60 @@ let reportsFilterSlug = null;
 let reportsItems = [];
 let reportsHasMore = false;
 let reportsFacets = [];
+let reportsNextCursor = null;
 let reportsFetchSeq = 0;
+let reportsQueryGeneration = 0;
+
+function resetReportsQuery() {
+  reportsQueryGeneration += 1;
+  reportsFetchSeq += 1;
+  reportsItems = [];
+  reportsHasMore = false;
+  reportsNextCursor = null;
+  reportsListElement.innerHTML = '<div class="empty-state">Loading reports…</div>';
+}
 
 async function fetchReports({ append = false } = {}) {
+  const generation = reportsQueryGeneration;
+  const filterSlug = reportsFilterSlug;
+  const cursor = append ? reportsNextCursor : null;
+  if (append && !cursor) return;
   const seq = ++reportsFetchSeq;
   try {
     const params = new URLSearchParams({ limit: String(REPORTS_PAGE_SIZE) });
-    if (append) params.set("offset", String(reportsItems.length));
-    if (reportsFilterSlug) params.set("slug", reportsFilterSlug);
+    if (cursor) {
+      params.set("before_date", cursor.date);
+      params.set("before_created_at", cursor.created_at);
+      params.set("before_id", String(cursor.id));
+    }
+    if (filterSlug) params.set("slug", filterSlug);
     const response = await fetch(`/api/reports?${params}`);
     if (!response.ok) throw new Error("reports_failed");
     const payload = await response.json();
-    if (seq !== reportsFetchSeq) return;
-    reportsItems = append
-      ? reportsItems.concat(payload?.reports || [])
-      : payload?.reports || [];
-    reportsHasMore = Boolean(payload?.has_more);
+    if (
+      seq !== reportsFetchSeq ||
+      generation !== reportsQueryGeneration ||
+      filterSlug !== reportsFilterSlug
+    ) return;
+    const incoming = Array.isArray(payload?.reports) ? payload.reports : [];
+    if (append) {
+      const byId = new Map(reportsItems.map((item) => [item.id, item]));
+      for (const item of incoming) byId.set(item.id, item);
+      reportsItems = [...byId.values()];
+    } else {
+      reportsItems = incoming;
+    }
+    reportsNextCursor = payload?.next_cursor || null;
+    reportsHasMore = Boolean(payload?.has_more && reportsNextCursor);
     if (Array.isArray(payload?.filters)) reportsFacets = payload.filters;
     renderReportsList();
-    markReportsSeen(reportsItems);
+    markReportsSeen(reportsItems, payload?.latest_update);
   } catch (error) {
-    if (seq !== reportsFetchSeq) return;
+    if (
+      seq !== reportsFetchSeq ||
+      generation !== reportsQueryGeneration ||
+      filterSlug !== reportsFilterSlug
+    ) return;
     if (append && reportsItems.length) {
       renderReportsList();
       return;
@@ -1047,6 +1154,7 @@ function wireReportsListEvents() {
   reportsListElement.querySelectorAll(".report-filter").forEach((chip) => {
     chip.addEventListener("click", () => {
       reportsFilterSlug = chip.dataset.slug || null;
+      resetReportsQuery();
       fetchReports();
     });
   });
@@ -1120,25 +1228,34 @@ async function openReport(reportId, { pushHistory = true } = {}) {
   }
 }
 
-function refreshReportsBadge() {
-  fetch("/api/reports?limit=1")
-    .then((response) => (response.ok ? response.json() : null))
-    .then((payload) => {
-      const newest = payload?.reports?.[0];
-      if (!newest) return;
-      const seen = localStorage.getItem(REPORTS_SEEN_KEY) || "";
-      reportsBadge.hidden = newest.created_at <= seen;
-    })
-    .catch(() => {});
+async function refreshReportsBadge() {
+  const seq = ++reportsBadgeFetchSeq;
+  try {
+    const response = await fetch("/api/reports?limit=1");
+    const payload = response.ok ? await response.json() : null;
+    if (seq !== reportsBadgeFetchSeq) return;
+    const newest = payload?.reports?.[0];
+    const revision = payload?.latest_update || newest?.updated_at || newest?.created_at;
+    if (!revision) {
+      reportsBadge.hidden = true;
+      return;
+    }
+    const seen = localStorage.getItem(REPORTS_SEEN_KEY) || "";
+    reportsBadge.hidden = revision <= seen;
+  } catch (error) {
+    // Keep the prior badge state; a failed poll must not mark reports seen.
+  }
 }
 
-function markReportsSeen(reports) {
+function markReportsSeen(reports, latestUpdate = null) {
   // Watermark only advances: a filtered or paged view of older reports must
   // never regress "seen" and resurrect the badge.
-  const newest = reports[0]?.created_at;
+  const newest = latestUpdate || reports[0]?.updated_at || reports[0]?.created_at;
   const seen = localStorage.getItem(REPORTS_SEEN_KEY) || "";
-  if (newest && newest > seen) localStorage.setItem(REPORTS_SEEN_KEY, newest);
-  reportsBadge.hidden = true;
+  if (newest && newest > seen) {
+    localStorage.setItem(REPORTS_SEEN_KEY, newest);
+    reportsBadge.hidden = true;
+  }
 }
 
 function formatReportDate(value) {
@@ -1410,36 +1527,43 @@ function renderNews(payload) {
   const renderKey = newsRenderKey(payload);
   if (renderKey === lastNewsRenderKey) {
     updateNewsAges();
-    // Track ALL ids (muted included) so unmuting never fakes a "new" flash.
     knownNewsIds = new Set(items.map((item) => item.id));
     return;
   }
   lastNewsRenderKey = renderKey;
   renderNewsChannels(payload);
+  renderNewsControls();
   if (!items.length) {
+    newsResultCount.textContent = "0";
     newsList.innerHTML = '<div class="empty-state">No posts yet</div>';
     knownNewsIds = new Set();
     return;
   }
-  const visible = items.filter((item) => !mutedNewsChannels.has(item.channel));
+  const unmuted = items.filter((item) => !mutedNewsChannels.has(item.channel));
+  const deduplicated = deduplicateNewsItems(unmuted);
+  const visible = deduplicated.filter(newsMatchesActiveFilter);
+  newsResultCount.textContent = `${visible.length}/${items.length}`;
   if (!visible.length) {
-    // "All muted" was wrong when one firehose channel owned every cached post:
-    // muting it showed this state while three unmuted channels sat idle.
     const channels = payload?.channels || [];
     const allMuted = channels.length > 0 && channels.every((ch) => mutedNewsChannels.has(ch));
+    const filtered = newsFilter !== "all" || newsSearchQuery;
     newsList.innerHTML = `<div class="empty-state">${
-      allMuted ? "All channels muted" : "No recent posts from unmuted channels"
+      allMuted
+        ? "All channels muted"
+        : filtered
+          ? "No matching news"
+          : "No recent posts from unmuted channels"
     }</div>`;
   } else {
     const seenBefore = knownNewsIds.size > 0;
-    // New posts prepend above the reading position; a bare innerHTML swap
-    // keeps the scroll OFFSET but swaps the content under it, yanking the
-    // reader. Anchor on the topmost visible item and restore its position.
+    // New posts prepend above the reading position; anchor the first visible
+    // row so an update never swaps the article under the reader.
     const anchor = newsScrollAnchor();
     newsList.innerHTML = visible.map((item) => newsItemMarkup(item, seenBefore)).join("");
     restoreNewsScrollAnchor(anchor);
   }
-  // Track ALL ids (muted included) so unmuting never fakes a "new" flash.
+  // Track ALL ids (muted, filtered, and deduplicated included) so changing a
+  // view never fakes a "new" flash.
   knownNewsIds = new Set(items.map((item) => item.id));
 }
 
@@ -1466,8 +1590,109 @@ function newsRenderKey(payload) {
   include(channels.length);
   channels.forEach(include);
   [...mutedNewsChannels].sort().forEach(include);
+  include(newsFilter);
+  include(newsSearchQuery);
+  include(focusedSymbol);
   return String(hash >>> 0);
 }
+
+function renderNewsControls() {
+  newsFilters.querySelectorAll("button[data-news-filter]").forEach((button) => {
+    const filter = button.dataset.newsFilter || "all";
+    const active = filter === newsFilter;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+    if (filter === "focus") {
+      button.disabled = !focusedSymbol;
+      button.title = focusedSymbol ? `News mentioning ${focusedSymbol}` : "Open an asset to set focus";
+    }
+  });
+}
+
+function newsMatchesActiveFilter(item) {
+  const searchable = `${item.channel_title || item.channel || ""} ${item.text || ""}`.toLowerCase();
+  if (newsSearchQuery && !searchable.includes(newsSearchQuery)) return false;
+  if (newsFilter === "macro") return newsIsMacro(item);
+  if (newsFilter === "universe") return newsMentionsAny(item, newsUniverseSymbols());
+  if (newsFilter === "focus") return newsMentionsAny(item, symbolAliases(focusedSymbol));
+  return true;
+}
+
+const NEWS_MACRO_PATTERN =
+  /\b(?:fed|fomc|central bank|ecb|boj|boe|rates?|yield|treasur|inflation|cpi|ppi|payroll|jobs report|unemployment|gdp|pmi|dollar|dxy|tariff|sanction|crude|oil|gold)\b/i;
+
+function newsIsMacro(item) {
+  return NEWS_MACRO_PATTERN.test(`${item.channel_title || item.channel || ""} ${item.text || ""}`);
+}
+
+function newsUniverseSymbols() {
+  const symbols = new Set();
+  for (const group of latestData?.groups || []) {
+    for (const asset of group.assets || []) {
+      symbolAliases(asset.symbol).forEach((symbol) => symbols.add(symbol));
+    }
+  }
+  for (const item of latestData?.crypto_tape || []) {
+    symbolAliases(item.symbol).forEach((symbol) => symbols.add(symbol));
+  }
+  return symbols;
+}
+
+function symbolAliases(symbol) {
+  const value = String(symbol || "").toUpperCase().replace(/^\^/, "");
+  if (!value) return new Set();
+  const aliases = new Set([value]);
+  const root = value.split(/[=.-]/, 1)[0];
+  if (root.length > 1) aliases.add(root);
+  return aliases;
+}
+
+function newsMentionsAny(item, symbols) {
+  if (!symbols.size) return false;
+  const tokens = String(item.text || "").match(/\$?\^?[A-Z][A-Z0-9.=-]{1,14}/g) || [];
+  return tokens.some((token) => symbols.has(token.replace(/^\$?\^/, "")));
+}
+
+function deduplicateNewsItems(items) {
+  const kept = [];
+  const fingerprints = [];
+  for (const item of items) {
+    const normalized = normalizeNewsText(item.text);
+    const words = new Set(normalized.split(" ").filter((word) => word.length > 2));
+    const stamp = Date.parse(item.timestamp || "");
+    const duplicate = fingerprints.some((prior) => {
+      if (
+        !Number.isNaN(stamp) &&
+        !Number.isNaN(prior.stamp) &&
+        Math.abs(stamp - prior.stamp) > 12 * 3600 * 1000
+      ) {
+        return false;
+      }
+      if (normalized && normalized === prior.normalized) return true;
+      if (words.size < 7 || prior.words.size < 7) return false;
+      let overlap = 0;
+      words.forEach((word) => {
+        if (prior.words.has(word)) overlap += 1;
+      });
+      return overlap / Math.max(words.size, prior.words.size) >= 0.94;
+    });
+    if (duplicate) continue;
+    kept.push(item);
+    fingerprints.push({ normalized, words, stamp });
+  }
+  return kept;
+}
+
+function normalizeNewsText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/\b(?:breaking|update|just in|alert)\b/g, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
 
 function updateNewsAges() {
   newsList.querySelectorAll("time[data-news-timestamp]").forEach((element) => {
@@ -1591,6 +1816,7 @@ async function fetchKeyDates() {
 function applyKeyDates(payload) {
   latestKeyDates = payload;
   keyDatesRevision += 1;
+  renderCatalystStrip(payload);
   if (latestData?.overview) renderDailyBoard(latestData.overview, latestCryptoEtfFlows);
 }
 
@@ -2279,6 +2505,41 @@ function flowItem(item, tone) {
 }
 
 const KEY_DATE_MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+
+function renderCatalystStrip(payload) {
+  const items = Array.isArray(payload?.key_dates) ? payload.key_dates : [];
+  const asOf = payload?.as_of || "";
+  const upcoming = items
+    .filter((item) => {
+      const diff = keyDateDayDiff(item.date, asOf);
+      return diff > 0 || (diff === 0 && item.release?.actual == null);
+    })
+    .slice(0, 4);
+  catalystStrip.hidden = upcoming.length === 0;
+  if (!upcoming.length) {
+    catalystStrip.innerHTML = "";
+    return;
+  }
+  catalystStrip.innerHTML = `<span class="catalyst-label">Next</span>
+    <div class="catalyst-items">${upcoming.map((item) => catalystItemMarkup(item, asOf)).join("")}</div>
+    <span class="catalyst-more">Key dates \u2192</span>`;
+}
+
+function catalystItemMarkup(item, asOf) {
+  const diff = keyDateDayDiff(item.date, asOf);
+  const when =
+    diff === 0
+      ? "Today"
+      : diff === 1
+        ? "Tomorrow"
+        : keyDateShort(item.date);
+  const time = item.time ? ` \u00b7 ${item.time}` : "";
+  return `<span class="catalyst-item">
+    <strong>${escapeHtml(when + time)}</strong>
+    <span>${escapeHtml(item.title || "Market event")}</span>
+    <em>${escapeHtml(item.category || "EVENT")}</em>
+  </span>`;
+}
 
 function keyDatesSection(payload) {
   const items = Array.isArray(payload?.key_dates) ? payload.key_dates : [];
@@ -3397,6 +3658,7 @@ function syncLayoutButtons() {
     marketLayout === "map"
       ? "Back to sector groups"
       : "Treemap: tile area tracks traded dollar volume (square-root scale), color is the 1D% move";
+  marketMapLegend.hidden = marketLayout !== "map";
 }
 
 function flatGroups(groups) {
@@ -4068,6 +4330,7 @@ function openChart(asset, options = {}) {
   const provider = asset?.quote?.provider || asset?.provider || "";
   const assetType = asset?.type || asset?.asset_type || "";
   activeSymbol = symbol;
+  setFocusedSymbol(symbol, { sync: false });
   activeAsset = asset || null;
   activeHistoryContext = null;
   chartContextLoading = false;
@@ -4897,7 +5160,8 @@ function formatCompactPrice(value) {
 }
 
 function currencyPrefix(currency) {
-  return {
+  const code = typeof currency === "string" ? currency.trim().toUpperCase() : "";
+  const known = {
     KRW: "₩",
     JPY: "¥",
     EUR: "€",
@@ -4905,7 +5169,11 @@ function currencyPrefix(currency) {
     USD: "$",
     // US-cents quotes (CBOT/ICE ags): shown bare, the futures convention.
     USX: "",
-  }[currency] ?? `${currency} `;
+  };
+  if (Object.prototype.hasOwnProperty.call(known, code)) return known[code];
+  // Unknown ISO-style codes are safe text; malformed provider strings never
+  // cross into the many innerHTML-based price renderers.
+  return /^[A-Z]{3}$/.test(code) ? `${code} ` : "";
 }
 
 function formatUsdFlow(value) {
