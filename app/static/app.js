@@ -87,6 +87,9 @@ let chartLoadToken = 0;
 let chartContextLoading = false;
 let chartResizeObserver = null;
 let chartResizeFrame = null;
+let optionsLoadToken = 0;
+let optionsPanelState = null;
+let optionsProfileMode = "gex";
 let marketSearchQuery = "";
 let activeGroupFilter = "";
 let marketSort = { key: "configured", direction: "default" };
@@ -121,6 +124,7 @@ const NEWS_OPEN_KEY = "news-open";
 // Muted news channels, persisted per browser.
 const NEWS_MUTED_KEY = "news-muted-channels-v1";
 const THEME_STORAGE_KEY = "board-theme";
+const US_OPTIONS_EXCHANGES = new Set(["AMEX", "ARCA", "BATS", "CBOE", "NASDAQ", "NYSE", "NYSEARCA", "US"]);
 let mutedNewsChannels = new Set();
 try {
   mutedNewsChannels = new Set(JSON.parse(localStorage.getItem(NEWS_MUTED_KEY) || "[]"));
@@ -711,6 +715,10 @@ function selectView(view) {
     button.tabIndex = selected ? 0 : -1;
   });
   if (activeView === "fringe") renderFringeView();
+  // The treemap sizes itself from board.clientWidth, which is 0 while the
+  // markets view is hidden (a refresh landing on Daily still renders the
+  // board): re-render on entry so the map lays out at the real width.
+  if (activeView === "markets" && marketLayout === "map") renderBoard(latestData);
   syncUrlState();
 }
 
@@ -4334,6 +4342,9 @@ function openChart(asset, options = {}) {
   activeAsset = asset || null;
   activeHistoryContext = null;
   chartContextLoading = false;
+  optionsLoadToken += 1;
+  optionsPanelState = null;
+  optionsProfileMode = "gex";
   const requestedInterval = options.interval || "1d";
   const timeframeButton =
     intervalButtons.find((item) => item.dataset.interval === requestedInterval) ||
@@ -4353,6 +4364,10 @@ function openChart(asset, options = {}) {
     showProfilePanel();
     setProfileLoading(symbol, asset);
     loadAssetProfile(symbol);
+    if (supportsOptionsAsset(asset)) {
+      setOptionsLoading(symbol);
+      loadOptionsSnapshot(symbol);
+    }
   }
 }
 
@@ -4372,6 +4387,8 @@ function updateIntradayAvailability(assetType) {
 function closeModal() {
   if (!closeDialog(modal)) return;
   chartLoadToken += 1;
+  optionsLoadToken += 1;
+  optionsPanelState = null;
   activeSymbol = null;
   activeAsset = null;
   activeHistoryContext = null;
@@ -4671,6 +4688,259 @@ function resizeChartToContainer() {
   chart.applyOptions({ width, height });
 }
 
+function supportsOptionsAsset(asset) {
+  const assetType = String(asset?.type || asset?.asset_type || "");
+  const exchange = String(asset?.exchange || "").toUpperCase();
+  return ["equity", "etf"].includes(assetType) && (!exchange || US_OPTIONS_EXCHANGES.has(exchange));
+}
+
+function setOptionsLoading(symbol) {
+  optionsPanelState = { status: "loading", symbol };
+  renderOptionsPanel();
+}
+
+async function loadOptionsSnapshot(symbol, expiration = "") {
+  const requestId = optionsLoadToken + 1;
+  optionsLoadToken = requestId;
+  try {
+    const suffix = expiration ? `?expiration=${encodeURIComponent(expiration)}` : "";
+    const response = await fetch(`/api/options/${encodeURIComponent(symbol)}${suffix}`);
+    if (!response.ok) {
+      let code = "options_unavailable";
+      try {
+        const errorPayload = await response.json();
+        code = errorPayload?.detail || code;
+      } catch {
+        // The status code is enough; never surface a provider response body.
+      }
+      throw new Error(code);
+    }
+    const payload = await response.json();
+    if (activeSymbol !== symbol || requestId !== optionsLoadToken) return;
+    optionsPanelState = { status: "ready", symbol, payload };
+    renderOptionsPanel();
+  } catch (error) {
+    if (activeSymbol !== symbol || requestId !== optionsLoadToken) return;
+    optionsPanelState = {
+      status: "error",
+      symbol,
+      code: error instanceof Error ? error.message : "options_unavailable",
+    };
+    renderOptionsPanel();
+  }
+}
+
+function renderOptionsPanel() {
+  profileElement.querySelector("[data-options-panel]")?.remove();
+  if (!optionsPanelState || !supportsOptionsAsset(activeAsset)) return;
+
+  let html = "";
+  if (optionsPanelState.status === "loading") {
+    html = `
+      <section class="options-snapshot options-loading" data-options-panel aria-label="Options positioning">
+        <span class="loading-spinner" aria-hidden="true"></span>
+        <span>Loading ${escapeHtml(optionsPanelState.symbol)} option chain</span>
+      </section>
+    `;
+  } else if (optionsPanelState.status === "error") {
+    html = optionsErrorMarkup(optionsPanelState.code);
+  } else {
+    html = optionsSnapshotMarkup(optionsPanelState.payload);
+  }
+  profileElement.insertAdjacentHTML("afterbegin", html);
+  bindOptionsControls();
+  resetProfileScroll();
+  scheduleChartResize();
+}
+
+function optionsErrorMarkup(code) {
+  const messages = {
+    options_not_configured: "Add a MarketData.app token to enable GEX analytics.",
+    marketdata_auth_failed: "MarketData.app rejected the configured token.",
+    marketdata_entitlement_required: "The MarketData.app account does not include this options data.",
+    marketdata_rate_limited: "MarketData.app request limit reached. Try again shortly.",
+    marketdata_no_data: "MarketData.app has no chain data for this expiration.",
+    options_expirations_unavailable: "No listed option expirations were found.",
+    options_expiration_not_found: "That expiration is no longer listed.",
+    options_chain_empty: "MarketData.app returned no contracts for this expiration.",
+  };
+  const message = messages[code] || "The option chain could not be loaded.";
+  return `
+    <section class="options-snapshot options-unavailable" data-options-panel aria-label="Options positioning unavailable">
+      <div>
+        <span class="options-kicker">Options positioning</span>
+        <strong>Snapshot unavailable</strong>
+      </div>
+      <span>${escapeHtml(message)}</span>
+    </section>
+  `;
+}
+
+function optionsSnapshotMarkup(payload) {
+  const metrics = payload?.metrics || {};
+  const quality = payload?.quality || {};
+  const expirations = Array.isArray(payload?.expirations) ? payload.expirations : [];
+  const selected = payload?.expiration || "";
+  const expiryOptions = expirations
+    .map(
+      (expiration) =>
+        `<option value="${escapeHtml(expiration)}"${expiration === selected ? " selected" : ""}>${escapeHtml(formatOptionsExpiry(expiration))}</option>`,
+    )
+    .join("");
+  const netGex = numericOrNull(metrics.net_gex);
+  const atmIv = numericOrNull(metrics.atm_iv);
+  const putCall = numericOrNull(metrics.put_call_oi);
+  const stale = Boolean(payload?.is_stale);
+  const sourceLabel = payload?.source === "marketdata" ? "MarketData.app" : "Options data";
+
+  return `
+    <section class="options-snapshot${stale ? " is-stale" : ""}" data-options-panel aria-label="Options positioning">
+      <header class="options-head">
+        <div>
+          <span class="options-kicker">Options positioning</span>
+          <strong>GEX Snapshot</strong>
+          <small>${sourceLabel} · ${escapeHtml(String(quality.greeks_coverage_pct ?? "--"))}% Greeks${stale ? " · stale" : ""}</small>
+        </div>
+        <label>
+          <span>Expiry</span>
+          <select data-options-expiration aria-label="Option expiration">${expiryOptions}</select>
+        </label>
+      </header>
+      <div class="options-metrics">
+        ${optionsMetric("Spot", formatCurrencyPrice(numericOrNull(payload?.spot), "USD"))}
+        ${optionsMetric("ATM IV", atmIv === null ? "--" : formatPlainPct(atmIv * 100))}
+        ${optionsMetric("Put / Call OI", putCall === null ? "--" : putCall.toFixed(2))}
+        ${optionsMetric("Net GEX", formatSignedCompactDollars(netGex), changeClass(netGex))}
+        ${optionsMetric("Call Wall", formatPrice(numericOrNull(metrics.call_wall)), "positive")}
+        ${optionsMetric("Put Wall", formatPrice(numericOrNull(metrics.put_wall)), "negative")}
+        ${optionsMetric("Max Pain", formatPrice(numericOrNull(metrics.max_pain)))}
+      </div>
+      <div class="options-profile-head">
+        <span>Strike profile</span>
+        <div role="group" aria-label="Options profile metric">
+          <button type="button" data-options-mode="gex" class="${optionsProfileMode === "gex" ? "active" : ""}" aria-pressed="${optionsProfileMode === "gex"}">GEX</button>
+          <button type="button" data-options-mode="oi" class="${optionsProfileMode === "oi" ? "active" : ""}" aria-pressed="${optionsProfileMode === "oi"}">OI</button>
+        </div>
+      </div>
+      ${optionsStrikeProfile(payload)}
+      <p class="options-method">Dealer gamma proxy · calls + / puts − · GEX is USD per 1% spot move · open interest updates daily</p>
+    </section>
+  `;
+}
+
+function optionsMetric(label, value, tone = "") {
+  return `
+    <div class="options-metric">
+      <span>${escapeHtml(label)}</span>
+      <strong class="${tone}">${escapeHtml(value)}</strong>
+    </div>
+  `;
+}
+
+function optionsStrikeProfile(payload) {
+  const allRows = (Array.isArray(payload?.strikes) ? payload.strikes : [])
+    .filter((row) => numericOrNull(row?.strike) !== null)
+    .sort((left, right) => Number(left.strike) - Number(right.strike));
+  if (!allRows.length) return '<div class="options-profile-empty">Strike profile unavailable</div>';
+
+  const spot = numericOrNull(payload?.spot) ?? Number(allRows[0].strike);
+  let nearestIndex = 0;
+  allRows.forEach((row, index) => {
+    if (Math.abs(Number(row.strike) - spot) < Math.abs(Number(allRows[nearestIndex].strike) - spot)) {
+      nearestIndex = index;
+    }
+  });
+  const visibleCount = Math.min(13, allRows.length);
+  const start = Math.max(0, Math.min(allRows.length - visibleCount, nearestIndex - Math.floor(visibleCount / 2)));
+  const rows = allRows.slice(start, start + visibleCount);
+  const values =
+    optionsProfileMode === "gex"
+      ? rows.map((row) => Math.abs(numericOrNull(row.net_gex) ?? 0))
+      : rows.flatMap((row) => [numericOrNull(row.call_oi) ?? 0, numericOrNull(row.put_oi) ?? 0]);
+  const maxValue = Math.max(...values, 1);
+  const atmStrike = Number(rows.reduce((nearest, row) =>
+    Math.abs(Number(row.strike) - spot) < Math.abs(Number(nearest.strike) - spot) ? row : nearest,
+  ).strike);
+
+  const columns = rows
+    .map((row) => {
+      const strike = Number(row.strike);
+      const isAtm = strike === atmStrike;
+      let bars = "";
+      let title = "";
+      if (optionsProfileMode === "gex") {
+        const value = numericOrNull(row.net_gex) ?? 0;
+        const magnitude = value === 0 ? 0 : Math.max(2, Math.abs(value) / maxValue * 48);
+        bars = `<i class="options-gex-bar ${value >= 0 ? "positive" : "negative"}" style="--bar:${magnitude.toFixed(2)}%"></i>`;
+        title = `${formatPrice(strike)}: ${formatSignedCompactDollars(value)} net GEX`;
+      } else {
+        const callOi = numericOrNull(row.call_oi) ?? 0;
+        const putOi = numericOrNull(row.put_oi) ?? 0;
+        bars = `
+          <i class="options-oi-bar call" style="--bar:${callOi === 0 ? 0 : Math.max(2, callOi / maxValue * 100).toFixed(2)}%"></i>
+          <i class="options-oi-bar put" style="--bar:${putOi === 0 ? 0 : Math.max(2, putOi / maxValue * 100).toFixed(2)}%"></i>
+        `;
+        title = `${formatPrice(strike)}: ${formatCompactPrice(callOi)} call OI / ${formatCompactPrice(putOi)} put OI`;
+      }
+      return `
+        <div class="options-strike${isAtm ? " is-atm" : ""}" title="${escapeHtml(title)}">
+          <div class="options-bar-field">${bars}</div>
+          <span>${escapeHtml(formatPrice(strike))}</span>
+        </div>
+      `;
+    })
+    .join("");
+
+  return `
+    <div class="options-profile-chart ${optionsProfileMode}" role="img" aria-label="${optionsProfileMode === "gex" ? "Net gamma exposure by strike" : "Call and put open interest by strike"}">
+      ${columns}
+    </div>
+    <div class="options-profile-legend">
+      ${
+        optionsProfileMode === "gex"
+          ? '<span><i class="positive"></i>Positive</span><span><i class="negative"></i>Negative</span>'
+          : '<span><i class="call"></i>Calls</span><span><i class="put"></i>Puts</span>'
+      }
+      <span>ATM highlighted</span>
+    </div>
+  `;
+}
+
+function bindOptionsControls() {
+  const expiration = profileElement.querySelector("[data-options-expiration]");
+  expiration?.addEventListener("change", () => {
+    if (!activeSymbol) return;
+    const symbol = activeSymbol;
+    const selected = expiration.value;
+    setOptionsLoading(symbol);
+    loadOptionsSnapshot(symbol, selected);
+  });
+  profileElement.querySelectorAll("[data-options-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const mode = button.dataset.optionsMode;
+      if (!["gex", "oi"].includes(mode) || mode === optionsProfileMode) return;
+      optionsProfileMode = mode;
+      renderOptionsPanel();
+    });
+  });
+}
+
+function formatOptionsExpiry(value) {
+  const parsed = new Date(`${value}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "2-digit",
+    timeZone: "UTC",
+  });
+}
+
+function formatSignedCompactDollars(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "--";
+  return `${value >= 0 ? "+" : "-"}$${formatCompactPrice(Math.abs(value))}`;
+}
+
 async function loadAssetProfile(symbol) {
   try {
     const response = await fetch(`/api/profile/${encodeURIComponent(symbol)}`);
@@ -4688,6 +4958,7 @@ async function loadAssetProfile(symbol) {
       </div>
       ${profileMarketContext(mergedProfileMarketContext(summary), { loading: chartContextLoading })}
     `;
+    renderOptionsPanel();
     resetProfileScroll();
     scheduleChartResize();
   }
@@ -4703,6 +4974,7 @@ function setProfileLoading(symbol, asset) {
     </div>
     ${profileMarketContext(mergedProfileMarketContext(summary), { loading: chartContextLoading })}
   `;
+  renderOptionsPanel();
   resetProfileScroll();
   scheduleChartResize();
 }
@@ -4745,6 +5017,7 @@ function renderAssetProfile(profile) {
     </div>
     ${profileMarketContext(mergedProfileMarketContext(summary), { loading: chartContextLoading })}
   `;
+  renderOptionsPanel();
   resetProfileScroll();
   bindProfileDescriptionToggle();
   scheduleChartResize();

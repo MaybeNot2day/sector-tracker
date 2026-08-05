@@ -29,7 +29,7 @@ class CloseProbe:
         # Network resources must not close until every background user stopped.
         assert self.tracker.stopped_tasks == 4
         self.tracker.started.append(self.name)
-        if len(self.tracker.started) == 5:
+        if len(self.tracker.started) == 6:
             self.tracker.all_started.set()
         await self.tracker.all_started.wait()
         if self.fail:
@@ -49,6 +49,7 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
         "stooq": CloseProbe("stooq", tracker),
         "news": CloseProbe("news", tracker),
         "econ": CloseProbe("econ", tracker),
+        "options": CloseProbe("options", tracker),
     }
     settings = SimpleNamespace(
         watchlist_path=tmp_path / "watchlists.yaml",
@@ -57,6 +58,9 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
         database_seed_path=tmp_path / "seed.db",
         quote_poll_seconds=15,
         crypto_etf_flow_cache_seconds=300,
+        marketdata_token="token",
+        marketdata_base_url="https://marketdata.test",
+        options_cache_seconds=60,
         econ_calendar_cache_seconds=300,
         econ_calendar_countries="US,EU",
         news_channels=[],
@@ -87,6 +91,9 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
     monkeypatch.setattr(main_module, "DailyBoardService", lambda *args, **kwargs: object())
     monkeypatch.setattr(main_module, "CryptoEtfFlowService", lambda *args, **kwargs: object())
     monkeypatch.setattr(main_module, "AssetProfileService", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        main_module, "MarketDataOptionsService", lambda *args, **kwargs: probes["options"]
+    )
     monkeypatch.setattr(main_module, "ConnectionManager", lambda: object())
     monkeypatch.setattr(main_module, "quote_poll_loop", idle_loop)
     monkeypatch.setattr(main_module, "history_refresh_loop", idle_loop)
@@ -103,6 +110,6 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
     await asyncio.wait_for(run_lifespan(), timeout=1.0)
 
     assert tracker.stopped_tasks == 4
-    assert set(tracker.started) == {"yahoo", "lighter", "stooq", "news", "econ"}
+    assert set(tracker.started) == {"yahoo", "lighter", "stooq", "news", "options", "econ"}
     # Lighter's close failure is isolated; every other resource still closes.
-    assert set(tracker.completed) == {"yahoo", "stooq", "news", "econ"}
+    assert set(tracker.completed) == {"yahoo", "stooq", "news", "options", "econ"}

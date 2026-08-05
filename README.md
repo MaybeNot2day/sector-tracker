@@ -28,6 +28,12 @@ from Lighter wherever a market exists; daily bars, volume, profiles, and everyth
 analytics-related (DMAs, breadth, RVOL, 52W) stay on official Yahoo session data. Assets
 not listed on Lighter run fully on Yahoo.
 
+For U.S. equities and ETFs, the chart modal can also load a MarketData.app option-chain
+snapshot: expiry selection, ATM IV, put/call OI, call and put walls, max pain, and switchable
+GEX/OI strike profiles. Net GEX is an explicit dealer-positioning proxy (calls positive, puts
+negative), reported as dollars per 1% underlying move; it is not observed dealer inventory.
+Open interest updates daily.
+
 The daily board persists a condensed snapshot per UTC day (regime, breadth, theme scores)
 to SQLite; the UI uses it for the 50DMA breadth trend sparkline and day-over-day theme
 score deltas, and `/api/snapshots?days=30` serves the raw history.
@@ -333,6 +339,9 @@ WATCHLIST_SEED_PATH=./config/watchlists.yaml
 QUOTE_POLL_SECONDS=10
 HISTORY_REFRESH_SECONDS=3600
 CRYPTO_ETF_FLOW_CACHE_SECONDS=900
+MARKETDATA_TOKEN=                                  # server-side API token; leave empty to disable options snapshots
+MARKETDATA_BASE_URL=https://api.marketdata.app     # MarketData.app REST API origin
+OPTIONS_CACHE_SECONDS=60                           # chain snapshot cache, 15-900 seconds
 ECON_CALENDAR_CACHE_SECONDS=300         # key-dates enrichment cache; auto-drops to 20s around releases
 ECON_CALENDAR_COUNTRIES=US,EU,DE,GB,JP,CN
 NEWS_TELEGRAM_CHANNELS=marketfeed,RetardFrens,tradehaven,AGGRNEWSWIRE,WalterBloomberg   # public t.me handles; each gets a mute chip in the drawer
@@ -342,6 +351,13 @@ NEWS_POLL_SECONDS=15
 Crypto ETF flow data uses public Farside tables via a text-rendered fetch route and is cached by
 `CRYPTO_ETF_FLOW_CACHE_SECONDS`.
 
+MarketData.app options data is requested only when an eligible chart modal opens. Create an API
+token in the [MarketData.app dashboard](https://dashboard.marketdata.app/), set
+`MARKETDATA_TOKEN` in the server's `.env`, and restart the app. The token stays server-side;
+browsers call `/api/options/{symbol}` and never receive credentials. The integration omits the
+optional `mode` parameter, so MarketData.app applies the account default: paid accounts default
+to live mode, while free and trial accounts receive delayed data.
+
 ## Smoke Tests
 
 ```bash
@@ -350,6 +366,7 @@ curl http://127.0.0.1:8000/api/health
 curl http://127.0.0.1:8000/api/groups
 curl http://127.0.0.1:8000/api/quotes
 curl http://127.0.0.1:8000/api/snapshots
+curl http://127.0.0.1:8000/api/options/SPY   # requires MARKETDATA_TOKEN
 ```
 
 Diagnostics: `/api/lighter-status` (feed cache freshness, 429 cooldowns) and

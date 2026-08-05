@@ -64,6 +64,7 @@ from app.services.key_dates import parse_key_dates
 from app.services.macro import MACRO_TAPE_GROUP_NAME, with_macro_group
 from app.services.market_context import market_context_payload
 from app.services.news import NewsService
+from app.services.options import MarketDataOptionsService, OptionsDataError
 from app.services.quotes import QuoteService
 
 APP_DIR = Path(__file__).parent
@@ -71,6 +72,7 @@ STATIC_DIR = APP_DIR / "static"
 YAHOO_STATUS_CACHE_SECONDS = 60.0
 HistoryInterval = Literal["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1wk", "1mo"]
 HistoryRange = Literal["1d", "1w", "1mo", "3mo", "6mo", "ytd", "1y", "5y", "10y"]
+US_OPTIONS_EXCHANGES = {"AMEX", "ARCA", "BATS", "CBOE", "NASDAQ", "NYSE", "NYSEARCA", "US"}
 _yahoo_status_cache: tuple[float, dict[str, object]] | None = None
 _yahoo_status_lock = Lock()
 
@@ -169,6 +171,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.fringe_service = FringeService(settings.database_path, providers)
     app.state.asset_profile_service = AssetProfileService()
+    app.state.options_service = MarketDataOptionsService(
+        settings.marketdata_token,
+        base_url=settings.marketdata_base_url,
+        cache_seconds=settings.options_cache_seconds,
+    )
     app.state.news_service = NewsService(
         settings.news_channels,
         cache_seconds=settings.news_poll_seconds,
@@ -203,6 +210,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await asyncio.gather(
             *(provider.aclose() for provider in providers.values()),
             app.state.news_service.aclose(),
+            app.state.options_service.aclose(),
             app.state.econ_calendar_service.aclose(),
             return_exceptions=True,
         )
@@ -569,8 +577,16 @@ async def create_report(request: ReportRequest) -> dict[str, object]:
             events=[(e.date, e.time, e.title, e.category) for e in events],
             fringe_actions=(
                 [
-                    (a.action, a.ticker, a.direction, a.text, a.horizon, a.target,
-                     a.confidence, a.stop)
+                    (
+                        a.action,
+                        a.ticker,
+                        a.direction,
+                        a.text,
+                        a.horizon,
+                        a.target,
+                        a.confidence,
+                        a.stop,
+                    )
                     for a in actions
                 ]
                 if actions is not None
@@ -603,9 +619,7 @@ async def reports(
     limit: int = Query(default=30, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     slug: str | None = Query(default=None, min_length=1, max_length=64),
-    before_date: str | None = Query(
-        default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"
-    ),
+    before_date: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
     before_created_at: str | None = Query(default=None, max_length=64),
     before_id: int | None = Query(default=None, ge=1),
 ) -> dict[str, object]:
@@ -618,9 +632,7 @@ async def reports(
         raise HTTPException(status_code=422, detail="report_cursor_with_offset")
     before = (
         (before_date, before_created_at, before_id)
-        if before_date is not None
-        and before_created_at is not None
-        and before_id is not None
+        if before_date is not None and before_created_at is not None and before_id is not None
         else None
     )
     return await asyncio.to_thread(
@@ -680,9 +692,7 @@ async def fringe() -> dict[str, object]:
 
 
 @app.post("/api/fringe/{idea_id}/close", dependencies=[Depends(require_edit_token)])
-async def close_fringe_position(
-    idea_id: int, request: FringeCloseRequest
-) -> dict[str, object]:
+async def close_fringe_position(idea_id: int, request: FringeCloseRequest) -> dict[str, object]:
     """Close one open idea at the current mark — the intraday auto-stop path.
 
     The exit price is always the board's own fresh mark, never caller input;
@@ -794,6 +804,30 @@ async def snapshots(days: int = Query(default=30, ge=1, le=365)) -> dict[str, ob
     """Persisted daily-board history: regime, breadth, and theme scores by date."""
     rows = await asyncio.to_thread(db.load_board_snapshots, app.state.settings.database_path, days)
     return {"snapshots": rows}
+
+
+@app.get("/api/options/{symbol}")
+async def options_snapshot(
+    symbol: str,
+    expiration: str | None = Query(default=None),
+) -> dict[str, object]:
+    clean = clean_symbol(symbol)
+    if not clean or len(clean) > 24 or "/" in clean or "\\" in clean:
+        raise HTTPException(status_code=422, detail="symbol_invalid")
+    asset = find_asset(app.state.groups, clean)
+    if asset is None:
+        fringe_service: FringeService = app.state.fringe_service
+        asset = await fringe_service.resolve_known_asset(clean)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="asset_not_found")
+    exchange = str(asset.exchange or "").upper()
+    if asset.type not in {"equity", "etf"} or (exchange and exchange not in US_OPTIONS_EXCHANGES):
+        raise HTTPException(status_code=422, detail="options_asset_unsupported")
+    service: MarketDataOptionsService = app.state.options_service
+    try:
+        return await service.get_snapshot(clean, expiration)
+    except OptionsDataError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.code) from exc
 
 
 @app.get("/api/history/{symbol}")

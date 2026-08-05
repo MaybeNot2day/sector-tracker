@@ -411,6 +411,29 @@ def test_markets_tabs_render_rows_and_open_canvas_chart(page: Page, base_url: st
     _expect_chart_canvas_content(page)
 
 
+def test_equity_chart_renders_options_snapshot_and_controls(page: Page, base_url: str) -> None:
+    _goto_board(page, base_url)
+    page.locator('.benchmark-card[data-symbol="SPY"]').click()
+
+    panel = page.locator("[data-options-panel]")
+    expect(panel).to_be_visible()
+    expect(panel).to_contain_text("GEX Snapshot")
+    expect(panel).to_contain_text("MarketData.app")
+    expect(panel.locator(".options-metric").filter(has_text="ATM IV")).to_contain_text("21.0%")
+    net_gex = panel.locator(".options-metric").filter(has_text="Net GEX")
+    expect(net_gex).to_contain_text("+$100.00M")
+    expect(panel.locator(".options-profile-chart.gex")).to_be_visible()
+
+    panel.locator("[data-options-expiration]").select_option("2026-08-14")
+    expect(panel.locator("[data-options-expiration]")).to_have_value("2026-08-14")
+    expect(net_gex).to_contain_text("+$200.00M")
+
+    panel.locator('[data-options-mode="oi"]').click()
+    expect(panel.locator('[data-options-mode="oi"]')).to_have_attribute("aria-pressed", "true")
+    expect(panel.locator(".options-profile-chart.oi")).to_be_visible()
+    expect(panel.locator(".options-oi-bar")).to_have_count(6)
+
+
 def test_market_map_toggle_renders_treemap_and_opens_charts(page: Page, base_url: str) -> None:
     _goto_board(page, base_url)
     page.locator("#markets-tab").click()
@@ -449,6 +472,34 @@ def test_market_map_toggle_renders_treemap_and_opens_charts(page: Page, base_url
     expect(page.locator("#board .market-map")).to_be_visible()
     expect(page.locator("#market-map-toggle")).to_have_attribute("aria-pressed", "true")
     expect(page.locator("#market-map-legend")).to_be_visible()
+
+
+def test_market_map_relayouts_at_full_width_after_hidden_boot_render(
+    page: Page, base_url: str
+) -> None:
+    # A refresh landing on the Daily view with the map layout persisted
+    # renders the treemap inside the hidden markets panel (clientWidth 0,
+    # floored to 320px). Entering Markets must re-lay it out at real width.
+    page.goto(f"{base_url}/?deep=hidden-map#layout=map", wait_until="domcontentloaded")
+    expect(page.locator("#daily-view")).to_be_visible()
+    page.locator("#board .market-map").wait_for(state="attached")
+
+    page.locator("#markets-tab").click()
+    expect(page.locator("#markets-view")).to_be_visible()
+    expect(page.locator("#board .market-map")).to_be_visible()
+    board_width = page.locator("#board").evaluate("(el) => el.clientWidth")
+    max_tile_right = page.locator("#board .market-map").evaluate(
+        """(host) => Math.max(
+            ...Array.from(host.querySelectorAll(".map-group")).map(
+                (group) => group.offsetLeft + group.offsetWidth
+            )
+        )"""
+    )
+    assert board_width > 400, f"viewport too narrow for a meaningful check: {board_width}"
+    assert max_tile_right > board_width * 0.9, (
+        f"treemap stuck at hidden-boot width: tiles end at {max_tile_right}px "
+        f"inside a {board_width}px board"
+    )
 
 
 def test_crypto_panels_swap_open_column_for_rolling_24h(page: Page, base_url: str) -> None:
@@ -1276,6 +1327,11 @@ def _stub_board_apis(page: Page) -> None:
             and request.method == "POST"
         ):
             _fulfill_json(route, {"detail": "symbol_not_found"}, status=422)
+        elif path.startswith("/api/options/"):
+            symbol = unquote(path.rsplit("/", 1)[1]).upper()
+            params = parse_qs(parsed.query)
+            expiration = params.get("expiration", ["2026-08-07"])[0]
+            _fulfill_json(route, _options_payload(symbol, expiration))
         elif path.startswith("/api/history/"):
             symbol = unquote(path.rsplit("/", 1)[1]).upper()
             _fulfill_json(route, _history_payload(symbol))
@@ -1418,6 +1474,58 @@ def _history_payload(symbol: str) -> dict[str, Any]:
             }
         )
     return {"symbol": symbol, "interval": "1d", "range": "1y", "bars": bars}
+
+
+def _options_payload(symbol: str, expiration: str) -> dict[str, Any]:
+    net_gex = 200_000_000.0 if expiration == "2026-08-14" else 100_000_000.0
+    return {
+        "status": "ok",
+        "source": "marketdata",
+        "methodology": "dealer_gamma_proxy",
+        "symbol": symbol,
+        "spot": 100.0,
+        "expiration": expiration,
+        "expirations": ["2026-08-07", "2026-08-14"],
+        "updated_at": _iso(),
+        "is_stale": False,
+        "metrics": {
+            "atm_iv": 0.21,
+            "put_call_oi": 0.8,
+            "net_gex": net_gex,
+            "call_wall": 105.0,
+            "put_wall": 95.0,
+            "max_pain": 100.0,
+            "call_oi": 710,
+            "put_oi": 560,
+        },
+        "strikes": [
+            {
+                "strike": 95.0,
+                "call_oi": 10,
+                "put_oi": 400,
+                "call_gex": 1_000.0,
+                "put_gex": -40_000.0,
+                "net_gex": -39_000.0,
+            },
+            {
+                "strike": 100.0,
+                "call_oi": 200,
+                "put_oi": 150,
+                "call_gex": 40_000.0,
+                "put_gex": -30_000.0,
+                "net_gex": 10_000.0,
+            },
+            {
+                "strike": 105.0,
+                "call_oi": 500,
+                "put_oi": 10,
+                "call_gex": 50_000.0,
+                "put_gex": -1_000.0,
+                "net_gex": 49_000.0,
+            },
+        ],
+        "quality": {"contracts": 6, "greeks_coverage_pct": 100.0},
+    }
 
 
 def _profile_payload(symbol: str) -> dict[str, Any]:

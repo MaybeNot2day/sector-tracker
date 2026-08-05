@@ -78,6 +78,9 @@ _SUBSTITUTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\b(?:fomc|fed)(?: rate)? decision\b"), " fed interest rate decision "),
     (re.compile(r"\b(?:umich|u\.? ?of ?michigan|university of michigan)\b"), " michigan "),
     (re.compile(r"\bspeaks\b"), " speech "),
+    # EIA petroleum rows are titled "... Stocks Change" (API's is singular
+    # "Stock Change"); briefs write the same prints as "Inventories".
+    (re.compile(r"\bstocks? change\b"), " inventories "),
 )
 
 # Agent-side only: "CPI" on the board means the inflation *rate* print,
@@ -111,7 +114,7 @@ _GEO_TOKENS = frozenset(
 )
 
 _COUNTRY_CUES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("US", re.compile(r"\bu\.?s\.?a?\b|\bfed\b|\bfomc\b|\bunited states\b|\bamerican?\b")),
+    ("US", re.compile(r"\bu\.?s\.?a?\b|\bfed\b|\bfomc\b|\bunited states\b|\bamerican?\b|\beia\b")),
     ("EU", re.compile(r"\beurozone\b|\beuro ?area\b|\becb\b")),
     ("DE", re.compile(r"\bgerman(?:y)?\b|\bifo\b|\bzew\b|\bbundesbank\b")),
     ("GB", re.compile(r"\buk\b|\bbritain\b|\bbritish\b|\bboe\b")),
@@ -363,9 +366,7 @@ def match_release(event: Mapping[str, object], rows: list[CalendarRow]) -> dict[
     if not variants:
         return None
     country = infer_country(title)
-    threshold = (
-        _SCORE_THRESHOLD_WITH_COUNTRY if country else _SCORE_THRESHOLD_ANY_COUNTRY
-    )
+    threshold = _SCORE_THRESHOLD_WITH_COUNTRY if country else _SCORE_THRESHOLD_ANY_COUNTRY
     quarter_match = _QUARTER_HINT.search(title.lower())
     quarter = f"q{quarter_match.group(1)}" if quarter_match else None
     time_raw = event.get("time")
@@ -452,9 +453,7 @@ def _is_hot(release_time: datetime, actual: object, now: datetime) -> bool:
     return actual is None and release_time - HOT_BEFORE <= now <= release_time + HOT_AFTER
 
 
-def any_hot_release(
-    items: Sequence[Mapping[str, object]], now: datetime | None = None
-) -> bool:
+def any_hot_release(items: Sequence[Mapping[str, object]], now: datetime | None = None) -> bool:
     """True when any *matched* item is inside its hot window awaiting a print."""
     now = now or datetime.now(UTC)
     for item in items:

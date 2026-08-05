@@ -172,7 +172,24 @@ _FIXTURE_JSON = r"""
  {"id": "405504", "title": "Inflation Rate YoY", "indicator": "Inflation Rate",
   "country": "NZ", "period": "Q2", "actual": null, "previous": 2.5,
   "forecast": 2.3, "unit": "%", "currency": "NZD", "importance": 1,
-  "date": "2026-07-20T22:45:00.000Z"}
+  "date": "2026-07-20T22:45:00.000Z"},
+ {"id": "421001", "title": "API Crude Oil Stock Change", "indicator": "API Crude Oil Stock Change",
+  "country": "US", "period": "Jul/11", "actual": 2.69, "previous": 3.296,
+  "forecast": -2, "scale": "M", "currency": "USD", "importance": -1,
+  "date": "2026-07-15T20:30:00.000Z"},
+ {"id": "421002", "title": "EIA Crude Oil Stocks Change", "indicator": "Crude Oil Stocks Change",
+  "country": "US", "period": "Jul/11", "actual": 2.479, "previous": -7.167,
+  "forecast": -1.5, "scale": "M", "currency": "USD", "importance": 0,
+  "date": "2026-07-16T14:30:00.000Z"},
+ {"id": "421003", "title": "EIA Cushing Crude Oil Stocks Change",
+  "indicator": "Cushing Crude Oil Stocks",
+  "country": "US", "period": "Jul/11", "actual": 2.356, "previous": -0.771,
+  "forecast": null, "scale": "M", "currency": "USD", "importance": -1,
+  "date": "2026-07-16T14:30:00.000Z"},
+ {"id": "421004", "title": "EIA Gasoline Stocks Change", "indicator": "Gasoline Stocks Change",
+  "country": "US", "period": "Jul/11", "actual": -1.643, "previous": 0.007,
+  "forecast": -1.3, "scale": "M", "currency": "USD", "importance": -1,
+  "date": "2026-07-16T14:30:00.000Z"}
 ]
 """
 
@@ -235,6 +252,12 @@ def matched_title(event: Mapping[str, object]) -> str | None:
         # Non-economic rail entries must stay unenriched.
         ("2026-07-16", "Team offsite", None),
         ("2026-07-16", "TSLA earnings", None),
+        # EIA petroleum prints: briefs say "Inventories", TradingView titles
+        # the rows "Stocks Change". The headline crude row must win over the
+        # same-time Cushing sibling and the prior-day API decoy.
+        ("2026-07-16", "EIA Crude Oil Inventories", "EIA Crude Oil Stocks Change"),
+        ("2026-07-16", "EIA Gasoline Inventories", "EIA Gasoline Stocks Change"),
+        ("2026-07-15", "API Crude Oil Inventories", "API Crude Oil Stock Change"),
     ],
 )
 def test_matching_acceptance_cases(date: str, title: str, expected: str | None) -> None:
@@ -245,9 +268,7 @@ def test_quarterly_cpi_skips_monthly_rows_and_lands_on_the_quarter_print() -> No
     # "CPI (YoY, Q2)" must not enrich from Canada's monthly June print that
     # shares the "Inflation Rate YoY" title; the quarter hint pins it to the
     # NZ Q2 row (and would return null if no quarterly row existed).
-    release = match_release(
-        {"date": "2026-07-20", "title": "CPI (YoY, Q2)", "time": None}, ROWS
-    )
+    release = match_release({"date": "2026-07-20", "title": "CPI (YoY, Q2)", "time": None}, ROWS)
     assert release is not None
     assert release["period"] == "Q2"
 
@@ -336,7 +357,6 @@ def test_plain_retail_sales_mom_beats_ex_autos_and_yoy_variants() -> None:
     assert release["importance"] == 1
 
 
-
 def test_explicit_cpi_frequency_exposes_exact_series_and_source() -> None:
     yearly = match_release(
         {
@@ -362,14 +382,13 @@ def test_explicit_cpi_frequency_exposes_exact_series_and_source() -> None:
     assert yearly["forecast"] == "2.9%"
     assert yearly["previous"] == "3.2%"
     assert yearly["source"] == "Statistics Canada"
-    assert yearly["series_url"] == (
-        "https://www.tradingview.com/symbols/ECONOMICS-CAIRYY/"
-    )
+    assert yearly["series_url"] == ("https://www.tradingview.com/symbols/ECONOMICS-CAIRYY/")
     assert monthly is not None
     assert monthly["matched_title"] == "Inflation Rate MoM"
     assert monthly["actual"] == "-0.4%"
     assert monthly["forecast"] == "-0.2%"
     assert monthly["previous"] == "1%"
+
 
 # --- release payload: contract fields, display strings, surprise ---
 
@@ -437,8 +456,15 @@ def test_format_display(
 
 def _row(date: datetime, actual: float | None) -> CalendarRow:
     return normalize_calendar_rows(
-        [{"title": "Initial Jobless Claims", "country": "US", "importance": 0,
-          "actual": actual, "date": date.strftime("%Y-%m-%dT%H:%M:%S.000Z")}]
+        [
+            {
+                "title": "Initial Jobless Claims",
+                "country": "US",
+                "importance": 0,
+                "actual": actual,
+                "date": date.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            }
+        ]
     )[0]
 
 
@@ -554,9 +580,7 @@ def test_broadcast_triggers_on_actual_print_and_matched_set_change() -> None:
     # A newly matched item: broadcast.
     assert _release_changed(before, _release_state(_items(pending, printed)))
     # A value that was already present is not a transition.
-    assert not _release_changed(
-        _release_state(_items(printed)), _release_state(_items(printed))
-    )
+    assert not _release_changed(_release_state(_items(printed)), _release_state(_items(printed)))
 
 
 # --- route: enrichment attached, outage degrades to the plain payload ---
