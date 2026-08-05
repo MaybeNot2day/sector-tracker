@@ -4721,11 +4721,15 @@ async function loadOptionsSnapshot(symbol, expiration = "") {
     renderOptionsPanel();
   } catch (error) {
     if (activeSymbol !== symbol || requestId !== optionsLoadToken) return;
-    optionsPanelState = {
-      status: "error",
-      symbol,
-      code: error instanceof Error ? error.message : "options_unavailable",
-    };
+    const code = error instanceof Error ? error.message : "options_unavailable";
+    // No server-side token means options are intentionally off: drop the
+    // section quietly instead of nagging in every equity chart modal.
+    if (code === "options_not_configured") {
+      optionsPanelState = null;
+      renderOptionsPanel();
+      return;
+    }
+    optionsPanelState = { status: "error", symbol, code };
     renderOptionsPanel();
   }
 }
@@ -4755,7 +4759,6 @@ function renderOptionsPanel() {
 
 function optionsErrorMarkup(code) {
   const messages = {
-    options_not_configured: "Add a MarketData.app token to enable GEX analytics.",
     marketdata_auth_failed: "MarketData.app rejected the configured token.",
     marketdata_entitlement_required: "The MarketData.app account does not include this options data.",
     marketdata_rate_limited: "MarketData.app request limit reached. Try again shortly.",
