@@ -1318,6 +1318,7 @@ function renderMarkdown(source) {
   while (index < lines.length) {
     const line = lines[index];
     if (/^\s*```/.test(line)) {
+      const info = line.replace(/^\s*```/, "").trim().toLowerCase();
       const code = [];
       index += 1;
       while (index < lines.length && !/^\s*```/.test(lines[index])) {
@@ -1325,7 +1326,10 @@ function renderMarkdown(source) {
         index += 1;
       }
       index += 1; // closing fence
-      html.push(`<pre><code>${escapeHtml(code.join("\n"))}</code></pre>`);
+      // ```chart fences carry a declarative spec rendered as inline SVG; a
+      // malformed spec falls back to the plain code block, never a broken report.
+      const chart = info === "chart" ? mdChartBlock(code.join("\n")) : null;
+      html.push(chart ?? `<pre><code>${escapeHtml(code.join("\n"))}</code></pre>`);
       continue;
     }
     if (!line.trim()) {
@@ -1465,6 +1469,174 @@ function mdTable(rows) {
     .join("");
   // Wide tables scroll inside the reader instead of stretching the modal.
   return `<div class="table-scroll"><table>${head}<tbody>${body}</tbody></table></div>`;
+}
+
+// --- report charts ---------------------------------------------------------
+// Declarative ```chart blocks: "type/title/unit/labels/series" key-value
+// lines, values comma-separated, an optional "Name:" prefix per series.
+// Escape-first like the rest of the renderer; returns null on any parse
+// problem so the caller can fall back to a plain code block.
+const CHART_SERIES_COLORS = ["var(--accent)", "var(--green)", "var(--red)", "var(--neutral)"];
+
+function mdChartBlock(source) {
+  const spec = { type: "line", title: "", unit: "", labels: [], series: [] };
+  for (const raw of String(source).split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const match = line.match(/^([a-z]+)\s*:\s*(.*)$/i);
+    if (!match) return null;
+    const key = match[1].toLowerCase();
+    const value = match[2].trim();
+    if (key === "type") {
+      spec.type = value.toLowerCase();
+    } else if (key === "title") {
+      spec.title = value;
+    } else if (key === "unit") {
+      spec.unit = value;
+    } else if (key === "labels") {
+      spec.labels = value.split(",").map((item) => item.trim());
+    } else if (key === "series") {
+      const parsed = parseChartSeries(value);
+      if (!parsed) return null;
+      spec.series.push(parsed);
+    } else {
+      return null;
+    }
+  }
+  const minPoints = spec.type === "bar" ? 1 : 2;
+  if (
+    !["line", "bar"].includes(spec.type) ||
+    !spec.series.length ||
+    spec.series.length > CHART_SERIES_COLORS.length ||
+    (spec.type === "bar" && spec.series.length > 1) ||
+    spec.series.some((series) => series.values.length < minPoints || series.values.length > 120)
+  ) {
+    return null;
+  }
+  return chartSvg(spec);
+}
+
+function parseChartSeries(value) {
+  // "Name: 1, 2" names the series; the prefix only counts as a name when
+  // the remainder still parses, so bare "1, 2" or "-0.5, 3" stay unnamed.
+  const colon = value.indexOf(":");
+  let name = "";
+  let numbersRaw = value;
+  if (colon !== -1) {
+    const candidate = value.slice(colon + 1).trim();
+    if (candidate && parseChartNumbers(candidate)) {
+      name = value.slice(0, colon).trim();
+      numbersRaw = candidate;
+    }
+  }
+  const values = parseChartNumbers(numbersRaw);
+  return values ? { name, values } : null;
+}
+
+function parseChartNumbers(raw) {
+  const values = raw.split(",").map((item) => Number(item.trim()));
+  return values.length && values.every(Number.isFinite) ? values : null;
+}
+
+function chartNumber(value) {
+  const abs = Math.abs(value);
+  if (abs >= 1e9) return `${trimZeros((value / 1e9).toFixed(2))}B`;
+  if (abs >= 1e6) return `${trimZeros((value / 1e6).toFixed(2))}M`;
+  if (abs >= 1e4) return `${trimZeros((value / 1e3).toFixed(1))}K`;
+  return trimZeros(value.toFixed(2));
+}
+
+function trimZeros(text) {
+  return text.replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1");
+}
+
+function chartSvg(spec) {
+  const W = 640;
+  const H = 220;
+  const padTop = 10;
+  const padLeft = 10;
+  const padRight = 10;
+  const plotBottom = H - (spec.labels.length ? 26 : 12);
+  const plotW = W - padLeft - padRight;
+  const plotH = plotBottom - padTop;
+  const all = spec.series.flatMap((series) => series.values);
+  let min = Math.min(...all);
+  let max = Math.max(...all);
+  if (spec.type === "bar") {
+    min = Math.min(min, 0);
+    max = Math.max(max, 0);
+  }
+  if (min === max) {
+    min -= 1;
+    max += 1;
+  }
+  const y = (value) => padTop + ((max - value) / (max - min)) * plotH;
+  const parts = [];
+
+  if (min < 0 && max > 0) {
+    const zero = y(0).toFixed(1);
+    parts.push(`<line x1="${padLeft}" y1="${zero}" x2="${W - padRight}" y2="${zero}" stroke="var(--line)" stroke-dasharray="3 3"/>`);
+  }
+
+  const count = Math.max(...spec.series.map((series) => series.values.length));
+  if (spec.type === "bar") {
+    const values = spec.series[0].values;
+    const slot = plotW / values.length;
+    const barW = Math.max(slot * 0.62, 1);
+    values.forEach((value, i) => {
+      const x = padLeft + i * slot + (slot - barW) / 2;
+      const y0 = y(0);
+      const yv = y(value);
+      const top = Math.min(y0, yv);
+      const height = Math.max(Math.abs(y0 - yv), 1);
+      const tone = value < 0 ? "negative" : "positive";
+      const fill = value < 0 ? "var(--red)" : "var(--green)";
+      parts.push(
+        `<rect class="chart-bar ${tone}" x="${x.toFixed(1)}" y="${top.toFixed(1)}" width="${barW.toFixed(1)}" height="${height.toFixed(1)}" fill="${fill}"/>`
+      );
+    });
+  } else {
+    spec.series.forEach((series, seriesIndex) => {
+      const step = plotW / (series.values.length - 1);
+      const points = series.values
+        .map((value, i) => `${(padLeft + i * step).toFixed(1)},${y(value).toFixed(1)}`)
+        .join(" ");
+      parts.push(
+        `<polyline points="${points}" fill="none" stroke="${CHART_SERIES_COLORS[seriesIndex]}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`
+      );
+    });
+  }
+
+  const unitSuffix = spec.unit ? ` ${escapeHtml(spec.unit)}` : "";
+  parts.push(
+    `<text x="${padLeft + 2}" y="${padTop + 10}" class="chart-axis">${escapeHtml(chartNumber(max))}${unitSuffix}</text>`,
+    `<text x="${padLeft + 2}" y="${(plotBottom - 4).toFixed(1)}" class="chart-axis">${escapeHtml(chartNumber(min))}${unitSuffix}</text>`
+  );
+
+  if (spec.labels.length) {
+    const shown = Math.min(spec.labels.length, 8);
+    for (let i = 0; i < shown; i += 1) {
+      const sourceIndex = Math.round((i * (spec.labels.length - 1)) / Math.max(shown - 1, 1));
+      const x = spec.labels.length === 1
+        ? padLeft + plotW / 2
+        : padLeft + (sourceIndex * plotW) / (spec.labels.length - 1);
+      parts.push(
+        `<text x="${x.toFixed(1)}" y="${H - 8}" class="chart-axis" text-anchor="middle">${escapeHtml(spec.labels[sourceIndex] || "")}</text>`
+      );
+    }
+  }
+
+  const legend = spec.series.some((series) => series.name)
+    ? `<div class="report-chart-legend">${spec.series
+        .map((series, i) => {
+          const last = series.values[series.values.length - 1];
+          return `<span><i style="background:${CHART_SERIES_COLORS[i]}"></i>${escapeHtml(series.name || `Series ${i + 1}`)} ${escapeHtml(chartNumber(last))}${unitSuffix}</span>`;
+        })
+        .join("")}</div>`
+    : "";
+  const caption = spec.title ? `<figcaption>${escapeHtml(spec.title)}</figcaption>` : "";
+  const label = escapeHtml(spec.title || "Report chart");
+  return `<figure class="report-chart">${caption}<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${label}" preserveAspectRatio="none">${parts.join("")}</svg>${legend}</figure>`;
 }
 
 function mdInline(text) {

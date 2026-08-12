@@ -92,6 +92,24 @@ report body navigate the reader in place, and a bare `https://<board>/#report=<i
 URL boots the dashboard with that report open. Obsidian-style YAML frontmatter
 is stripped from previews and the rendered view; the renderer escapes all HTML.
 
+Reports can carry data-bearing charts: a fenced ` ```chart ` block with a small
+declarative spec renders as an inline SVG (no external assets, values frozen in
+the report). A malformed spec falls back to a plain code block.
+
+~~~markdown
+```chart
+type: bar            # bar | line (default line)
+title: Crypto ETF flows, $M
+unit: $M             # optional, appended to value labels
+labels: Mon, Tue, Wed, Thu, Fri
+series: 120, -45, 300, 210, -80
+```
+~~~
+
+Line charts accept up to four series, optionally named (`series: SPY: 0.2, 0.8, 1.4`);
+named series get a legend with the last value. Bar charts take one series and color
+bars by sign. Limits: 120 points per series.
+
 Push a report (the write routes honor `EDIT_TOKEN` via `X-Edit-Token`, same as watchlist
 edits):
 

@@ -4620,6 +4620,56 @@ a.key-date-row:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.report-chart {
+  margin: 12px 0;
+  padding: 10px 12px 8px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.report-chart figcaption {
+  margin-bottom: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--muted-strong);
+}
+
+.report-chart svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.report-chart .chart-axis {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  fill: var(--muted);
+}
+
+.report-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted-strong);
+}
+
+.report-chart-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.report-chart-legend i {
+  width: 10px;
+  height: 3px;
+  border-radius: 1px;
+}
+
 @media (max-width: 700px) {
   .reports-shell {
     width: 100%;

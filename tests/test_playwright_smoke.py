@@ -1027,6 +1027,27 @@ def test_reports_modal_lists_reports_and_renders_escaped_markdown_reader(
     expect(body.locator("p").filter(has_text="Sources: Al Jazeera")).to_contain_text(
         "(https://example.com/oil-prices-jump)"
     )
+    # ```chart fences render as inline SVG figures: the bar chart colors by
+    # sign, the two-series line chart draws a legend with last values, the
+    # malformed spec falls back to a plain code block, and language fences
+    # stay untouched code.
+    charts = body.locator(".report-chart")
+    expect(charts).to_have_count(2)
+    bar_chart = charts.first
+    expect(bar_chart.locator("figcaption")).to_have_text("Crypto ETF flows, $M")
+    expect(bar_chart.locator("rect.chart-bar")).to_have_count(5)
+    expect(bar_chart.locator("rect.chart-bar.negative")).to_have_count(2)
+    expect(bar_chart.locator("text").filter(has_text="Mon")).to_have_count(1)
+    line_chart = charts.nth(1)
+    expect(line_chart.locator("polyline")).to_have_count(2)
+    legend = line_chart.locator(".report-chart-legend span")
+    expect(legend).to_have_count(2)
+    expect(legend.first).to_have_text("SPY 2 %")
+    expect(legend.nth(1)).to_have_text("QQQ 2.6 %")
+    expect(body.locator("pre code").filter(has_text="not, numbers, at, all")).to_have_count(1)
+    expect(
+        body.locator("pre code").filter(has_text="fence with language stays code")
+    ).to_have_count(1)
 
     # Cross-report hash links navigate the reader in place: no reload, no new
     # tab, back button still returns to the list.
@@ -2093,6 +2114,29 @@ REPORT_BODY_MARKDOWN = "\n".join(
         "",
         "Coverage: [Levels Watch](#report=6) and",
         "[board link](https://dashboard.example/#report=6).",
+        "",
+        "```chart",
+        "type: bar",
+        "title: Crypto ETF flows, $M",
+        "labels: Mon, Tue, Wed, Thu, Fri",
+        "series: 120, -45, 300, 210, -80",
+        "```",
+        "",
+        "```chart",
+        "type: line",
+        "title: SPY vs QQQ, 5d %",
+        "unit: %",
+        "series: SPY: 0.2, 0.8, 1.4, 1.1, 2.0",
+        "series: QQQ: -0.3, 0.5, 1.9, 1.6, 2.6",
+        "```",
+        "",
+        "```chart",
+        "series: not, numbers, at, all",
+        "```",
+        "",
+        "```python",
+        "print('fence with language stays code')",
+        "```",
         "",
         "<script>alert(1)</script>",
     ]
