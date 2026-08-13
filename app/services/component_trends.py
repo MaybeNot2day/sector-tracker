@@ -14,9 +14,12 @@ a broken scrape must never blank the dashboard section.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
+from collections.abc import Mapping
 from datetime import UTC, datetime
+from pathlib import Path
 from time import monotonic
 from typing import Any
 
@@ -89,19 +92,31 @@ async def _fetch_category(
     return {"slug": slug, "label": label, "url": url, "charts": charts}
 
 
-async def component_trends_payload() -> dict[str, object]:
-    """The /api/component-trends payload, cached for CACHE_SECONDS."""
+async def component_trends_payload(store_path: Path | None = None) -> dict[str, object]:
+    """The /api/component-trends payload.
+
+    Priority: fresh in-memory cache, fresh pushed store (datacenter hosts
+    cannot scrape PCPartPicker — Cloudflare 403s their IP ranges, so a
+    residential-network pusher POSTs the payload in), live scrape (works in
+    local development), then any stale fallback rather than an empty rail.
+    """
     async with _lock:
         if _cache["payload"] is not None and monotonic() - float(_cache["at"]) < CACHE_SECONDS:
             return _cache["payload"]  # type: ignore[no-any-return]
+        pushed = _load_store(store_path)
+        if pushed is not None and _payload_age_seconds(pushed) < PUSH_FRESH_SECONDS:
+            _cache["payload"] = pushed
+            _cache["at"] = monotonic()
+            return pushed
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
             results = await asyncio.gather(
                 *(_fetch_category(client, slug, label) for slug, label in CATEGORIES)
             )
         categories = [category for category in results if category is not None]
         if not categories:
-            if _cache["payload"] is not None:
-                return _cache["payload"]  # type: ignore[no-any-return]
+            for fallback in (pushed, _cache["payload"]):
+                if fallback is not None:
+                    return fallback
             return {"as_of": _now_iso(), "source": f"{BASE_URL}/trends/", "categories": []}
         payload: dict[str, object] = {
             "as_of": _now_iso(),
@@ -111,6 +126,82 @@ async def component_trends_payload() -> dict[str, object]:
         _cache["payload"] = payload
         _cache["at"] = monotonic()
         return payload
+
+
+# --- pushed store ----------------------------------------------------------
+# A machine whose egress Cloudflare tolerates runs
+# scripts/component_trends_pusher.py and POSTs the scraped payload here.
+STORE_BASENAME = "component_trends.json"
+PUSH_FRESH_SECONDS = 72 * 3600.0
+_MAX_CATEGORIES = 12
+_MAX_CHARTS = 60
+
+
+def store_file(database_path: Path) -> Path:
+    return database_path.parent / STORE_BASENAME
+
+
+def normalize_pushed_payload(raw: Mapping[str, Any]) -> dict[str, object] | None:
+    """Validated, normalized copy of a pushed payload; None when malformed."""
+    raw_categories = raw.get("categories")
+    if not isinstance(raw_categories, list) or not 1 <= len(raw_categories) <= _MAX_CATEGORIES:
+        return None
+    categories: list[dict[str, object]] = []
+    for entry in raw_categories:
+        if not isinstance(entry, Mapping):
+            return None
+        slug = str(entry.get("slug") or "").strip()
+        label = str(entry.get("label") or "").strip()
+        url = str(entry.get("url") or "").strip()
+        raw_charts = entry.get("charts")
+        if (
+            not re.fullmatch(r"[a-z0-9-]{2,40}", slug)
+            or not label
+            or len(label) > 40
+            or not url.startswith(f"{BASE_URL}/")
+            or not isinstance(raw_charts, list)
+            or not 1 <= len(raw_charts) <= _MAX_CHARTS
+        ):
+            return None
+        charts: list[dict[str, str]] = []
+        for chart in raw_charts:
+            if not isinstance(chart, Mapping):
+                return None
+            title = str(chart.get("title") or "").strip()
+            image = str(chart.get("image") or "").strip()
+            if not title or len(title) > 120 or not image.startswith(IMAGE_PREFIX):
+                return None
+            charts.append({"title": title, "image": image})
+        categories.append({"slug": slug, "label": label, "url": url, "charts": charts})
+    return {"as_of": _now_iso(), "source": f"{BASE_URL}/trends/", "categories": categories}
+
+
+def save_pushed_payload(store_path: Path, payload: dict[str, object]) -> None:
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    temp = store_path.with_suffix(".tmp")
+    temp.write_text(json.dumps(payload), encoding="utf-8")
+    temp.replace(store_path)
+    # The next GET must serve the fresh push, not yesterday's memory cache.
+    _cache["payload"] = payload
+    _cache["at"] = monotonic()
+
+
+def _load_store(store_path: Path | None) -> dict[str, object] | None:
+    if store_path is None:
+        return None
+    try:
+        raw = json.loads(store_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return raw if isinstance(raw, dict) and isinstance(raw.get("categories"), list) else None
+
+
+def _payload_age_seconds(payload: Mapping[str, Any]) -> float:
+    try:
+        as_of = datetime.fromisoformat(str(payload.get("as_of") or "").replace("Z", "+00:00"))
+    except ValueError:
+        return float("inf")
+    return (datetime.now(UTC) - as_of).total_seconds()
 
 
 def _now_iso() -> str:

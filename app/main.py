@@ -13,7 +13,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from threading import Lock
 from time import monotonic
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
 from fastapi import (
     Depends,
@@ -55,7 +55,13 @@ from app.scheduler import (
     stop_task,
 )
 from app.services.asset_profile import AssetProfileService
-from app.services.component_trends import component_trends_payload, fetch_trend_image
+from app.services.component_trends import (
+    component_trends_payload,
+    fetch_trend_image,
+    normalize_pushed_payload,
+    save_pushed_payload,
+)
+from app.services.component_trends import store_file as component_trends_store
 from app.services.crypto_etf_flows import CryptoEtfFlowService
 from app.services.daily_board import DailyBoardService
 from app.services.econ_calendar import EconCalendarService, key_dates_payload
@@ -830,7 +836,27 @@ async def trends(days: int = Query(default=90, ge=14, le=365)) -> dict[str, obje
 @app.get("/api/component-trends")
 async def component_trends() -> dict[str, object]:
     """PCPartPicker daily component price-trend charts, cached server-side."""
-    return await component_trends_payload()
+    return await component_trends_payload(component_trends_store(app.state.settings.database_path))
+
+
+@app.post("/api/component-trends", dependencies=[Depends(require_edit_token)])
+async def push_component_trends(payload: dict[str, object]) -> dict[str, object]:
+    """Ingest a scraped component-trends payload from an off-box pusher.
+
+    Cloudflare 403s PCPartPicker page fetches from datacenter IP ranges, so
+    a residential-network machine runs scripts/component_trends_pusher.py
+    and POSTs the gallery lists here (image URLs stay CDN-prefix locked).
+    """
+    normalized = normalize_pushed_payload(payload)
+    if normalized is None:
+        raise HTTPException(status_code=422, detail="component_trends_invalid")
+    await asyncio.to_thread(
+        save_pushed_payload,
+        component_trends_store(app.state.settings.database_path),
+        normalized,
+    )
+    categories = cast("list[dict[str, object]]", normalized["categories"])
+    return {"status": "ok", "categories": len(categories)}
 
 
 @app.get("/api/component-image")
