@@ -1621,6 +1621,24 @@ h1 {
   color: var(--accent);
 }
 
+/* Countdown until the print: accent mono so "in 1h 42m" reads as live state,
+   not metadata. The ::after separator hides together with an expired timer. */
+.key-date-countdown {
+  font-style: normal;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.key-date-countdown::after {
+  content: " \00b7 ";
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.key-date-countdown[hidden] {
+  display: none;
+}
+
 .key-date-tag {
   min-width: 58px;
   font-family: var(--font-mono);

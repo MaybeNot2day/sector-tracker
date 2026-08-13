@@ -194,6 +194,12 @@ def test_daily_board_loads_without_page_errors_and_renders_core_sections(
     assert key_date_rows.nth(1).get_attribute("href") is None
     assert key_date_rows.nth(2).evaluate("row => row.tagName") == "DIV"
     assert key_date_rows.nth(2).get_attribute("href") is None
+    # The pending future print ticks a countdown chip; released and untimed
+    # rows stay clean (a passed instant renders no timer).
+    countdown = key_date_rows.nth(1).locator(".key-date-countdown")
+    expect(countdown).to_have_text(re.compile(r"^in 1h 3[0-5]m$"))
+    expect(cpi_row.locator(".key-date-countdown")).to_have_count(0)
+    expect(key_date_rows.nth(2).locator(".key-date-countdown")).to_have_count(0)
 
     # The compact ribbon excludes today's already-released CPI, then surfaces
     # the next two actionable events without duplicating the full calendar.
@@ -1803,12 +1809,17 @@ NEWS_PAYLOAD: dict[str, Any] = {
 # as_of pins the relative-day labels; release objects exercise the economic
 # calendar enrichment: released with surprise + high importance, pending
 # (actual null), and unmatched (release null — the common non-macro case).
+# The pending print carries a runtime-computed future time_utc so the
+# countdown chip renders deterministically ("in 1h 3Xm").
+_COUNTDOWN_AT = (datetime.now(UTC) + timedelta(minutes=95)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
 KEY_DATES_PAYLOAD: dict[str, Any] = {
     "as_of": "2026-07-09",
     "key_dates": [
         {
             "date": "2026-07-09",
             "time": "14:30 CET",
+            "time_utc": "2026-07-09T12:30:00Z",
             "title": "US June CPI (M-o-M)",
             "category": "MACRO",
             "release": {
@@ -1830,6 +1841,7 @@ KEY_DATES_PAYLOAD: dict[str, Any] = {
         {
             "date": "2026-07-10",
             "time": "08:30 ET",
+            "time_utc": _COUNTDOWN_AT,
             "title": "US Retail Sales",
             "category": "MACRO",
             "release": {
@@ -1847,6 +1859,7 @@ KEY_DATES_PAYLOAD: dict[str, Any] = {
         {
             "date": "2026-07-14",
             "time": None,
+            "time_utc": None,
             "title": "TSLA earnings",
             "category": "EARNINGS",
             "release": None,

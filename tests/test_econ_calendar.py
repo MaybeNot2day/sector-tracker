@@ -641,6 +641,8 @@ def test_route_attaches_release_from_service(key_dates_app: Any) -> None:
     (item,) = payload["key_dates"]
     assert item["title"] == "US Initial Jobless Claims"
     assert item["release"] == release
+    # The item-level countdown instant mirrors the matched row's moment.
+    assert item["time_utc"] == "2026-07-16T12:30:00Z"
 
 
 def test_route_serves_plain_payload_when_enrichment_fails(key_dates_app: Any) -> None:
@@ -650,9 +652,20 @@ def test_route_serves_plain_payload_when_enrichment_fails(key_dates_app: Any) ->
     (item,) = response.json()["key_dates"]
     assert item["title"] == "US Initial Jobless Claims"
     assert item["release"] is None
+    assert item["time_utc"] == _stored_event_utc()
 
 
 def test_route_serves_plain_payload_without_a_service(key_dates_app: Any) -> None:
-    # Lifespan never ran (unit-test style): the key must still be present.
+    # Lifespan never ran (unit-test style): the key must still be present,
+    # and the zoned stored time ("08:30 ET") resolves to a UTC instant so
+    # the countdown works for unmatched events too.
     (item,) = TestClient(app).get("/api/key-dates").json()["key_dates"]
     assert item["release"] is None
+    assert item["time_utc"] == _stored_event_utc()
+
+
+def _stored_event_utc() -> str:
+    local = datetime.fromisoformat(f"{eastern(1)}T08:30:00").replace(
+        tzinfo=ZoneInfo("America/New_York")
+    )
+    return local.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")

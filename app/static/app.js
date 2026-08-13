@@ -505,6 +505,11 @@ function init() {
   window.setInterval(() => {
     if (!document.hidden && feedMode !== "ws" && hasHotKeyDate()) fetchKeyDates();
   }, 30000);
+  // Key-date countdowns tick client-side between refetches so time-remaining
+  // stays honest without re-rendering the rail.
+  window.setInterval(() => {
+    if (!document.hidden) refreshKeyDateCountdowns();
+  }, 30000);
   // WS pushes news instantly; polling is the fallback for serverless hosts.
   window.setInterval(() => {
     if (document.hidden) return;
@@ -2770,6 +2775,10 @@ function keyDateRow(item, asOf) {
   const release = item.release || null;
   const series = [release?.country, release?.matched_title].filter(Boolean).join(" \u00b7 ");
   const meta = [relative, item.time, series].filter(Boolean).join(" \u00b7 ");
+  const countdown = keyDateCountdownText(item.time_utc);
+  const countdownHtml = countdown
+    ? `<em class="key-date-countdown" data-countdown-utc="${escapeHtml(item.time_utc)}">${escapeHtml(countdown)}</em>`
+    : "";
   // The indicator description rides as a native title: the list scrolls
   // (overflow-y: auto), which would clip the help-tip CSS popover.
   const tooltipText = [
@@ -2786,11 +2795,43 @@ function keyDateRow(item, asOf) {
     <span class="key-date-chip"><em>${month ? KEY_DATE_MONTHS[month - 1] : "--"}</em><strong>${day || "--"}</strong></span>
     <div class="key-date-main">
       <strong>${escapeHtml(item.title)}</strong>
-      ${meta ? `<span>${escapeHtml(meta)}</span>` : ""}
+      ${countdownHtml || meta ? `<span>${countdownHtml}${escapeHtml(meta)}</span>` : ""}
       ${release ? keyDateFigures(release) : ""}
     </div>
     <span class="key-date-tags">${high ? '<span class="key-date-tag key-tag-high">HIGH</span>' : ""}<span class="key-date-tag key-tag-${classToken(item.category, "event")}">${escapeHtml(item.category || "EVENT")}</span></span>
   ${tagClose}`;
+}
+
+// Countdown for the Key Dates rail: readers in any timezone see "in 1h 42m"
+// instead of converting the event's printed zone by hand. Instants come from
+// the payload's per-item time_utc (matched calendar row, else the stored
+// zoned time). Only near events tick — beyond 48h the day label reads better.
+function keyDateCountdownText(timeUtc) {
+  const at = Date.parse(timeUtc || "");
+  if (Number.isNaN(at)) return null;
+  const delta = at - Date.now();
+  // Keep "due" on screen through the hot window so a reader arriving right
+  // at release time sees the print is in flight, not a vanished timer.
+  if (delta <= 0) return delta > -45 * 60000 ? "due" : null;
+  if (delta > 48 * 3600000) return null;
+  const minutes = Math.round(delta / 60000);
+  if (minutes < 1) return "due";
+  if (minutes < 60) return `in ${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `in ${hours}h ${rest}m` : `in ${hours}h`;
+}
+
+function refreshKeyDateCountdowns() {
+  document.querySelectorAll(".key-date-countdown").forEach((element) => {
+    const text = keyDateCountdownText(element.dataset.countdownUtc);
+    if (text) {
+      element.textContent = text;
+      element.hidden = false;
+    } else {
+      element.hidden = true;
+    }
+  });
 }
 
 function keyDateFigures(release) {

@@ -25,7 +25,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -597,7 +597,24 @@ async def key_dates_payload(
             await service.enrich(items)
         except Exception:
             logger.exception("key-dates enrichment failed")
-    # Contract: every item carries the key, null when unmatched/unavailable.
+    # Contract: every item carries both keys, null when unmatched/unavailable.
+    # `time_utc` powers the frontend countdown: the matched calendar row's
+    # instant when enrichment landed, else the stored zoned time ("16:30 CET").
     for item in items:
         item.setdefault("release", None)
+        release = item.get("release")
+        moment: str | None = None
+        if isinstance(release, dict):
+            moment = cast(str | None, release.get("time_utc"))
+        if moment is None:
+            try:
+                event_date = date.fromisoformat(str(item.get("date") or ""))
+            except ValueError:
+                event_date = None
+            if event_date is not None:
+                time_raw = item.get("time")
+                parsed = _event_moment_utc(event_date, str(time_raw) if time_raw else None)
+                if parsed is not None:
+                    moment = parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
+        item["time_utc"] = moment
     return {"key_dates": items, "as_of": today.isoformat()}
