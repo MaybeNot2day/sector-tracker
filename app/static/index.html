@@ -17,7 +17,7 @@
         }
       } catch {}
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260813-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260813-3" />
   </head>
   <body>
     <aside id="news-panel" class="news-panel" aria-label="Live Telegram news" aria-hidden="true" inert>
@@ -281,6 +281,13 @@
         <div id="trends-grid" class="trends-grid">
           <div class="empty-state">Loading trends</div>
         </div>
+        <div class="market-tools trends-tools components-tools">
+          <div class="category-tabs" id="components-tabs" role="group" aria-label="Component category"></div>
+          <span class="trends-note">PC component street prices · daily charts by <a href="https://pcpartpicker.com/trends/" target="_blank" rel="noopener noreferrer">PCPartPicker</a></span>
+        </div>
+        <div id="components-grid" class="trends-grid components-grid">
+          <div class="empty-state">Loading component prices</div>
+        </div>
       </section>
     </main>
 
@@ -402,6 +409,6 @@
 
     <div id="help-tooltip" class="help-tooltip" role="tooltip" hidden></div>
 
-    <script src="/static/app.js?v=20260813-2" defer></script>
+    <script src="/static/app.js?v=20260813-5" defer></script>
   </body>
 </html>

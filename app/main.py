@@ -55,6 +55,7 @@ from app.scheduler import (
     stop_task,
 )
 from app.services.asset_profile import AssetProfileService
+from app.services.component_trends import component_trends_payload, fetch_trend_image
 from app.services.crypto_etf_flows import CryptoEtfFlowService
 from app.services.daily_board import DailyBoardService
 from app.services.econ_calendar import EconCalendarService, key_dates_payload
@@ -824,6 +825,26 @@ async def trends(days: int = Query(default=90, ge=14, le=365)) -> dict[str, obje
     )
     _trends_cache[days] = (monotonic(), payload)
     return payload
+
+
+@app.get("/api/component-trends")
+async def component_trends() -> dict[str, object]:
+    """PCPartPicker daily component price-trend charts, cached server-side."""
+    return await component_trends_payload()
+
+
+@app.get("/api/component-image")
+async def component_image(src: str = Query(min_length=1, max_length=300)) -> Response:
+    """Same-origin proxy for PCPartPicker trend PNGs (CDN-prefix locked)."""
+    result = await fetch_trend_image(src)
+    if result is None:
+        raise HTTPException(status_code=404, detail="image_not_found")
+    data, content_type = result
+    return Response(
+        content=data,
+        media_type=content_type,
+        headers={"Cache-Control": "public, max-age=21600"},
+    )
 
 
 @app.get("/api/options/{symbol}")

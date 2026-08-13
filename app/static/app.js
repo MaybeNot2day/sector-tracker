@@ -17,6 +17,8 @@ const fringeView = document.querySelector("#fringe-view");
 const trendsView = document.querySelector("#trends-view");
 const trendsGrid = document.querySelector("#trends-grid");
 const trendsRangeButtons = Array.from(document.querySelectorAll("#trends-range button"));
+const componentsTabs = document.querySelector("#components-tabs");
+const componentsGrid = document.querySelector("#components-grid");
 const fringeBoard = document.querySelector("#fringe-board");
 const marketSearch = document.querySelector("#market-search");
 const marketFilterClear = document.querySelector("#market-filter-clear");
@@ -116,6 +118,11 @@ let trendsFetchedAt = 0;
 let trendsLoadToken = 0;
 let pendingChartFromUrl = null;
 let restoringUrlState = false;
+const COMPONENTS_TTL_MS = 60 * 60 * 1000;
+let latestComponents = null;
+let componentsCategory = "memory";
+let componentsFetchedAt = 0;
+let componentsLoading = false;
 let activeReportId = null;
 let reportOpenToken = 0;
 const BOARD_CACHE_KEY = "board-cache-v1";
@@ -625,6 +632,10 @@ function init() {
     const card = event.target.closest(".trend-card");
     if (card) filterMarketsByGroup(card.dataset.group || "");
   });
+  componentsTabs.addEventListener("click", (event) => {
+    const chip = event.target.closest("button[data-slug]");
+    if (chip) selectComponentsCategory(chip.dataset.slug || "");
+  });
   modalClose.addEventListener("click", closeModal);
   modal.addEventListener("click", (event) => {
     if (event.target === modal) closeModal();
@@ -729,6 +740,7 @@ function groupCategory(group) {
 // the window start, shaded min–max envelope, equal-weight average line.
 
 async function renderTrendsView() {
+  loadComponentTrends();
   if (
     latestTrends &&
     latestTrends.days === trendsDays &&
@@ -764,6 +776,66 @@ function selectTrendsRange(days) {
     button.setAttribute("aria-pressed", String(active));
   });
   renderTrendsView();
+}
+
+// --- PCPartPicker component prices ------------------------------------------
+// The source publishes daily-regenerated PNG charts (no data API); the
+// backend scrapes each category's gallery and we hotlink the CDN images.
+async function loadComponentTrends() {
+  if (latestComponents && Date.now() - componentsFetchedAt < COMPONENTS_TTL_MS) return;
+  if (componentsLoading) return;
+  componentsLoading = true;
+  try {
+    const response = await fetch("/api/component-trends");
+    if (!response.ok) throw new Error("components_failed");
+    const payload = await response.json();
+    latestComponents = payload;
+    componentsFetchedAt = Date.now();
+    if (!payload.categories?.some((category) => category.slug === componentsCategory)) {
+      componentsCategory = payload.categories?.[0]?.slug || componentsCategory;
+    }
+    renderComponentsSection();
+  } catch (error) {
+    if (!latestComponents) {
+      componentsGrid.innerHTML =
+        '<div class="empty-state">PCPartPicker trends unavailable</div>';
+    }
+  } finally {
+    componentsLoading = false;
+  }
+}
+
+function renderComponentsSection() {
+  const categories = latestComponents?.categories || [];
+  if (!categories.length) {
+    componentsTabs.innerHTML = "";
+    componentsGrid.innerHTML =
+      '<div class="empty-state">PCPartPicker trends unavailable</div>';
+    return;
+  }
+  componentsTabs.innerHTML = categories
+    .map(
+      (category) =>
+        `<button type="button" data-slug="${escapeHtml(category.slug)}" class="${category.slug === componentsCategory ? "active" : ""}" aria-pressed="${category.slug === componentsCategory}">${escapeHtml(category.label)}</button>`
+    )
+    .join("");
+  const active = categories.find((category) => category.slug === componentsCategory);
+  const charts = active?.charts || [];
+  componentsGrid.innerHTML = charts
+    .map(
+      (chart) =>
+        `<a class="component-card" href="${escapeHtml(active.url)}" target="_blank" rel="noopener noreferrer" title="Open ${escapeHtml(active.label)} trends on PCPartPicker">
+          <header><strong>${escapeHtml(chart.title)}</strong></header>
+          <img src="/api/component-image?src=${encodeURIComponent(chart.image)}" alt="${escapeHtml(`${chart.title} price trend`)}" loading="lazy" decoding="async">
+        </a>`
+    )
+    .join("");
+}
+
+function selectComponentsCategory(slug) {
+  if (!slug || slug === componentsCategory) return;
+  componentsCategory = slug;
+  renderComponentsSection();
 }
 
 function renderTrendsGrid(payload) {

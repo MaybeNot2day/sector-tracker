@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -1346,6 +1347,20 @@ def test_trends_tab_renders_group_bands_and_links_to_markets(page: Page, base_ur
     )
     expect(page.locator(".trend-card")).to_have_count(2)
 
+    # PCPartPicker component prices: category chips render, memory is the
+    # default, images route through the same-origin proxy, chips switch.
+    chips = page.locator("#components-tabs button")
+    expect(chips).to_have_count(2)
+    expect(chips.first).to_have_text("Memory")
+    memory_cards = page.locator(".component-card")
+    expect(memory_cards).to_have_count(2)
+    expect(memory_cards.first.locator("strong")).to_have_text("DDR5-6000 2x32GB")
+    image_src = memory_cards.first.locator("img").get_attribute("src")
+    assert image_src is not None and image_src.startswith("/api/component-image?src=")
+    chips.nth(1).click()
+    expect(page.locator(".component-card")).to_have_count(1)
+    expect(page.locator(".component-card strong")).to_have_text("Ryzen 7 Zen 4 (AM5)")
+
     # A card is a cross-link: it opens Markets filtered to the group.
     page.locator(".trend-card").first.click()
     expect(page.locator("#markets-view")).to_be_visible()
@@ -1401,6 +1416,10 @@ def _stub_board_apis(page: Page) -> None:
         elif path == "/api/trends":
             days = int(parse_qs(parsed.query).get("days", ["90"])[0])
             _fulfill_json(route, {**TRENDS_PAYLOAD, "days": days})
+        elif path == "/api/component-trends":
+            _fulfill_json(route, COMPONENT_TRENDS_PAYLOAD)
+        elif path == "/api/component-image":
+            route.fulfill(status=200, content_type="image/png", body=_PNG_1PX)
         elif path == "/api/reports":
             _fulfill_json(route, _reports_page(parsed.query))
         else:
@@ -1434,6 +1453,44 @@ TRENDS_PAYLOAD: dict[str, Any] = {
                 {"date": "2026-06-09", "min": 100.0, "max": 100.0, "avg": 100.0},
                 {"date": "2026-06-23", "min": 97.4, "max": 111.0, "avg": 104.1},
                 {"date": "2026-07-09", "min": 100.41, "max": 118.59, "avg": 109.5},
+            ],
+        },
+    ],
+}
+
+# Smallest valid PNG (1x1 transparent): the component-image proxy stub body.
+_PNG_1PX = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+)
+
+COMPONENT_TRENDS_PAYLOAD: dict[str, Any] = {
+    "as_of": "2026-07-09T14:00:00Z",
+    "source": "https://pcpartpicker.com/trends/",
+    "categories": [
+        {
+            "slug": "memory",
+            "label": "Memory",
+            "url": "https://pcpartpicker.com/trends/price/memory/",
+            "charts": [
+                {
+                    "title": "DDR5-6000 2x32GB",
+                    "image": "https://cdna.pcpartpicker.com/static/forever/images/trends/a.png",
+                },
+                {
+                    "title": "DDR4-3200 2x16GB",
+                    "image": "https://cdna.pcpartpicker.com/static/forever/images/trends/b.png",
+                },
+            ],
+        },
+        {
+            "slug": "cpu",
+            "label": "CPUs",
+            "url": "https://pcpartpicker.com/trends/price/cpu/",
+            "charts": [
+                {
+                    "title": "Ryzen 7 Zen 4 (AM5)",
+                    "image": "https://cdna.pcpartpicker.com/static/forever/images/trends/c.png",
+                }
             ],
         },
     ],

@@ -58,7 +58,12 @@ The Trends tab draws PCPartPicker-style performance bands for every watchlist
 group from the cached daily bars: each member is indexed to 100 at the window
 start, the shaded envelope spans the min–max member, and the line is the
 equal-weight average (1M/3M/6M/1Y windows via `GET /api/trends?days=`). Cards
-cross-link into the Markets view filtered to that group.
+cross-link into the Markets view filtered to that group. Below the bands, the
+tab embeds [PCPartPicker's](https://pcpartpicker.com/trends/) daily component
+price-trend charts (memory, CPUs, video cards, storage, PSUs, monitors) —
+street prices for DRAM/NAND lead the board's MEMORY equity theme. The backend
+scrapes the public gallery lists (`GET /api/component-trends`, cached 6h) and
+serves the PNGs same-origin through `GET /api/component-image`.
 
 ## Tests
 
