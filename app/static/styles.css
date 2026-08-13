@@ -2169,6 +2169,100 @@ a.key-date-row:focus-visible {
   background: linear-gradient(90deg, var(--red), var(--surface-soft), var(--green));
 }
 
+/* --- Trends view ---------------------------------------------------------- */
+.trends-tools {
+  align-items: center;
+}
+
+.trends-note {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.trends-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  gap: 12px;
+}
+
+.trend-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px 8px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.trend-card:hover,
+.trend-card:focus-visible {
+  border-color: var(--accent-dim);
+}
+
+.trend-card header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.trend-card header strong {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--muted-strong);
+}
+
+.trend-card header em {
+  font-style: normal;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.trend-card header em.positive {
+  color: var(--green);
+}
+
+.trend-card header em.negative {
+  color: var(--red);
+}
+
+.trend-card svg {
+  display: block;
+  width: 100%;
+  height: 110px;
+}
+
+.trend-card footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+@media (max-width: 700px) {
+  .trends-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .trends-note {
+    display: none;
+  }
+}
+
 .map-color-scale i {
   color: var(--muted);
   font-size: 9px;

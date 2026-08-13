@@ -54,6 +54,12 @@ uvicorn app.main:app --reload
 
 Open http://127.0.0.1:8000.
 
+The Trends tab draws PCPartPicker-style performance bands for every watchlist
+group from the cached daily bars: each member is indexed to 100 at the window
+start, the shaded envelope spans the min–max member, and the line is the
+equal-weight average (1M/3M/6M/1Y windows via `GET /api/trends?days=`). Cards
+cross-link into the Markets view filtered to that group.
+
 ## Tests
 
 ```bash

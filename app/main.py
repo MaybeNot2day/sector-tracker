@@ -66,6 +66,7 @@ from app.services.market_context import market_context_payload
 from app.services.news import NewsService
 from app.services.options import MarketDataOptionsService, OptionsDataError
 from app.services.quotes import QuoteService
+from app.services.trends import group_trends_payload
 
 APP_DIR = Path(__file__).parent
 STATIC_DIR = APP_DIR / "static"
@@ -804,6 +805,25 @@ async def snapshots(days: int = Query(default=30, ge=1, le=365)) -> dict[str, ob
     """Persisted daily-board history: regime, breadth, and theme scores by date."""
     rows = await asyncio.to_thread(db.load_board_snapshots, app.state.settings.database_path, days)
     return {"snapshots": rows}
+
+
+# Trend bands aggregate every cached daily bar on each call; a short TTL
+# keeps tab switches and range flips from re-scanning SQLite.
+_trends_cache: dict[int, tuple[float, dict[str, object]]] = {}
+_TRENDS_CACHE_SECONDS = 300.0
+
+
+@app.get("/api/trends")
+async def trends(days: int = Query(default=90, ge=14, le=365)) -> dict[str, object]:
+    """Per-group normalized performance bands (min/avg/max, indexed to 100)."""
+    cached = _trends_cache.get(days)
+    if cached is not None and monotonic() - cached[0] < _TRENDS_CACHE_SECONDS:
+        return cached[1]
+    payload = await asyncio.to_thread(
+        group_trends_payload, app.state.settings.database_path, app.state.groups, days
+    )
+    _trends_cache[days] = (monotonic(), payload)
+    return payload
 
 
 @app.get("/api/options/{symbol}")

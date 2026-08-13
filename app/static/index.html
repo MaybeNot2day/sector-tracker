@@ -17,7 +17,7 @@
         }
       } catch {}
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260812-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260813-1" />
   </head>
   <body>
     <aside id="news-panel" class="news-panel" aria-label="Live Telegram news" aria-hidden="true" inert>
@@ -86,6 +86,15 @@
           aria-selected="false"
           tabindex="-1"
         >Fringe</button>
+        <button
+          id="trends-tab"
+          type="button"
+          role="tab"
+          data-view="trends"
+          aria-controls="trends-view"
+          aria-selected="false"
+          tabindex="-1"
+        >Trends</button>
       </nav>
 
       <div class="topbar-actions">
@@ -258,6 +267,21 @@
           <div class="empty-state">Loading Fringe book</div>
         </div>
       </section>
+
+      <section id="trends-view" class="view-panel" role="tabpanel" aria-labelledby="trends-tab" hidden>
+        <div class="market-tools trends-tools">
+          <div class="category-tabs" id="trends-range" role="group" aria-label="Trend window">
+            <button type="button" data-days="30" aria-pressed="false">1M</button>
+            <button type="button" data-days="90" class="active" aria-pressed="true">3M</button>
+            <button type="button" data-days="180" aria-pressed="false">6M</button>
+            <button type="button" data-days="365" aria-pressed="false">1Y</button>
+          </div>
+          <span class="trends-note">Group performance bands · members indexed to 100 at window start · shaded min–max, line = equal-weight average</span>
+        </div>
+        <div id="trends-grid" class="trends-grid">
+          <div class="empty-state">Loading trends</div>
+        </div>
+      </section>
     </main>
 
     <div id="editor-modal" class="modal" aria-hidden="true">
@@ -378,6 +402,6 @@
 
     <div id="help-tooltip" class="help-tooltip" role="tooltip" hidden></div>
 
-    <script src="/static/app.js?v=20260812-1" defer></script>
+    <script src="/static/app.js?v=20260813-2" defer></script>
   </body>
 </html>

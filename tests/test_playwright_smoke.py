@@ -1206,7 +1206,7 @@ def test_tablet_market_toolbar_and_category_group_fit_viewport(
     )
     expect(page.get_by_role("button", name="Refresh market data")).to_be_visible()
 
-    tools_box = page.locator(".market-tools").bounding_box()
+    tools_box = page.locator("#markets-view .market-tools").bounding_box()
     filter_box = page.locator("#market-filter-status").bounding_box()
     assert tools_box is not None
     assert filter_box is not None
@@ -1233,7 +1233,7 @@ def test_mobile_fringe_cards_prioritize_full_thesis_and_touch_targets(
     expect(page.locator(".fringe-row").first.locator(".fringe-last")).to_be_hidden()
 
     page.locator("#markets-tab").click()
-    category_buttons = page.locator(".category-tabs button")
+    category_buttons = page.locator("#markets-view .category-tabs button")
     for index in range(category_buttons.count()):
         box = category_buttons.nth(index).bounding_box()
         assert box is not None
@@ -1322,6 +1322,36 @@ def _visible_market_row_count(page: Page) -> int:
     )
 
 
+def test_trends_tab_renders_group_bands_and_links_to_markets(page: Page, base_url: str) -> None:
+    page.goto(f"{base_url}/#view=trends", wait_until="domcontentloaded")
+    expect(page.locator("#trends-view")).to_be_visible()
+
+    cards = page.locator(".trend-card")
+    expect(cards).to_have_count(2)
+    # Categories order tradfi before crypto regardless of payload order.
+    expect(cards.first.locator("header strong")).to_have_text("MAG7")
+    expect(cards.first.locator("header em")).to_have_text("+9.50%")
+    expect(cards.first.locator("header em")).to_have_class("positive")
+    expect(cards.nth(1).locator("header strong")).to_have_text("PERPS BASKET")
+    expect(cards.nth(1).locator("header em")).to_have_text("-3.60%")
+    # Band area + average line render as SVG primitives.
+    expect(cards.first.locator("svg path")).to_have_count(1)
+    expect(cards.first.locator("svg polyline")).to_have_count(1)
+    expect(cards.first.locator("footer")).to_contain_text("7 members · tradfi")
+
+    # Range flip refetches the window and keeps the grid populated.
+    page.locator('#trends-range button[data-days="30"]').click()
+    expect(page.locator('#trends-range button[data-days="30"]')).to_have_attribute(
+        "aria-pressed", "true"
+    )
+    expect(page.locator(".trend-card")).to_have_count(2)
+
+    # A card is a cross-link: it opens Markets filtered to the group.
+    page.locator(".trend-card").first.click()
+    expect(page.locator("#markets-view")).to_be_visible()
+    expect(page.locator("#market-filter-status")).to_contain_text("MAG7")
+
+
 def _stub_board_apis(page: Page) -> None:
     quote_requests = 0
 
@@ -1368,12 +1398,46 @@ def _stub_board_apis(page: Page) -> None:
         elif path.startswith("/api/reports/"):
             report_id = int(path.rsplit("/", 1)[-1])
             _fulfill_json(route, REPORT_DETAILS.get(report_id, REPORT_DETAIL_PAYLOAD))
+        elif path == "/api/trends":
+            days = int(parse_qs(parsed.query).get("days", ["90"])[0])
+            _fulfill_json(route, {**TRENDS_PAYLOAD, "days": days})
         elif path == "/api/reports":
             _fulfill_json(route, _reports_page(parsed.query))
         else:
             route.continue_()
 
     page.route("**/api/**", handle)
+
+
+# Two-group trends fixture: a tradfi band that finishes +9.5% (avg 109.5 vs
+# the 100 index base) and a crypto band, enough to pin ordering and the
+# markets cross-link without exercising real bar history.
+TRENDS_PAYLOAD: dict[str, Any] = {
+    "as_of": "2026-07-09T14:00:00Z",
+    "days": 90,
+    "groups": [
+        {
+            "name": "PERPS BASKET",
+            "category": "crypto",
+            "members": 3,
+            "series": [
+                {"date": "2026-06-09", "min": 100.0, "max": 100.0, "avg": 100.0},
+                {"date": "2026-06-23", "min": 84.0, "max": 121.0, "avg": 101.2},
+                {"date": "2026-07-09", "min": 62.0, "max": 140.0, "avg": 96.4},
+            ],
+        },
+        {
+            "name": "MAG7",
+            "category": "tradfi",
+            "members": 7,
+            "series": [
+                {"date": "2026-06-09", "min": 100.0, "max": 100.0, "avg": 100.0},
+                {"date": "2026-06-23", "min": 97.4, "max": 111.0, "avg": 104.1},
+                {"date": "2026-07-09", "min": 100.41, "max": 118.59, "avg": 109.5},
+            ],
+        },
+    ],
+}
 
 
 def _fulfill_json(route: Any, payload: dict[str, Any], *, status: int = 200) -> None:

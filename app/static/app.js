@@ -14,6 +14,9 @@ const viewButtons = Array.from(document.querySelectorAll(".view-tabs button"));
 const dailyView = document.querySelector("#daily-view");
 const marketsView = document.querySelector("#markets-view");
 const fringeView = document.querySelector("#fringe-view");
+const trendsView = document.querySelector("#trends-view");
+const trendsGrid = document.querySelector("#trends-grid");
+const trendsRangeButtons = Array.from(document.querySelectorAll("#trends-range button"));
 const fringeBoard = document.querySelector("#fringe-board");
 const marketSearch = document.querySelector("#market-search");
 const marketFilterClear = document.querySelector("#market-filter-clear");
@@ -21,7 +24,7 @@ const marketLayoutToggle = document.querySelector("#market-layout-toggle");
 const marketMapToggle = document.querySelector("#market-map-toggle");
 const marketMapLegend = document.querySelector("#market-map-legend");
 const marketFilterStatus = document.querySelector("#market-filter-status");
-const categoryButtons = Array.from(document.querySelectorAll(".category-tabs button"));
+const categoryButtons = Array.from(document.querySelectorAll("#markets-view .category-tabs button"));
 const cryptoTapeElement = document.querySelector("#crypto-tape");
 const modal = document.querySelector("#chart-modal");
 const modalShell = document.querySelector("#chart-modal .modal-shell");
@@ -105,6 +108,12 @@ let lastWsFrameAt = 0; // Date.now() of the last WS frame, for zombie detection
 let wsReconnectDelayMs = 3000; // doubles per failed reconnect, capped at 30s
 const WS_STALE_FRAME_MS = 30000;
 let activeView = "daily";
+const TRENDS_TTL_MS = 5 * 60 * 1000;
+const TRENDS_CATEGORY_ORDER = ["tradfi", "crypto", "commodities"];
+let latestTrends = null;
+let trendsDays = 90;
+let trendsFetchedAt = 0;
+let trendsLoadToken = 0;
 let pendingChartFromUrl = null;
 let restoringUrlState = false;
 let activeReportId = null;
@@ -372,7 +381,7 @@ function restoreUrlState() {
   restoringUrlState = true;
   try {
     const view = params.get("view");
-    if (view === "markets" || view === "fringe") selectView(view);
+    if (view === "markets" || view === "fringe" || view === "trends") selectView(view);
     const group = params.get("group");
     if (group) activeGroupFilter = group;
     const query = params.get("q");
@@ -609,6 +618,13 @@ function init() {
   categoryButtons.forEach((button) => {
     button.addEventListener("click", () => selectCategory(button.dataset.category || "tradfi"));
   });
+  trendsRangeButtons.forEach((button) => {
+    button.addEventListener("click", () => selectTrendsRange(Number(button.dataset.days) || 90));
+  });
+  trendsGrid.addEventListener("click", (event) => {
+    const card = event.target.closest(".trend-card");
+    if (card) filterMarketsByGroup(card.dataset.group || "");
+  });
   modalClose.addEventListener("click", closeModal);
   modal.addEventListener("click", (event) => {
     if (event.target === modal) closeModal();
@@ -708,11 +724,115 @@ function groupCategory(group) {
   return "tradfi";
 }
 
+// --- Trends view -----------------------------------------------------------
+// PCPartPicker-style bands per watchlist group: members indexed to 100 at
+// the window start, shaded min–max envelope, equal-weight average line.
+
+async function renderTrendsView() {
+  if (
+    latestTrends &&
+    latestTrends.days === trendsDays &&
+    Date.now() - trendsFetchedAt < TRENDS_TTL_MS
+  ) {
+    renderTrendsGrid(latestTrends);
+    return;
+  }
+  const token = ++trendsLoadToken;
+  if (!latestTrends || latestTrends.days !== trendsDays) {
+    trendsGrid.innerHTML = '<div class="empty-state">Loading trends</div>';
+  }
+  try {
+    const response = await fetch(`/api/trends?days=${trendsDays}`);
+    if (!response.ok) throw new Error("trends_failed");
+    const payload = await response.json();
+    if (token !== trendsLoadToken) return;
+    latestTrends = payload;
+    trendsFetchedAt = Date.now();
+    renderTrendsGrid(payload);
+  } catch (error) {
+    if (token !== trendsLoadToken) return;
+    trendsGrid.innerHTML = '<div class="empty-state">Trends unavailable</div>';
+  }
+}
+
+function selectTrendsRange(days) {
+  if (days === trendsDays) return;
+  trendsDays = days;
+  trendsRangeButtons.forEach((button) => {
+    const active = Number(button.dataset.days) === days;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  renderTrendsView();
+}
+
+function renderTrendsGrid(payload) {
+  const groups = Array.isArray(payload?.groups) ? payload.groups : [];
+  if (!groups.length) {
+    trendsGrid.innerHTML =
+      '<div class="empty-state">No cached daily bars yet — trends build from history refreshes</div>';
+    return;
+  }
+  const ordered = [...groups].sort(
+    (a, b) =>
+      TRENDS_CATEGORY_ORDER.indexOf(a.category) - TRENDS_CATEGORY_ORDER.indexOf(b.category)
+  );
+  trendsGrid.innerHTML = ordered.map(trendCard).join("");
+}
+
+function trendCard(group) {
+  const series = Array.isArray(group.series) ? group.series : [];
+  if (series.length < 2) return "";
+  const last = series[series.length - 1];
+  const delta = numericOrNull(last?.avg);
+  const deltaPct = delta === null ? null : delta - 100;
+  const tone = deltaPct === null ? "" : deltaPct > 0 ? "positive" : deltaPct < 0 ? "negative" : "";
+  const spanLabel = `${keyDateShort(series[0].date)} \u2192 ${keyDateShort(last.date)}`;
+  return `<button type="button" class="trend-card" data-group="${escapeHtml(group.name)}" title="Open ${escapeHtml(displayGroupName(group.name))} in Markets">
+    <header>
+      <strong>${escapeHtml(displayGroupName(group.name))}</strong>
+      <em class="${tone}">${deltaPct === null ? "--" : escapeHtml(formatSignedPct(deltaPct))}</em>
+    </header>
+    ${trendBandSvg(series)}
+    <footer><span>${escapeHtml(spanLabel)}</span><span>${group.members} member${group.members === 1 ? "" : "s"} \u00b7 ${escapeHtml(String(group.category || ""))}</span></footer>
+  </button>`;
+}
+
+function trendBandSvg(series) {
+  const W = 320;
+  const H = 110;
+  const pad = 4;
+  const values = series.flatMap((point) => [point.min, point.max]).filter(Number.isFinite);
+  let lo = Math.min(...values);
+  let hi = Math.max(...values);
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return "";
+  if (hi - lo < 0.5) {
+    hi += 0.25;
+    lo -= 0.25;
+  }
+  const x = (i) => pad + (i * (W - pad * 2)) / (series.length - 1);
+  const y = (value) => pad + ((hi - value) / (hi - lo)) * (H - pad * 2);
+  const upper = series.map((point, i) => `${x(i).toFixed(1)},${y(point.max).toFixed(1)}`);
+  const lowerBack = [...series]
+    .reverse()
+    .map((point, i) => `${x(series.length - 1 - i).toFixed(1)},${y(point.min).toFixed(1)}`);
+  const avgPoints = series
+    .map((point, i) => `${x(i).toFixed(1)},${y(point.avg).toFixed(1)}`)
+    .join(" ");
+  const baseline = lo <= 100 && hi >= 100 ? y(100).toFixed(1) : null;
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Performance band" preserveAspectRatio="none">
+    <path d="M${upper.join(" L")} L${lowerBack.join(" L")} Z" fill="var(--accent)" fill-opacity="0.13"/>
+    ${baseline !== null ? `<line x1="${pad}" y1="${baseline}" x2="${W - pad}" y2="${baseline}" stroke="var(--line)" stroke-dasharray="3 3"/>` : ""}
+    <polyline points="${avgPoints}" fill="none" stroke="var(--accent)" stroke-width="1.6" stroke-linejoin="round"/>
+  </svg>`;
+}
+
 function selectView(view) {
-  activeView = view === "markets" || view === "fringe" ? view : "daily";
+  activeView = ["markets", "fringe", "trends"].includes(view) ? view : "daily";
   dailyView.hidden = activeView !== "daily";
   marketsView.hidden = activeView !== "markets";
   fringeView.hidden = activeView !== "fringe";
+  trendsView.hidden = activeView !== "trends";
   viewButtons.forEach((button) => {
     const selected = button.dataset.view === activeView;
     button.classList.toggle("active", selected);
@@ -720,6 +840,7 @@ function selectView(view) {
     button.tabIndex = selected ? 0 : -1;
   });
   if (activeView === "fringe") renderFringeView();
+  if (activeView === "trends") renderTrendsView();
   // The treemap sizes itself from board.clientWidth, which is 0 while the
   // markets view is hidden (a refresh landing on Daily still renders the
   // board): re-render on entry so the map lays out at the real width.
