@@ -1350,12 +1350,17 @@ def test_watch_tab_builds_persistent_interactive_chart_wall(page: Page, base_url
     expect(page.locator("#watch-status")).to_contain_text("already on the grid")
     expect(tiles).to_have_count(2)
 
-    # Interval flip rebuilds tiles and persists.
-    page.locator('#watch-intervals button[data-interval="1d"]').click()
-    expect(page.locator('#watch-intervals button[data-interval="1d"]')).to_have_attribute(
-        "aria-pressed", "true"
-    )
-    expect(page.locator(".watch-tile")).to_have_count(2)
+    # Interval flips rebuild tiles and persist. Every timeframe must map to
+    # a range the history API accepts (15m once mapped to an invalid "5d"
+    # and blanked all tiles with 422s).
+    for timeframe in ("15m", "1d"):
+        page.locator(f'#watch-intervals button[data-interval="{timeframe}"]').click()
+        expect(
+            page.locator(f'#watch-intervals button[data-interval="{timeframe}"]')
+        ).to_have_attribute("aria-pressed", "true")
+        expect(page.locator(".watch-tile")).to_have_count(2)
+        expect(page.locator('[data-watch-symbol="SPY"] .watch-chart canvas').first).to_be_visible()
+        expect(page.locator(".watch-error")).to_have_count(0)
 
     # Symbols and timeframe survive a reload (localStorage), charts rebuild.
     page.goto(f"{base_url}/?wr=1#view=watch", wait_until="domcontentloaded")
