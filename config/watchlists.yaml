@@ -54,6 +54,36 @@ groups:
     type: equity
     source: yahoo
     exchange: NYSE
+  - symbol: INTC
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Intel
+  - symbol: AMAT
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Applied Materials
+  - symbol: ASML
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: ASML
+  - symbol: QCOM
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Qualcomm
+  - symbol: DELL
+    type: equity
+    source: yahoo
+    exchange: NYSE
+    name: Dell Technologies
+  - symbol: SOXL
+    type: etf
+    source: yahoo
+    exchange: NYSEARCA
+    name: Semiconductor Bull 3X ETF
 - name: MEMORY
   assets:
   - symbol: DRAM
@@ -91,6 +121,15 @@ groups:
     source: yahoo
     exchange: NASDAQ
     name: Seagate Technology
+  - symbol: 285A.T
+    type: equity
+    source: yahoo
+    exchange: TSE
+    name: Kioxia
+  - symbol: CXMT
+    type: equity
+    source: hyperliquid
+    name: ChangXin Memory
 - name: MEMORY_POOLING
   assets:
   - symbol: ALAB
@@ -113,6 +152,16 @@ groups:
     source: yahoo
     exchange: NASDAQ
     name: Marvell Technology
+  - symbol: LITE
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Lumentum
+  - symbol: LYTE
+    type: etf
+    source: yahoo
+    exchange: CBOE
+    name: Photonics & Optics ETF
 - name: MAJORS
   assets:
   - symbol: BTC
@@ -163,6 +212,11 @@ groups:
     source: yahoo
     exchange: NYSE
     name: Circle
+  - symbol: STRC
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Strategy Preferred
 - name: NEOCLOUD
   assets:
   - symbol: CRWV
@@ -190,6 +244,21 @@ groups:
     source: yahoo
     exchange: NASDAQ
     name: TeraWulf
+  - symbol: CBRS
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Cerebras Systems
+  - symbol: SHAZ
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: SharonAI
+  - symbol: NCLD
+    type: etf
+    source: yahoo
+    exchange: NASDAQ
+    name: Neocloud ETF
 - name: METALS
   assets:
   - symbol: XME
@@ -222,6 +291,11 @@ groups:
     source: yahoo
     exchange: NYSE
     name: Alcoa
+  - symbol: USAR
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: USA Rare Earth
 - name: BIOTECH
   assets:
   - symbol: XBI
@@ -254,6 +328,11 @@ groups:
     source: yahoo
     exchange: NASDAQ
     name: CRISPR Therapeutics
+  - symbol: LLY
+    type: equity
+    source: yahoo
+    exchange: NYSE
+    name: Eli Lilly
 - name: POWER_GRID
   assets:
   - symbol: XLU
@@ -291,6 +370,21 @@ groups:
     source: yahoo
     exchange: NASDAQ
     name: Fluence Energy
+  - symbol: GEV
+    type: equity
+    source: yahoo
+    exchange: NYSE
+    name: GE Vernova
+  - symbol: BE
+    type: equity
+    source: yahoo
+    exchange: NYSE
+    name: Bloom Energy
+  - symbol: URNM
+    type: etf
+    source: yahoo
+    exchange: NYSEARCA
+    name: Uranium Miners ETF
 - name: DEFENSE
   assets:
   - symbol: ITA
@@ -380,6 +474,10 @@ groups:
     source: yahoo
     exchange: NASDAQ
     name: Arbe Robotics
+  - symbol: UNITREE
+    type: equity
+    source: hyperliquid
+    name: Unitree Robotics
 - name: SPACE
   assets:
   - symbol: SPCX
@@ -432,6 +530,161 @@ groups:
     source: yahoo
     exchange: NASDAQ
     name: Viasat
+- name: ENTERPRISE_TECH
+  assets:
+  - symbol: PLTR
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Palantir
+  - symbol: ORCL
+    type: equity
+    source: yahoo
+    exchange: NYSE
+    name: Oracle
+  - symbol: IBM
+    type: equity
+    source: yahoo
+    exchange: NYSE
+    name: IBM
+  - symbol: NOW
+    type: equity
+    source: yahoo
+    exchange: NYSE
+    name: ServiceNow
+  - symbol: ZM
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Zoom
+  - symbol: BB
+    type: equity
+    source: yahoo
+    exchange: NYSE
+    name: BlackBerry
+  - symbol: NOK
+    type: equity
+    source: yahoo
+    exchange: NYSE
+    name: Nokia
+- name: CONSUMER
+  assets:
+  - symbol: COST
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Costco
+  - symbol: NFLX
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Netflix
+  - symbol: EBAY
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: eBay
+  - symbol: DKNG
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: DraftKings
+  - symbol: GME
+    type: equity
+    source: yahoo
+    exchange: NYSE
+    name: GameStop
+  - symbol: HIMS
+    type: equity
+    source: yahoo
+    exchange: NYSE
+    name: Hims & Hers
+  - symbol: RIVN
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Rivian
+  - symbol: BIRD
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Smartbird
+- name: FINANCE
+  assets:
+  - symbol: BX
+    type: equity
+    source: yahoo
+    exchange: NYSE
+    name: Blackstone
+  - symbol: QNT
+    type: equity
+    source: yahoo
+    exchange: NASDAQ
+    name: Quantinuum
+- name: AI_CHINA
+  assets:
+  - symbol: BABA
+    type: equity
+    source: yahoo
+    exchange: NYSE
+    name: Alibaba
+  - symbol: ZHIPU
+    type: equity
+    source: hyperliquid
+    name: Zhipu AI
+  - symbol: MINIMAX
+    type: equity
+    source: hyperliquid
+    name: MiniMax AI
+  - symbol: GIGADEV
+    type: equity
+    source: hyperliquid
+    name: GigaDevice
+- name: ASIA_EM
+  assets:
+  - symbol: EWY
+    type: etf
+    source: yahoo
+    exchange: NYSEARCA
+    name: South Korea ETF
+  - symbol: EWJ
+    type: etf
+    source: yahoo
+    exchange: NYSEARCA
+    name: Japan ETF
+  - symbol: EWT
+    type: etf
+    source: yahoo
+    exchange: NYSEARCA
+    name: Taiwan ETF
+  - symbol: EWZ
+    type: etf
+    source: yahoo
+    exchange: NYSEARCA
+    name: Brazil ETF
+  - symbol: KORU
+    type: etf
+    source: yahoo
+    exchange: NYSEARCA
+    name: Korea Bull 3X ETF
+  - symbol: 9984.T
+    type: equity
+    source: yahoo
+    exchange: TSE
+    name: SoftBank Group
+  - symbol: 005380.KS
+    type: equity
+    source: yahoo
+    exchange: KRX
+    name: Hyundai Motor
+  - symbol: JP225
+    type: index_proxy
+    source: hyperliquid
+    name: Nikkei 225 Synth
+  - symbol: KR200
+    type: index_proxy
+    source: hyperliquid
+    name: KOSPI 200 Synth
 - name: ETF_MACRO
   assets:
   - symbol: SPY
@@ -464,6 +717,29 @@ groups:
     source: yahoo
     exchange: NYSEARCA
     name: Oil ETF
+  - symbol: XLE
+    type: etf
+    source: yahoo
+    exchange: NYSEARCA
+    name: Energy Sector ETF
+  - symbol: XYZ100
+    type: index_proxy
+    source: hyperliquid
+    name: HL TradFi 100 Index
+- name: FX
+  assets:
+  - symbol: JPY
+    type: index_proxy
+    source: hyperliquid
+    name: JPY Synth
+  - symbol: EUR
+    type: index_proxy
+    source: hyperliquid
+    name: EUR Synth
+  - symbol: GBP
+    type: index_proxy
+    source: hyperliquid
+    name: GBP Synth
 - name: METALS_FUTURES
   assets:
   - symbol: GC=F
