@@ -1323,6 +1323,56 @@ def _visible_market_row_count(page: Page) -> int:
     )
 
 
+def test_watch_tab_builds_persistent_interactive_chart_wall(page: Page, base_url: str) -> None:
+    page.goto(f"{base_url}/#view=watch", wait_until="domcontentloaded")
+    expect(page.locator("#watch-view")).to_be_visible()
+    expect(page.locator("#watch-grid .empty-state")).to_contain_text("Add up to 6 symbols")
+
+    # Add two symbols; each tile builds a real lightweight-charts instance
+    # (painted canvas, not the 300x150 default of an unrendered chart).
+    for symbol in ("SPY", "BTC"):
+        page.locator("#watch-add").fill(symbol)
+        page.locator("#watch-add").press("Enter")
+    tiles = page.locator(".watch-tile")
+    expect(tiles).to_have_count(2)
+    expect(tiles.first.locator("header strong")).to_have_text("SPY")
+    expect(page.locator('[data-watch-symbol="SPY"] .watch-chart canvas').first).to_be_visible()
+    painted = page.locator('[data-watch-symbol="SPY"] .watch-chart').evaluate(
+        """(host) => Math.max(
+            0, ...Array.from(host.querySelectorAll("canvas")).map((c) => c.width)
+        )"""
+    )
+    assert painted > 310, f"chart canvas never painted (stuck at default: {painted})"
+
+    # Duplicates and the six-tile cap are refused with a status message.
+    page.locator("#watch-add").fill("SPY")
+    page.locator("#watch-add").press("Enter")
+    expect(page.locator("#watch-status")).to_contain_text("already on the grid")
+    expect(tiles).to_have_count(2)
+
+    # Interval flip rebuilds tiles and persists.
+    page.locator('#watch-intervals button[data-interval="1d"]').click()
+    expect(page.locator('#watch-intervals button[data-interval="1d"]')).to_have_attribute(
+        "aria-pressed", "true"
+    )
+    expect(page.locator(".watch-tile")).to_have_count(2)
+
+    # Symbols and timeframe survive a reload (localStorage), charts rebuild.
+    page.goto(f"{base_url}/?wr=1#view=watch", wait_until="domcontentloaded")
+    expect(page.locator(".watch-tile")).to_have_count(2)
+    expect(page.locator('#watch-intervals button[data-interval="1d"]')).to_have_attribute(
+        "aria-pressed", "true"
+    )
+    expect(page.locator('[data-watch-symbol="BTC"] .watch-chart canvas').first).to_be_visible()
+
+    # Tile header opens the full chart modal; remove drops the tile.
+    page.locator('[data-watch-symbol="SPY"] .watch-open').click()
+    expect(page.locator("#chart-modal")).to_have_attribute("aria-hidden", "false")
+    page.keyboard.press("Escape")
+    page.locator('[data-watch-symbol="SPY"] .watch-remove').click()
+    expect(page.locator(".watch-tile")).to_have_count(1)
+
+
 def test_trends_tab_renders_group_bands_and_links_to_markets(page: Page, base_url: str) -> None:
     page.goto(f"{base_url}/#view=trends", wait_until="domcontentloaded")
     expect(page.locator("#trends-view")).to_be_visible()

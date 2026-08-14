@@ -17,7 +17,7 @@
         }
       } catch {}
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260813-3" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260814-1" />
   </head>
   <body>
     <aside id="news-panel" class="news-panel" aria-label="Live Telegram news" aria-hidden="true" inert>
@@ -95,6 +95,15 @@
           aria-selected="false"
           tabindex="-1"
         >Trends</button>
+        <button
+          id="watch-tab"
+          type="button"
+          role="tab"
+          data-view="watch"
+          aria-controls="watch-view"
+          aria-selected="false"
+          tabindex="-1"
+        >Watch</button>
       </nav>
 
       <div class="topbar-actions">
@@ -289,6 +298,31 @@
           <div class="empty-state">Loading component prices</div>
         </div>
       </section>
+
+      <section id="watch-view" class="view-panel" role="tabpanel" aria-labelledby="watch-tab" hidden>
+        <div class="market-tools watch-tools">
+          <label class="market-search watch-add-label" title="Add a symbol to the watch grid">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+            <input
+              id="watch-add"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Add symbol (Enter) — max 6"
+              aria-label="Add a symbol to the watch grid"
+              maxlength="24"
+            />
+          </label>
+          <div class="category-tabs" id="watch-intervals" role="group" aria-label="Watch chart timeframe">
+            <button type="button" data-interval="15m" aria-pressed="false">15m</button>
+            <button type="button" data-interval="1h" class="active" aria-pressed="true">1H</button>
+            <button type="button" data-interval="4h" aria-pressed="false">4H</button>
+            <button type="button" data-interval="1d" aria-pressed="false">1D</button>
+          </div>
+          <span id="watch-status" class="trends-note" aria-live="polite"></span>
+        </div>
+        <div id="watch-grid" class="watch-grid"></div>
+      </section>
     </main>
 
     <div id="editor-modal" class="modal" aria-hidden="true">
@@ -409,6 +443,6 @@
 
     <div id="help-tooltip" class="help-tooltip" role="tooltip" hidden></div>
 
-    <script src="/static/app.js?v=20260813-5" defer></script>
+    <script src="/static/app.js?v=20260814-2" defer></script>
   </body>
 </html>

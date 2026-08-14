@@ -19,6 +19,11 @@ const trendsGrid = document.querySelector("#trends-grid");
 const trendsRangeButtons = Array.from(document.querySelectorAll("#trends-range button"));
 const componentsTabs = document.querySelector("#components-tabs");
 const componentsGrid = document.querySelector("#components-grid");
+const watchView = document.querySelector("#watch-view");
+const watchGrid = document.querySelector("#watch-grid");
+const watchAddInput = document.querySelector("#watch-add");
+const watchStatus = document.querySelector("#watch-status");
+const watchIntervalButtons = Array.from(document.querySelectorAll("#watch-intervals button"));
 const fringeBoard = document.querySelector("#fringe-board");
 const marketSearch = document.querySelector("#market-search");
 const marketFilterClear = document.querySelector("#market-filter-clear");
@@ -123,6 +128,16 @@ let latestComponents = null;
 let componentsCategory = "memory";
 let componentsFetchedAt = 0;
 let componentsLoading = false;
+const WATCH_STORAGE_KEY = "watch-symbols-v1";
+const WATCH_INTERVAL_KEY = "watch-interval-v1";
+const WATCH_MAX = 6;
+const WATCH_REFRESH_MS = 60000;
+const WATCH_RANGES = { "15m": "5d", "1h": "1mo", "4h": "3mo", "1d": "1y" };
+let watchSymbols = [];
+let watchInterval = "1h";
+const watchCharts = new Map();
+let watchRenderToken = 0;
+let chartLibPromise = null; // lazy lightweight-charts loader state (used from init-time deep links)
 let activeReportId = null;
 let reportOpenToken = 0;
 const BOARD_CACHE_KEY = "board-cache-v1";
@@ -388,7 +403,7 @@ function restoreUrlState() {
   restoringUrlState = true;
   try {
     const view = params.get("view");
-    if (view === "markets" || view === "fringe" || view === "trends") selectView(view);
+    if (["markets", "fringe", "trends", "watch"].includes(view || "")) selectView(view);
     const group = params.get("group");
     if (group) activeGroupFilter = group;
     const query = params.get("q");
@@ -476,6 +491,9 @@ function init() {
   setupHelpTooltips();
   // icons are inline SVG; no icon library needed
   setConnection("connecting");
+  // Watch state loads before URL restore: a #view=watch deep link renders
+  // the grid during restoreUrlState and must see the persisted symbols.
+  loadWatchState();
   restoreUrlState();
   window.addEventListener("popstate", restoreReportNavigation);
   restoreCachedBoard();
@@ -635,6 +653,36 @@ function init() {
   componentsTabs.addEventListener("click", (event) => {
     const chip = event.target.closest("button[data-slug]");
     if (chip) selectComponentsCategory(chip.dataset.slug || "");
+  });
+  watchAddInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      addWatchSymbol(watchAddInput.value);
+    }
+  });
+  watchIntervalButtons.forEach((button) => {
+    button.addEventListener("click", () => selectWatchInterval(button.dataset.interval || "1h"));
+  });
+  watchGrid.addEventListener("click", (event) => {
+    const remove = event.target.closest(".watch-remove");
+    if (remove) {
+      removeWatchSymbol(remove.dataset.symbol || "");
+      return;
+    }
+    const open = event.target.closest(".watch-open");
+    if (open) {
+      const symbol = open.dataset.symbol || "";
+      const asset = findAssetConfig(symbol);
+      if (asset) openChart(asset);
+      else openFringeTicker(symbol);
+    }
+  });
+  // In-place candle refresh keeps zoom/scroll; only while the tab is open.
+  window.setInterval(() => {
+    if (!document.hidden && activeView === "watch" && watchCharts.size) refreshWatchData();
+  }, WATCH_REFRESH_MS);
+  window.addEventListener("resize", () => {
+    if (activeView === "watch") resizeWatchCharts();
   });
   modalClose.addEventListener("click", closeModal);
   modal.addEventListener("click", (event) => {
@@ -838,6 +886,224 @@ function selectComponentsCategory(slug) {
   renderComponentsSection();
 }
 
+// --- Watch view --------------------------------------------------------------
+// DexScreener-style grid: up to six symbols, each on its own interactive
+// lightweight-charts candlestick tile, persisted per browser. Charts share
+// one timeframe; data refreshes in place every minute while the tab is open.
+function loadWatchState() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(WATCH_STORAGE_KEY) || "[]");
+    if (Array.isArray(raw)) {
+      watchSymbols = raw
+        .map((symbol) => String(symbol).trim().toUpperCase())
+        .filter((symbol) => /^[A-Z0-9.\-=^]{1,24}$/.test(symbol))
+        .slice(0, WATCH_MAX);
+    }
+    const interval = localStorage.getItem(WATCH_INTERVAL_KEY) || "";
+    if (interval in WATCH_RANGES) watchInterval = interval;
+  } catch (error) {
+    // Private browsing: the grid still works for the session.
+  }
+  watchIntervalButtons.forEach((button) => {
+    const active = button.dataset.interval === watchInterval;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+}
+
+function persistWatchState() {
+  try {
+    localStorage.setItem(WATCH_STORAGE_KEY, JSON.stringify(watchSymbols));
+    localStorage.setItem(WATCH_INTERVAL_KEY, watchInterval);
+  } catch (error) {
+    /* best-effort */
+  }
+}
+
+function setWatchStatus(text) {
+  watchStatus.textContent = text || "";
+}
+
+function addWatchSymbol(rawSymbol) {
+  const symbol = String(rawSymbol || "").trim().toUpperCase();
+  if (!symbol) return;
+  if (!/^[A-Z0-9.\-=^]{1,24}$/.test(symbol)) {
+    setWatchStatus(`"${symbol}" is not a valid symbol`);
+    return;
+  }
+  if (watchSymbols.includes(symbol)) {
+    setWatchStatus(`${symbol} is already on the grid`);
+    return;
+  }
+  if (watchSymbols.length >= WATCH_MAX) {
+    setWatchStatus(`Grid is full — remove a tile first (max ${WATCH_MAX})`);
+    return;
+  }
+  watchSymbols.push(symbol);
+  persistWatchState();
+  setWatchStatus("");
+  watchAddInput.value = "";
+  renderWatchGrid();
+}
+
+function removeWatchSymbol(symbol) {
+  watchSymbols = watchSymbols.filter((item) => item !== symbol);
+  persistWatchState();
+  setWatchStatus("");
+  renderWatchGrid();
+}
+
+function selectWatchInterval(interval) {
+  if (!(interval in WATCH_RANGES) || interval === watchInterval) return;
+  watchInterval = interval;
+  persistWatchState();
+  watchIntervalButtons.forEach((button) => {
+    const active = button.dataset.interval === interval;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  renderWatchGrid();
+}
+
+function destroyWatchCharts() {
+  watchCharts.forEach((entry) => entry.instance.remove());
+  watchCharts.clear();
+}
+
+function watchQuoteLine(symbol) {
+  const asset = findAssetConfig(symbol);
+  const quote = asset?.quote;
+  if (!quote) return "";
+  const last = numericOrNull(displayQuoteValue(quote, "last"));
+  const pct = numericOrNull(displayQuoteValue(quote, "change_pct"));
+  const tone = pct === null ? "" : pct > 0 ? "positive" : pct < 0 ? "negative" : "";
+  const parts = [];
+  if (last !== null) parts.push(escapeHtml(formatPrice(last)));
+  if (pct !== null) parts.push(`<em class="${tone}">${escapeHtml(formatSignedPct(pct))}</em>`);
+  return parts.join(" ");
+}
+
+function renderWatchGrid() {
+  // Charts measure their container: never build while the panel is hidden
+  // (clientWidth 0), selectView re-enters here once the view is visible.
+  if (watchView.hidden) return;
+  const token = ++watchRenderToken;
+  destroyWatchCharts();
+  if (!watchSymbols.length) {
+    watchGrid.innerHTML =
+      '<div class="empty-state">Add up to 6 symbols to build your chart wall — anything the board or Yahoo knows (SPY, NVDA, BTC, CL=F)</div>';
+    return;
+  }
+  watchGrid.innerHTML = watchSymbols
+    .map(
+      (symbol) => `<article class="watch-tile" data-watch-symbol="${escapeHtml(symbol)}">
+        <header>
+          <button type="button" class="watch-open" data-symbol="${escapeHtml(symbol)}" title="Open full ${escapeHtml(symbol)} chart"><strong>${escapeHtml(symbol)}</strong></button>
+          <span class="watch-quote">${watchQuoteLine(symbol)}</span>
+          <button type="button" class="watch-remove" data-symbol="${escapeHtml(symbol)}" aria-label="Remove ${escapeHtml(symbol)} from watch grid">&times;</button>
+        </header>
+        <div class="watch-chart" data-watch-chart="${escapeHtml(symbol)}"><span class="loading-spinner" aria-hidden="true"></span></div>
+      </article>`
+    )
+    .join("");
+  watchSymbols.forEach((symbol) => loadWatchChart(symbol, token));
+}
+
+async function loadWatchChart(symbol, token) {
+  const container = watchGrid.querySelector(`[data-watch-chart="${CSS.escape(symbol)}"]`);
+  if (!container) return;
+  try {
+    const range = WATCH_RANGES[watchInterval];
+    const [response] = await Promise.all([
+      fetch(`/api/history/${encodeURIComponent(symbol)}?interval=${watchInterval}&range=${range}`),
+      ensureChartLibrary(),
+    ]);
+    if (!response.ok) throw new Error("history_failed");
+    const payload = await response.json();
+    if (token !== watchRenderToken) return;
+    const bars = (payload.bars || [])
+      .map((bar) => ({
+        time: toChartTime(bar.timestamp, watchInterval),
+        open: numericOrNull(bar.open),
+        high: numericOrNull(bar.high),
+        low: numericOrNull(bar.low),
+        close: numericOrNull(bar.close),
+      }))
+      .filter(
+        (bar) =>
+          Number.isFinite(bar.open) &&
+          Number.isFinite(bar.high) &&
+          Number.isFinite(bar.low) &&
+          Number.isFinite(bar.close)
+      );
+    if (!bars.length) throw new Error("no_history");
+    container.replaceChildren();
+    const colors = chartThemeColors();
+    const instance = window.LightweightCharts.createChart(container, {
+      width: container.clientWidth || 420,
+      height: container.clientHeight || 240,
+      layout: { background: { color: colors.background }, textColor: colors.text },
+      grid: { vertLines: { color: colors.grid }, horzLines: { color: colors.grid } },
+      rightPriceScale: { borderColor: colors.border, scaleMargins: { top: 0.08, bottom: 0.08 } },
+      timeScale: {
+        borderColor: colors.border,
+        timeVisible: !DATE_ONLY_INTERVALS.has(watchInterval),
+      },
+      crosshair: { mode: window.LightweightCharts.CrosshairMode.Normal },
+    });
+    const series = instance.addCandlestickSeries({
+      upColor: colors.up,
+      downColor: colors.down,
+      borderUpColor: colors.up,
+      borderDownColor: colors.down,
+      wickUpColor: colors.up,
+      wickDownColor: colors.down,
+    });
+    series.setData(bars);
+    instance.timeScale().fitContent();
+    watchCharts.set(symbol, { instance, series, container });
+  } catch (error) {
+    if (token !== watchRenderToken) return;
+    container.innerHTML = '<div class="watch-error">No history for this symbol</div>';
+  }
+}
+
+// In-place data refresh: zoom/scroll survive, instances are reused.
+async function refreshWatchData() {
+  const token = watchRenderToken;
+  const range = WATCH_RANGES[watchInterval];
+  await Promise.all(
+    Array.from(watchCharts.entries()).map(async ([symbol, entry]) => {
+      try {
+        const response = await fetch(
+          `/api/history/${encodeURIComponent(symbol)}?interval=${watchInterval}&range=${range}`
+        );
+        if (!response.ok) return;
+        const payload = await response.json();
+        if (token !== watchRenderToken) return;
+        const bars = (payload.bars || [])
+          .map((bar) => ({
+            time: toChartTime(bar.timestamp, watchInterval),
+            open: numericOrNull(bar.open),
+            high: numericOrNull(bar.high),
+            low: numericOrNull(bar.low),
+            close: numericOrNull(bar.close),
+          }))
+          .filter((bar) => Number.isFinite(bar.close) && Number.isFinite(bar.open));
+        if (bars.length) entry.series.setData(bars);
+      } catch (error) {
+        /* keep the last good candles */
+      }
+    })
+  );
+}
+
+function resizeWatchCharts() {
+  watchCharts.forEach((entry) => {
+    entry.instance.applyOptions({ width: entry.container.clientWidth || 420 });
+  });
+}
+
 function renderTrendsGrid(payload) {
   const groups = Array.isArray(payload?.groups) ? payload.groups : [];
   if (!groups.length) {
@@ -900,11 +1166,12 @@ function trendBandSvg(series) {
 }
 
 function selectView(view) {
-  activeView = ["markets", "fringe", "trends"].includes(view) ? view : "daily";
+  activeView = ["markets", "fringe", "trends", "watch"].includes(view) ? view : "daily";
   dailyView.hidden = activeView !== "daily";
   marketsView.hidden = activeView !== "markets";
   fringeView.hidden = activeView !== "fringe";
   trendsView.hidden = activeView !== "trends";
+  watchView.hidden = activeView !== "watch";
   viewButtons.forEach((button) => {
     const selected = button.dataset.view === activeView;
     button.classList.toggle("active", selected);
@@ -913,6 +1180,7 @@ function selectView(view) {
   });
   if (activeView === "fringe") renderFringeView();
   if (activeView === "trends") renderTrendsView();
+  if (activeView === "watch") renderWatchGrid();
   // The treemap sizes itself from board.clientWidth, which is 0 while the
   // markets view is hidden (a refresh landing on Daily still renders the
   // board): re-render on entry so the map lays out at the real width.
@@ -4808,8 +5076,6 @@ function closeModal() {
   resetProfileScroll();
   syncUrlState();
 }
-
-let chartLibPromise = null;
 
 function ensureChartLibrary() {
   // lightweight-charts (~52KB gz) is only needed once a chart opens;
