@@ -1326,7 +1326,7 @@ def _visible_market_row_count(page: Page) -> int:
 def test_watch_tab_builds_persistent_interactive_chart_wall(page: Page, base_url: str) -> None:
     page.goto(f"{base_url}/#view=watch", wait_until="domcontentloaded")
     expect(page.locator("#watch-view")).to_be_visible()
-    expect(page.locator("#watch-grid .empty-state")).to_contain_text("Add up to 6 symbols")
+    expect(page.locator("#watch-grid .empty-state")).to_contain_text("Add up to 9 symbols")
 
     # Add two symbols; each tile builds a real lightweight-charts instance
     # (painted canvas, not the 300x150 default of an unrendered chart).
@@ -1344,7 +1344,7 @@ def test_watch_tab_builds_persistent_interactive_chart_wall(page: Page, base_url
     )
     assert painted > 310, f"chart canvas never painted (stuck at default: {painted})"
 
-    # Duplicates and the six-tile cap are refused with a status message.
+    # Duplicates and the nine-tile cap are refused with a status message.
     page.locator("#watch-add").fill("SPY")
     page.locator("#watch-add").press("Enter")
     expect(page.locator("#watch-status")).to_contain_text("already on the grid")
@@ -1365,10 +1365,30 @@ def test_watch_tab_builds_persistent_interactive_chart_wall(page: Page, base_url
     )
     expect(page.locator('[data-watch-symbol="BTC"] .watch-chart canvas').first).to_be_visible()
 
-    # Tile header opens the full chart modal; remove drops the tile.
+    # Tile header opens the full chart modal; the header star toggles watch
+    # membership from the Markets-side flow (row -> modal -> star).
     page.locator('[data-watch-symbol="SPY"] .watch-open').click()
     expect(page.locator("#chart-modal")).to_have_attribute("aria-hidden", "false")
+    star = page.locator("#chart-watch-toggle")
+    expect(star).to_have_attribute("aria-pressed", "true")
+    star.click()
+    expect(star).to_have_attribute("aria-pressed", "false")
     page.keyboard.press("Escape")
+    expect(page.locator(".watch-tile")).to_have_count(1)
+
+    # Browse picker: sector chips toggle symbols in and reflect grid state.
+    page.locator("#watch-browse").click()
+    picker = page.locator("#watch-picker")
+    expect(picker).to_be_visible()
+    expect(picker.locator("header")).to_contain_text("1/9 on the grid")
+    picker.locator('.watch-pick[data-symbol="SPY"]').click()
+    expect(page.locator(".watch-tile")).to_have_count(2)
+    expect(picker.locator('.watch-pick[data-symbol="SPY"]')).to_have_attribute(
+        "aria-pressed", "true"
+    )
+    expect(picker.locator("header")).to_contain_text("2/9 on the grid")
+
+    # Tile remove still works and the grid drops back down.
     page.locator('[data-watch-symbol="SPY"] .watch-remove').click()
     expect(page.locator(".watch-tile")).to_have_count(1)
 

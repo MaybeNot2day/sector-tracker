@@ -24,6 +24,9 @@ const watchGrid = document.querySelector("#watch-grid");
 const watchAddInput = document.querySelector("#watch-add");
 const watchStatus = document.querySelector("#watch-status");
 const watchIntervalButtons = Array.from(document.querySelectorAll("#watch-intervals button"));
+const watchBrowseButton = document.querySelector("#watch-browse");
+const watchPicker = document.querySelector("#watch-picker");
+const chartWatchToggle = document.querySelector("#chart-watch-toggle");
 const fringeBoard = document.querySelector("#fringe-board");
 const marketSearch = document.querySelector("#market-search");
 const marketFilterClear = document.querySelector("#market-filter-clear");
@@ -130,7 +133,7 @@ let componentsFetchedAt = 0;
 let componentsLoading = false;
 const WATCH_STORAGE_KEY = "watch-symbols-v1";
 const WATCH_INTERVAL_KEY = "watch-interval-v1";
-const WATCH_MAX = 6;
+const WATCH_MAX = 9;
 const WATCH_REFRESH_MS = 60000;
 const WATCH_RANGES = { "15m": "5d", "1h": "1mo", "4h": "3mo", "1d": "1y" };
 let watchSymbols = [];
@@ -660,6 +663,18 @@ function init() {
       addWatchSymbol(watchAddInput.value);
     }
   });
+  watchBrowseButton.addEventListener("click", () => toggleWatchPicker());
+  watchPicker.addEventListener("click", (event) => {
+    const pick = event.target.closest(".watch-pick");
+    if (pick) toggleWatchSymbol(pick.dataset.symbol || "");
+  });
+  document.addEventListener("click", (event) => {
+    if (watchPicker.hidden) return;
+    if (!event.target.closest(".watch-picker-wrap")) toggleWatchPicker(false);
+  });
+  chartWatchToggle.addEventListener("click", () => {
+    if (activeSymbol) toggleWatchSymbol(activeSymbol);
+  });
   watchIntervalButtons.forEach((button) => {
     button.addEventListener("click", () => selectWatchInterval(button.dataset.interval || "1h"));
   });
@@ -965,6 +980,70 @@ function selectWatchInterval(interval) {
   renderWatchGrid();
 }
 
+// --- Watch picker: browse the board's sectors and toggle tickers in. -------
+function toggleWatchPicker(force) {
+  const open = typeof force === "boolean" ? force : watchPicker.hidden;
+  watchPicker.hidden = !open;
+  watchBrowseButton.setAttribute("aria-expanded", String(open));
+  if (open) renderWatchPicker();
+}
+
+function renderWatchPicker() {
+  const groups = latestData?.groups || [];
+  if (!groups.length) {
+    watchPicker.innerHTML = '<div class="empty-state">Board data still loading</div>';
+    return;
+  }
+  const byCategory = new Map();
+  groups.forEach((group) => {
+    const category = groupCategory(group);
+    if (!byCategory.has(category)) byCategory.set(category, []);
+    byCategory.get(category).push(group);
+  });
+  const sections = TRENDS_CATEGORY_ORDER.filter((category) => byCategory.has(category))
+    .map((category) => {
+      const panels = byCategory
+        .get(category)
+        .map(
+          (group) => `<div class="watch-picker-group">
+            <span>${escapeHtml(displayGroupName(group.name))}</span>
+            <div>${(group.assets || [])
+              .map((asset) => {
+                const active = watchSymbols.includes(asset.symbol);
+                return `<button type="button" class="watch-pick${active ? " active" : ""}" data-symbol="${escapeHtml(asset.symbol)}" aria-pressed="${active}" title="${escapeHtml(asset.name || asset.symbol)}">${escapeHtml(asset.symbol)}</button>`;
+              })
+              .join("")}</div>
+          </div>`
+        )
+        .join("");
+      return `<div class="watch-picker-category"><em>${escapeHtml(category)}</em>${panels}</div>`;
+    })
+    .join("");
+  watchPicker.innerHTML = `<header>${watchSymbols.length}/${WATCH_MAX} on the grid · click to toggle</header>${sections}`;
+}
+
+function toggleWatchSymbol(symbol) {
+  if (watchSymbols.includes(symbol)) {
+    removeWatchSymbol(symbol);
+  } else {
+    addWatchSymbol(symbol);
+  }
+  renderWatchPicker();
+  updateChartWatchToggle();
+}
+
+// The chart modal's star: every Markets/tape/treemap row opens the modal,
+// so this is the "add from Markets" path without nesting buttons in rows.
+function updateChartWatchToggle() {
+  const symbol = activeSymbol || "";
+  const active = Boolean(symbol) && watchSymbols.includes(symbol);
+  chartWatchToggle.classList.toggle("watch-starred", active);
+  chartWatchToggle.setAttribute("aria-pressed", String(active));
+  const label = active ? `Remove ${symbol} from watch grid` : `Add ${symbol} to watch grid`;
+  chartWatchToggle.setAttribute("aria-label", label);
+  chartWatchToggle.title = label;
+}
+
 function destroyWatchCharts() {
   watchCharts.forEach((entry) => entry.instance.remove());
   watchCharts.clear();
@@ -991,7 +1070,7 @@ function renderWatchGrid() {
   destroyWatchCharts();
   if (!watchSymbols.length) {
     watchGrid.innerHTML =
-      '<div class="empty-state">Add up to 6 symbols to build your chart wall — anything the board or Yahoo knows (SPY, NVDA, BTC, CL=F)</div>';
+      '<div class="empty-state">Add up to 9 symbols to build your chart wall — Browse the board sectors or type anything Yahoo knows (SPY, NVDA, BTC, CL=F)</div>';
     return;
   }
   watchGrid.innerHTML = watchSymbols
@@ -5028,6 +5107,7 @@ function openChart(asset, options = {}) {
   intervalButtons.forEach((item) => item.classList.toggle("active", item === timeframeButton));
   updateIntradayAvailability(assetType);
   chartTitle.textContent = symbol;
+  updateChartWatchToggle();
   chartSubtitle.textContent = [name, sourceLabels[provider] || provider].filter(Boolean).join(" / ");
   openDialog(modal, modalClose);
   loadChart(symbol, activeRange, activeInterval);

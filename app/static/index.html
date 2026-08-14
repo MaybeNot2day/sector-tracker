@@ -17,7 +17,7 @@
         }
       } catch {}
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260814-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260814-3" />
   </head>
   <body>
     <aside id="news-panel" class="news-panel" aria-label="Live Telegram news" aria-hidden="true" inert>
@@ -308,11 +308,22 @@
               type="text"
               autocomplete="off"
               spellcheck="false"
-              placeholder="Add symbol (Enter) — max 6"
+              placeholder="Add symbol (Enter) — max 9"
               aria-label="Add a symbol to the watch grid"
               maxlength="24"
             />
           </label>
+          <div class="watch-picker-wrap">
+            <button
+              id="watch-browse"
+              class="toolbar-button compact"
+              type="button"
+              aria-expanded="false"
+              aria-controls="watch-picker"
+              title="Browse the board's sectors and pick tickers"
+            >Browse</button>
+            <div id="watch-picker" class="watch-picker" hidden></div>
+          </div>
           <div class="category-tabs" id="watch-intervals" role="group" aria-label="Watch chart timeframe">
             <button type="button" data-interval="15m" aria-pressed="false">15m</button>
             <button type="button" data-interval="1h" class="active" aria-pressed="true">1H</button>
@@ -416,9 +427,14 @@
             <h2 id="chart-title">Chart</h2>
             <p id="chart-subtitle"></p>
           </div>
-          <button id="modal-close" class="icon-button" type="button" aria-label="Close chart">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
-          </button>
+          <div class="modal-header-actions">
+            <button id="chart-watch-toggle" class="icon-button" type="button" aria-pressed="false" aria-label="Add to watch grid" title="Add to watch grid">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+            </button>
+            <button id="modal-close" class="icon-button" type="button" aria-label="Close chart">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+            </button>
+          </div>
         </div>
         <div class="intervals" role="group" aria-label="Chart timeframe">
           <span class="interval-group" aria-hidden="true">Intraday</span>
@@ -443,6 +459,6 @@
 
     <div id="help-tooltip" class="help-tooltip" role="tooltip" hidden></div>
 
-    <script src="/static/app.js?v=20260814-2" defer></script>
+    <script src="/static/app.js?v=20260814-3" defer></script>
   </body>
 </html>
