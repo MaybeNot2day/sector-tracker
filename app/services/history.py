@@ -12,10 +12,12 @@ from app.providers.hyperliquid import HyperliquidProvider
 
 STALE_BAR_AGE = timedelta(hours=26)
 SELF_HEAL_COOLDOWN_SECONDS = 3600.0
+SELF_HEAL_NO_PROGRESS_COOLDOWN_SECONDS = 6 * 3600.0
 SELF_HEAL_BATCH = 4
 HISTORY_CACHE_SECONDS = 300.0
 INTRADAY_CACHE_SECONDS = 15.0
 HISTORY_FAILURE_CACHE_SECONDS = 15.0
+HISTORY_CACHE_MAX = 256
 
 # Intraday candles come from Hyperliquid when it lists the symbol: its synthetic
 # markets trade 24/7 and are not delayed. Daily/weekly history stays with the
@@ -27,7 +29,8 @@ class HistoryService:
     def __init__(self, database_path: Path, providers: dict[ProviderName, QuoteProvider]) -> None:
         self.database_path = database_path
         self.providers = providers
-        self._heal_attempts: dict[str, float] = {}
+        # symbol -> (attempt monotonic time, newest bar observed before it)
+        self._heal_attempts: dict[str, tuple[float, datetime | None]] = {}
         self._history_cache: dict[tuple[str, ProviderName, str, str], tuple[float, list[Bar]]] = {}
         self._history_locks: dict[tuple[str, ProviderName, str, str], asyncio.Lock] = {}
 
@@ -58,6 +61,7 @@ class HistoryService:
                 return cached
             bars = await self._load_history(asset, interval=interval, range_=range_)
             self._history_cache[cache_key] = (monotonic(), bars)
+            self._evict_history_cache()
             return bars
 
     def _cached_history(
@@ -69,14 +73,35 @@ class HistoryService:
         if cached is None:
             return None
         cached_at, bars = cached
-        ttl = (
-            HISTORY_FAILURE_CACHE_SECONDS
-            if not bars
-            else INTRADAY_CACHE_SECONDS
-            if interval in INTRADAY_INTERVALS
-            else HISTORY_CACHE_SECONDS
-        )
+        ttl = _history_ttl(interval, bars)
         return bars if monotonic() - cached_at < ttl else None
+
+    def _evict_history_cache(self) -> None:
+        """Bound completed request keys without splitting concurrent fetches."""
+        if len(self._history_cache) <= HISTORY_CACHE_MAX:
+            return
+        now = monotonic()
+        expired = [
+            key
+            for key, (cached_at, bars) in self._history_cache.items()
+            if now - cached_at >= _history_ttl(key[2], bars)
+        ]
+        ordered = expired + [
+            key
+            for key, _ in sorted(
+                self._history_cache.items(),
+                key=lambda item: item[1][0],
+            )
+            if key not in expired
+        ]
+        for key in ordered:
+            if len(self._history_cache) <= HISTORY_CACHE_MAX:
+                break
+            lock = self._history_locks.get(key)
+            if lock is not None and lock.locked():
+                continue
+            self._history_cache.pop(key, None)
+            self._history_locks.pop(key, None)
 
     async def _load_history(
         self,
@@ -127,7 +152,7 @@ class HistoryService:
         cached_any_provider = await asyncio.to_thread(
             db.load_bars, self.database_path, asset.symbol, interval
         )
-        return filter_bars_to_range(cached_any_provider, range_)
+        return filter_bars_to_range(_largest_provider_series(cached_any_provider), range_)
 
     async def _tape_asset(self, symbol: str) -> AssetConfig | None:
         """Synthetic config for Hyperliquid markets outside the watchlist.
@@ -155,8 +180,8 @@ class HistoryService:
         (and the daily board metrics built on them) only advance when a chart
         is opened. This picks up to SELF_HEAL_BATCH symbols whose newest 1d
         bar is older than STALE_BAR_AGE and re-fetches them; a per-symbol
-        cooldown keeps weekends/holidays from re-fetching a closed market
-        every poll. Awaited under a short wait_for from the quotes route.
+        backoff expands when a closed market produces no new bar. The quotes
+        route starts this work in the background and never waits for it.
         """
         newest = await asyncio.to_thread(db.newest_bar_timestamps, self.database_path, "1d")
         now_dt = datetime.now(UTC)
@@ -164,10 +189,17 @@ class HistoryService:
         candidates: list[tuple[datetime, str]] = []
         for group in groups:
             for asset in group.assets:
-                last_attempt = self._heal_attempts.get(asset.symbol, 0.0)
-                if now_mono - last_attempt < SELF_HEAL_COOLDOWN_SECONDS:
-                    continue
                 newest_ts = newest.get(asset.symbol)
+                previous_attempt = self._heal_attempts.get(asset.symbol)
+                if previous_attempt is not None:
+                    attempted_at, observed_ts = previous_attempt
+                    cooldown = (
+                        SELF_HEAL_NO_PROGRESS_COOLDOWN_SECONDS
+                        if newest_ts == observed_ts
+                        else SELF_HEAL_COOLDOWN_SECONDS
+                    )
+                    if now_mono - attempted_at < cooldown:
+                        continue
                 if newest_ts is None or now_dt - newest_ts > STALE_BAR_AGE:
                     candidates.append((newest_ts or datetime.min.replace(tzinfo=UTC), asset.symbol))
         if not candidates:
@@ -175,11 +207,35 @@ class HistoryService:
         candidates.sort()
         batch = [symbol for _, symbol in candidates[:SELF_HEAL_BATCH]]
         for symbol in batch:
-            self._heal_attempts[symbol] = now_mono
+            self._heal_attempts[symbol] = (now_mono, newest.get(symbol))
         await asyncio.gather(
             *(self.get_history(groups, symbol, interval="1d", range_="1y") for symbol in batch),
             return_exceptions=True,
         )
+
+
+def _history_ttl(interval: str, bars: list[Bar]) -> float:
+    if not bars:
+        return HISTORY_FAILURE_CACHE_SECONDS
+    if interval in INTRADAY_INTERVALS:
+        return INTRADAY_CACHE_SECONDS
+    return HISTORY_CACHE_SECONDS
+
+
+def _largest_provider_series(bars: list[Bar]) -> list[Bar]:
+    """Choose one coherent provider series instead of interleaving candles."""
+    if not bars:
+        return []
+    by_provider: dict[ProviderName, list[Bar]] = {}
+    for bar in bars:
+        by_provider.setdefault(bar.provider, []).append(bar)
+    return max(
+        by_provider.values(),
+        key=lambda series: (
+            len(series),
+            max(_aware_timestamp(bar.timestamp) for bar in series),
+        ),
+    )
 
 
 def find_asset(groups: list[GroupConfig], symbol: str) -> AssetConfig | None:

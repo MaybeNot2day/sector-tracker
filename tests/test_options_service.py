@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections import Counter
 from collections.abc import Iterator
 from typing import Any, cast
@@ -134,6 +135,108 @@ async def test_marketdata_service_selects_expiration_and_caches_each_snapshot() 
         "/v1/options/expirations/SPY/": 1,
         "/v1/options/chain/SPY/": 2,
     }
+
+
+@pytest.mark.asyncio
+async def test_different_symbols_fetch_options_concurrently() -> None:
+    chain_symbols: set[str] = set()
+    both_chains_started = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if "/expirations/" in request.url.path:
+            return httpx.Response(200, json={"s": "ok", "expirations": ["2099-01-17"]})
+        symbol = request.url.path.rstrip("/").rsplit("/", 1)[-1]
+        chain_symbols.add(symbol)
+        if len(chain_symbols) == 2:
+            both_chains_started.set()
+        await asyncio.wait_for(both_chains_started.wait(), timeout=0.5)
+        contracts = _chain()
+        return httpx.Response(
+            200,
+            json={
+                "s": "ok",
+                "side": [contract["option_type"] for contract in contracts],
+                "strike": [contract["strike"] for contract in contracts],
+                "openInterest": [contract["open_interest"] for contract in contracts],
+                "gamma": [
+                    cast(dict[str, object], contract["greeks"])["gamma"] for contract in contracts
+                ],
+                "iv": [
+                    cast(dict[str, object], contract["greeks"])["mid_iv"] for contract in contracts
+                ],
+                "underlyingPrice": [100.0] * len(contracts),
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = MarketDataOptionsService("token", client=client)
+
+    snapshots = await asyncio.gather(
+        service.get_snapshot("SPY"),
+        service.get_snapshot("QQQ"),
+    )
+    await service.aclose()
+
+    assert chain_symbols == {"SPY", "QQQ"}
+    assert {str(snapshot["symbol"]) for snapshot in snapshots} == {"SPY", "QQQ"}
+
+
+@pytest.mark.asyncio
+async def test_options_caches_and_symbol_locks_remain_bounded() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/expirations/" in request.url.path:
+            return httpx.Response(200, json={"s": "ok", "expirations": ["2099-01-17"]})
+        contracts = _chain()
+        return httpx.Response(
+            200,
+            json={
+                "s": "ok",
+                "side": [contract["option_type"] for contract in contracts],
+                "strike": [contract["strike"] for contract in contracts],
+                "openInterest": [contract["open_interest"] for contract in contracts],
+                "gamma": [
+                    cast(dict[str, object], contract["greeks"])["gamma"] for contract in contracts
+                ],
+                "iv": [
+                    cast(dict[str, object], contract["greeks"])["mid_iv"] for contract in contracts
+                ],
+                "underlyingPrice": [100.0] * len(contracts),
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = MarketDataOptionsService("token", client=client)
+
+    for index in range(65):
+        await service.get_snapshot(f"SYM{index:02d}")
+    await service.aclose()
+
+    assert len(service._expirations_cache) == 32
+    assert len(service._snapshot_cache) == 64
+    assert len(service._symbol_locks) <= 64
+
+
+@pytest.mark.asyncio
+async def test_chain_failure_cooldown_skips_the_second_http_attempt() -> None:
+    calls: Counter[str] = Counter()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls[request.url.path] += 1
+        if "/expirations/" in request.url.path:
+            return httpx.Response(200, json={"s": "ok", "expirations": ["2099-01-17"]})
+        return httpx.Response(503)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = MarketDataOptionsService("token", client=client)
+
+    with pytest.raises(OptionsDataError, match="marketdata_request_failed"):
+        await service.get_snapshot("SPY")
+    with pytest.raises(OptionsDataError, match="marketdata_request_failed"):
+        await service.get_snapshot("SPY")
+    await service.aclose()
+
+    assert calls["/v1/options/expirations/SPY/"] == 1
+    assert calls["/v1/options/chain/SPY/"] == 1
 
 
 @pytest.mark.asyncio

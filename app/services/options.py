@@ -3,10 +3,18 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, date, datetime
 from time import monotonic
-from typing import Any
+from typing import Any, TypeVar
 from urllib.parse import quote
 
 import httpx
+
+_K = TypeVar("_K")
+
+
+def _evict_oldest(cache: dict[_K, tuple[float, Any]], max_entries: int) -> None:
+    """Drop the oldest-stamped entries so long-running hosts stay bounded."""
+    while len(cache) > max_entries:
+        del cache[min(cache, key=lambda key: cache[key][0])]
 
 
 class OptionsDataError(RuntimeError):
@@ -21,6 +29,10 @@ class MarketDataOptionsService:
 
     EXPIRATIONS_CACHE_SECONDS = 900
     REQUEST_TIMEOUT_SECONDS = 12.0
+    FAILURE_COOLDOWN_SECONDS = 30.0
+    SNAPSHOT_CACHE_MAX = 64
+    EXPIRATIONS_CACHE_MAX = 32
+    SYMBOL_LOCKS_MAX = 64
 
     def __init__(
         self,
@@ -36,20 +48,36 @@ class MarketDataOptionsService:
         self._client = client
         self._snapshot_cache: dict[tuple[str, str], tuple[float, dict[str, object]]] = {}
         self._expirations_cache: dict[str, tuple[float, list[str]]] = {}
-        self._lock = asyncio.Lock()
+        # Per-symbol locks: one symbol's slow chain fetch must not serialize
+        # every other symbol behind it. Cooldown stamps remember the failing
+        # error code so cooled requests reproduce the client-visible contract.
+        self._symbol_locks: dict[str, asyncio.Lock] = {}
+        self._failure_until: dict[tuple[str, str], tuple[float, str]] = {}
 
     async def get_snapshot(self, symbol: str, expiration: str | None = None) -> dict[str, object]:
         if not self.token:
             raise OptionsDataError("options_not_configured", status_code=503)
 
         clean_symbol = symbol.strip().upper()
-        async with self._lock:
+        async with self._symbol_lock(clean_symbol):
             expirations = await self._get_expirations(clean_symbol)
             selected = _select_expiration(expirations, expiration)
             cache_key = (clean_symbol, selected)
             cached = self._snapshot_cache.get(cache_key)
             if cached is not None and monotonic() - cached[0] < self.cache_seconds:
                 payload = dict(cached[1])
+                payload["expirations"] = expirations
+                return payload
+
+            cooldown = self._failure_until.get(cache_key)
+            if cooldown is not None and monotonic() < cooldown[0]:
+                # Recently failed: serve the stale snapshot if one exists,
+                # otherwise fail fast — no network until the cooldown lapses.
+                if cached is None:
+                    raise OptionsDataError(cooldown[1])
+                payload = dict(cached[1])
+                payload["is_stale"] = True
+                payload["error"] = cooldown[1]
                 payload["expirations"] = expirations
                 return payload
 
@@ -70,6 +98,10 @@ class MarketDataOptionsService:
                     updated_at=updated_at,
                 )
             except OptionsDataError as exc:
+                self._failure_until[cache_key] = (
+                    monotonic() + self.FAILURE_COOLDOWN_SECONDS,
+                    exc.code,
+                )
                 if cached is None:
                     raise
                 payload = dict(cached[1])
@@ -78,8 +110,23 @@ class MarketDataOptionsService:
                 payload["expirations"] = expirations
                 return payload
 
+            self._failure_until.pop(cache_key, None)
             self._snapshot_cache[cache_key] = (monotonic(), payload)
+            _evict_oldest(self._snapshot_cache, self.SNAPSHOT_CACHE_MAX)
             return dict(payload)
+
+    def _symbol_lock(self, symbol: str) -> asyncio.Lock:
+        lock = self._symbol_locks.get(symbol)
+        if lock is None:
+            if len(self._symbol_locks) >= self.SYMBOL_LOCKS_MAX:
+                # Unbounded symbols would grow this dict forever; locks that
+                # nobody holds are safe to drop (a waiter keeps its reference).
+                for key, existing in list(self._symbol_locks.items()):
+                    if not existing.locked():
+                        del self._symbol_locks[key]
+            lock = asyncio.Lock()
+            self._symbol_locks[symbol] = lock
+        return lock
 
     async def aclose(self) -> None:
         if self._client is not None:
@@ -101,6 +148,7 @@ class MarketDataOptionsService:
         if not expirations:
             raise OptionsDataError("options_expirations_unavailable", status_code=404)
         self._expirations_cache[symbol] = (monotonic(), expirations)
+        _evict_oldest(self._expirations_cache, self.EXPIRATIONS_CACHE_MAX)
         return expirations
 
     async def _get_json(self, path: str, params: dict[str, str]) -> dict[str, Any]:

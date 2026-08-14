@@ -161,6 +161,8 @@ def seeded_provider(
     provider._crypto = crypto or {}
     provider._tradfi = tradfi or {}
     provider._markets_time = monotonic()
+    provider._crypto_time = provider._markets_time if provider._crypto else 0.0
+    provider._tradfi_time = provider._markets_time if provider._tradfi else 0.0
     return provider, api
 
 
@@ -506,3 +508,70 @@ async def test_validate_asset_valid_not_found_unavailable() -> None:
     # An upstream outage leaves the caches empty: unavailable, not not-found.
     broken, _ = live_api(main=httpx.Response(500), tradfi=httpx.Response(500))
     assert await broken.validate_asset(BTC_PERP) == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_stale_dex_maps_never_look_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [100.0]
+    monkeypatch.setattr(hl_module, "monotonic", lambda: clock[0])
+    provider, _ = seeded_provider(
+        crypto={"BTC": crypto_record("BTC", 62000.0)},
+        tradfi={"AAPL": tradfi_record("AAPL", 213.5)},
+    )
+    provider._crypto_time = clock[0]
+    provider._tradfi_time = clock[0]
+    provider._markets_time = clock[0]
+
+    clock[0] += hl_module.MAX_QUOTE_AGE_SECONDS + 1
+    # Keep the aggregate refresh throttle warm: this isolates the read-side
+    # freshness contract from HTTP retry behavior.
+    provider._markets_time = clock[0]
+    quotes = await provider.get_quotes([BTC_PERP, AAPL_EQUITY])
+
+    assert [quote.is_stale for quote in quotes] == [True, True]
+    assert await provider.live_prices({"AAPL"}) == {}
+    assert provider.crypto_tape_cached() == []
+
+
+@pytest.mark.asyncio
+async def test_one_dex_success_does_not_refresh_the_other_dex_age(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [100.0]
+    monkeypatch.setattr(hl_module, "monotonic", lambda: clock[0])
+    provider, api = live_api()
+    await provider.get_quotes([BTC_PERP, AAPL_EQUITY])
+    original_tradfi_time = provider._tradfi_time
+
+    clock[0] += MARKETS_TTL_SECONDS + 1
+    api.routes[XYZ_KEY] = httpx.Response(500)
+    await provider.get_quotes([BTC_PERP])
+
+    assert provider._crypto_time == clock[0]
+    assert provider._tradfi_time == original_tradfi_time
+
+
+@pytest.mark.asyncio
+async def test_candle_failure_cooldown_is_per_symbol() -> None:
+    provider, _ = seeded_provider(
+        crypto={
+            "BTC": crypto_record("BTC", 62000.0),
+            "ETH": crypto_record("ETH", 3000.0),
+        }
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body["type"] == "candleSnapshot" and body["req"]["coin"] == "BTC":
+            return httpx.Response(500)
+        return httpx.Response(200, json=[])
+
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    eth = AssetConfig(symbol="ETH", type="crypto_perp", source="hyperliquid")
+
+    assert await provider.get_history(BTC_PERP, interval="1h", range_="1d") == []
+    assert "candleSnapshot:BTC" in provider._cooldown_until
+    assert await provider.get_history(eth, interval="1h", range_="1d") == []
+    assert "candleSnapshot:ETH" not in provider._cooldown_until

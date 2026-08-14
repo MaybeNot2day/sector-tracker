@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -5,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from app import db
+from app import main as main_module
 from app.models import AssetConfig, Bar, GroupConfig, Quote
 from app.providers.base import QuoteProvider
 from app.services.quotes import QuoteService, quote_payload
@@ -273,3 +275,54 @@ def test_quote_payload_exposes_display_fields() -> None:
     assert payload["currency"] == "KRW"
     assert payload["display_last"] == 202.9
     assert payload["display_currency"] == "USD"
+
+
+@pytest.mark.asyncio
+async def test_quotes_route_schedules_history_heal_without_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class RouteQuoteService:
+        async def get_board_quotes(self, groups: list[GroupConfig]) -> dict[str, list[Quote]]:
+            return {}
+
+    class BlockingHistoryService:
+        async def refresh_stale_daily_bars(self, groups: list[GroupConfig]) -> None:
+            started.set()
+            await release.wait()
+
+    async def payload(
+        state: object,
+        groups: list[GroupConfig],
+        grouped: dict[str, list[Quote]],
+    ) -> dict[str, object]:
+        return {"status": "ok"}
+
+    monkeypatch.setattr(main_module.app.state, "groups", [], raising=False)
+    monkeypatch.setattr(
+        main_module.app.state,
+        "quote_service",
+        RouteQuoteService(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        main_module.app.state,
+        "history_service",
+        BlockingHistoryService(),
+        raising=False,
+    )
+    monkeypatch.setattr(main_module, "board_payload_async", payload)
+    monkeypatch.setattr(main_module, "_heal_task", None)
+    monkeypatch.setattr(main_module, "_heal_started", None)
+
+    result = await asyncio.wait_for(main_module.quotes(), timeout=0.2)
+    await asyncio.wait_for(started.wait(), timeout=0.2)
+
+    assert result == {"status": "ok"}
+    assert main_module._heal_task is not None
+    assert not main_module._heal_task.done()
+
+    release.set()
+    await main_module._heal_task

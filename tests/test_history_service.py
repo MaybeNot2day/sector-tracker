@@ -1,11 +1,14 @@
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 
-from app.models import AssetConfig, Bar, GroupConfig, Quote
+from app import db
+from app.models import AssetConfig, Bar, GroupConfig, ProviderName, Quote
 from app.providers.base import QuoteProvider
+from app.services import history as history_module
 from app.services.history import HistoryService, filter_bars_to_range
 
 
@@ -44,6 +47,17 @@ class CountingHistoryProvider(HistoryProvider):
         self.calls += 1
         await asyncio.sleep(0)
         return await super().get_history(asset, interval=interval, range_=range_)
+
+
+class EmptyHistoryProvider(HistoryProvider):
+    async def get_history(
+        self,
+        asset: AssetConfig,
+        *,
+        interval: str,
+        range_: str,
+    ) -> list[Bar]:
+        return []
 
 
 @pytest.mark.asyncio
@@ -120,3 +134,92 @@ def test_filter_bars_to_intraday_range() -> None:
 
     assert filtered[0].timestamp == datetime(2026, 1, 1, 10, 9, tzinfo=UTC)
     assert filtered[-1].timestamp == datetime(2026, 1, 1, 10, 19, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_sqlite_fallback_chooses_one_provider_series(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    groups = [
+        GroupConfig(
+            name="TEST",
+            assets=[AssetConfig(symbol="SPY", type="etf", source="yahoo")],
+        )
+    ]
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    cached = [
+        Bar(
+            symbol="SPY",
+            provider=cast(ProviderName, provider),
+            interval="1d",
+            timestamp=base + timedelta(days=index),
+            open=close,
+            high=close,
+            low=close,
+            close=close,
+        )
+        for index, (provider, close) in enumerate(
+            [("yahoo", 100.0), ("stooq", 90.0), ("yahoo", 101.0)]
+        )
+    ]
+
+    def load_bars(path: Path, symbol: str, interval: str, provider: str | None = None) -> list[Bar]:
+        return [] if provider is not None else cached
+
+    monkeypatch.setattr(db, "load_bars", load_bars)
+    service = HistoryService(tmp_path / "board.sqlite3", {"yahoo": EmptyHistoryProvider()})
+
+    bars = await service.get_history(groups, "SPY", interval="1d", range_="1y")
+
+    assert [bar.provider for bar in bars] == ["yahoo", "yahoo"]
+    assert [bar.close for bar in bars] == [100.0, 101.0]
+
+
+def test_history_cache_evicts_completed_old_keys(tmp_path: Path) -> None:
+    service = HistoryService(tmp_path / "board.sqlite3", {"yahoo": EmptyHistoryProvider()})
+    for index in range(history_module.HISTORY_CACHE_MAX + 1):
+        key: tuple[str, ProviderName, str, str] = (f"SYM{index}", "yahoo", "1d", "1y")
+        service._history_cache[key] = (float(index), [])
+        service._history_locks[key] = asyncio.Lock()
+
+    service._evict_history_cache()
+
+    assert len(service._history_cache) == history_module.HISTORY_CACHE_MAX
+    assert set(service._history_locks) == set(service._history_cache)
+
+
+@pytest.mark.asyncio
+async def test_self_heal_extends_backoff_when_newest_bar_does_not_advance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [10_000.0]
+    stale = datetime.now(UTC) - timedelta(days=3)
+    monkeypatch.setattr(history_module, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        db,
+        "newest_bar_timestamps",
+        lambda path, interval: {"SPY": stale},
+    )
+    groups = [
+        GroupConfig(
+            name="TEST",
+            assets=[AssetConfig(symbol="SPY", type="etf", source="yahoo")],
+        )
+    ]
+    service = HistoryService(tmp_path / "board.sqlite3", {"yahoo": EmptyHistoryProvider()})
+    calls = 0
+
+    async def record_history(*args: object, **kwargs: object) -> list[Bar]:
+        nonlocal calls
+        calls += 1
+        return []
+
+    monkeypatch.setattr(service, "get_history", record_history)
+
+    await service.refresh_stale_daily_bars(groups)
+    clock[0] += history_module.SELF_HEAL_COOLDOWN_SECONDS + 1
+    await service.refresh_stale_daily_bars(groups)
+
+    assert calls == 1

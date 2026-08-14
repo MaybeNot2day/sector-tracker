@@ -159,9 +159,11 @@ def test_bar_to_usd_converts_ohlc_and_keeps_volume() -> None:
 def reset_yahoo_cooldowns() -> Iterator[None]:
     yahoo_module._rate_limited_until.clear()
     yahoo_module._failure_until.clear()
+    yahoo_module._chart_failure_streak = 0
     yield
     yahoo_module._rate_limited_until.clear()
     yahoo_module._failure_until.clear()
+    yahoo_module._chart_failure_streak = 0
 
 
 def test_successful_alternate_host_does_not_arm_failure_cooldown(
@@ -260,6 +262,31 @@ def test_one_symbol_chart_failure_does_not_cool_down_others(
     assert yahoo_module._get_json_with_retry(spy_urls, params={"range": "1d"}) == {"symbol": "SPY"}
     with pytest.raises(yahoo_module.YahooFailureCooldown):
         yahoo_module._get_json_with_retry(dead_urls, params={"range": "1d"})
+
+
+def test_repeated_chart_outage_arms_family_breaker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fail(url: str, params: dict[str, str]) -> dict[str, object]:
+        calls.append(url)
+        raise RuntimeError("connection timed out")
+
+    monkeypatch.setattr(yahoo_module, "_get_json", fail)
+    monkeypatch.setattr(yahoo_module, "sleep", lambda seconds: None)
+
+    for symbol in ("AAA", "BBB", "CCC"):
+        urls = tuple(url.format(symbol=symbol) for url in yahoo_module.YAHOO_CHART_URLS)
+        with pytest.raises(RuntimeError, match="timed out"):
+            yahoo_module._get_json_with_retry(urls, params={"range": "1d"})
+
+    assert "chart" in yahoo_module._failure_until
+    call_count = len(calls)
+    next_urls = tuple(url.format(symbol="DDD") for url in yahoo_module.YAHOO_CHART_URLS)
+    with pytest.raises(yahoo_module.YahooFailureCooldown):
+        yahoo_module._get_json_with_retry(next_urls, params={"range": "1d"})
+    assert len(calls) == call_count
 
 
 def test_official_close_is_previous_close_while_regular_session_trades() -> None:

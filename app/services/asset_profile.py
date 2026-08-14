@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import math
 import time
-from threading import Lock
 from typing import Any
 
 # yfinance (and its pandas dependency) is imported lazily inside the two
@@ -26,18 +26,16 @@ class AssetProfileService:
         self.failure_retry_seconds = failure_retry_seconds
         self._cache: dict[str, tuple[float, dict[str, object]]] = {}
         self._failures: dict[str, tuple[float, dict[str, object]]] = {}
-        self._symbol_locks: dict[str, Lock] = {}
-        self._locks_guard = Lock()
+        self._symbol_locks: dict[str, asyncio.Lock] = {}
 
-    def get_profile(self, asset: AssetConfig) -> dict[str, object]:
-        # The route runs this method in a thread pool. A per-symbol lock
-        # collapses concurrent cold misses without serializing other symbols.
-        with self._symbol_lock(asset.symbol):
-            return self._get_profile_locked(asset)
-
-    def _symbol_lock(self, symbol: str) -> Lock:
-        with self._locks_guard:
-            return self._symbol_locks.setdefault(symbol, Lock())
+    async def get_profile(self, asset: AssetConfig) -> dict[str, object]:
+        # A per-symbol asyncio.Lock collapses concurrent cold misses without
+        # serializing other symbols; only the actual yfinance fetch occupies
+        # an executor thread — waiters park on the event loop instead of
+        # pinning a thread each behind a threading.Lock.
+        lock = self._symbol_locks.setdefault(asset.symbol, asyncio.Lock())
+        async with lock:
+            return await asyncio.to_thread(self._get_profile_locked, asset)
 
     def _get_profile_locked(self, asset: AssetConfig) -> dict[str, object]:
         now = time.monotonic()

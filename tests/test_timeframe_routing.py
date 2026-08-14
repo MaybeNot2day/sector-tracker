@@ -33,6 +33,8 @@ BTC_PERP = AssetConfig(symbol="BTC", type="crypto_perp", source="hyperliquid")
         ("3mo", "1d", "2y"),
         ("1y", "1d", "2y"),
         ("ytd", "1d", "2y"),
+        ("5y", "1d", "5y"),
+        ("10y", "1d", "10y"),
         # 1wk/1mo fetch deep history.
         ("5y", "1wk", "5y"),
         ("10y", "1wk", "10y"),

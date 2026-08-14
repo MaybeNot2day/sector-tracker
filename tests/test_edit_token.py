@@ -19,6 +19,7 @@ from fastapi import HTTPException
 from fastapi.routing import APIRoute
 from starlette.testclient import TestClient
 
+from app import main as main_module
 from app.config import load_watchlists, save_watchlists
 from app.main import app, require_edit_token
 from app.models import AssetConfig, GroupConfig
@@ -309,3 +310,22 @@ def test_create_asset_rejects_cross_group_symbol_configuration_conflict(
     assert response.status_code == 409
     assert response.json()["detail"] == "symbol_configuration_conflict"
     assert load_watchlists(watchlist_path)[1].assets == []
+
+
+def test_successful_watchlist_mutation_invalidates_trends_cache(
+    configure_asset_mutation: Callable[
+        [list[GroupConfig], ValidationStatus],
+        tuple[TestClient, Path],
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = configure_asset_mutation(
+        [GroupConfig(name="TEST", assets=[])],
+        "valid",
+    )
+    monkeypatch.setattr(main_module, "_trends_cache", {90: (1.0, {"days": 90})})
+
+    response = client.post("/api/groups", json={"name": "NEW"})
+
+    assert response.status_code == 200
+    assert main_module._trends_cache == {}

@@ -22,7 +22,7 @@ def seeded_provider(payload: list[Any]) -> HyperliquidProvider:
     """Provider with a warm crypto market map, so lookups never hit HTTP."""
     provider = HyperliquidProvider()
     provider._crypto = _parse_universe(payload, strip_prefix=None)
-    provider._markets_time = monotonic()
+    provider._crypto_time = monotonic()
     return provider
 
 

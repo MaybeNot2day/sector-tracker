@@ -113,11 +113,11 @@ def push_app(tmp_path: Path) -> Iterator[Any]:
     app.state.settings = SimpleNamespace(
         edit_token="sekrit", database_path=tmp_path / "board.sqlite3"
     )
-    component_trends._cache.update({"at": 0.0, "payload": None})
+    component_trends._cache.update({"at": 0.0, "payload": None, "failed_at": None})
 
     yield app.state
 
-    component_trends._cache.update({"at": 0.0, "payload": None})
+    component_trends._cache.update({"at": 0.0, "payload": None, "failed_at": None})
     if had_settings:
         app.state.settings = original
     else:
@@ -146,3 +146,24 @@ def test_push_rejects_malformed_payload(push_app: Any) -> None:
         headers={"X-Edit-Token": "sekrit"},
     )
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_failed_scrape_round_is_negatively_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    component_trends._cache.update({"at": 0.0, "payload": None, "failed_at": None})
+
+    async def fail_category(client: object, slug: str, label: str) -> None:
+        nonlocal calls
+        calls += 1
+        return None
+
+    monkeypatch.setattr(component_trends, "_fetch_category", fail_category)
+
+    first = await component_trends.component_trends_payload()
+    second = await component_trends.component_trends_payload()
+
+    assert first["categories"] == second["categories"] == []
+    assert calls == len(component_trends.CATEGORIES)

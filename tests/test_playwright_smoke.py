@@ -91,7 +91,7 @@ def base_url() -> Iterator[str]:
             process.wait(timeout=5)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def browser() -> Iterator[Browser]:
     with sync_playwright() as playwright:
         try:
@@ -122,10 +122,21 @@ def page(browser: Browser) -> Iterator[Page]:
             static CLOSED = 3;
             constructor(url) {
               this.url = url;
+              this.listeners = new Map();
+              window.__lastQuietWebSocket = this;
               this.readyState = QuietWebSocket.CLOSED;
             }
-            addEventListener() {}
-            removeEventListener() {}
+            addEventListener(type, listener) {
+              if (!this.listeners.has(type)) this.listeners.set(type, []);
+              this.listeners.get(type).push(listener);
+            }
+            removeEventListener(type, listener) {
+              const listeners = this.listeners.get(type) || [];
+              this.listeners.set(type, listeners.filter((item) => item !== listener));
+            }
+            emit(type, event = {}) {
+              (this.listeners.get(type) || []).forEach((listener) => listener(event));
+            }
             send() {}
             close() { this.readyState = QuietWebSocket.CLOSED; }
           }
@@ -343,11 +354,19 @@ def test_theme_toggle_persists_light_mode(page: Page, base_url: str) -> None:
 
     expect(root).to_have_attribute("data-theme", "dark")
     expect(toggle).to_have_attribute("aria-label", "Switch to light theme")
-    toggle.click()
+    page.locator('.benchmark-card[data-symbol="SPY"]').click()
+    expect(page.locator("#chart-modal")).to_have_attribute("aria-hidden", "false")
+    _expect_chart_canvas_content(page)
+    dark_chart = page.locator("#chart").screenshot()
+    toggle.evaluate("(element) => element.click()")
 
     expect(root).to_have_attribute("data-theme", "light")
     expect(toggle).to_have_attribute("aria-pressed", "true")
     expect(toggle).to_have_attribute("aria-label", "Switch to dark theme")
+    page.wait_for_timeout(50)
+    light_chart = page.locator("#chart").screenshot()
+    assert light_chart != dark_chart, "live chart canvas did not repaint for the light theme"
+    page.keyboard.press("Escape")
     colors = page.evaluate(
         """() => {
           const panel = document.querySelector('.analytics-panel');
@@ -463,6 +482,9 @@ def test_market_map_toggle_renders_treemap_and_opens_charts(page: Page, base_url
 
     spy = page.locator('#board .map-tile[data-symbol="SPY"]')
     expect(spy).to_be_visible()
+    spy.evaluate("(tile) => { tile.dataset.identityProbe = 'preserved'; }")
+    page.evaluate("(payload) => applyQuotes(payload)", json.loads(json.dumps(BOARD_PAYLOAD)))
+    expect(spy).to_have_attribute("data-identity-probe", "preserved")
     spy.click()
     expect(page.locator("#chart-modal")).to_have_attribute("aria-hidden", "false")
     page.keyboard.press("Escape")
@@ -1440,6 +1462,189 @@ def test_trends_tab_renders_group_bands_and_links_to_markets(page: Page, base_ur
     page.locator(".trend-card").first.click()
     expect(page.locator("#markets-view")).to_be_visible()
     expect(page.locator("#market-filter-status")).to_contain_text("MAG7")
+
+
+def test_dialog_stack_closes_one_layer_per_escape_and_restores_focus(
+    page: Page,
+    base_url: str,
+) -> None:
+    _goto_board(page, base_url)
+    page.locator("#reports-open").click()
+    expect(page.locator("#reports-modal")).to_have_attribute("aria-hidden", "false")
+    expect(page.locator("#reports-close")).to_be_focused()
+
+    page.locator('.benchmark-card[data-symbol="SPY"]').evaluate("(element) => element.click()")
+    expect(page.locator("#chart-modal")).to_have_attribute("aria-hidden", "false")
+
+    page.keyboard.press("Escape")
+    expect(page.locator("#chart-modal")).to_have_attribute("aria-hidden", "true")
+    expect(page.locator("#reports-modal")).to_have_attribute("aria-hidden", "false")
+    expect(page.locator("#reports-close")).to_be_focused()
+    expect(page.locator("body")).to_have_class(re.compile(r"\bmodal-open\b"))
+
+    page.keyboard.press("Escape")
+    expect(page.locator("#reports-modal")).to_have_attribute("aria-hidden", "true")
+    expect(page.locator("#reports-open")).to_be_focused()
+    expect(page.locator("body")).not_to_have_class(re.compile(r"\bmodal-open\b"))
+
+
+def test_storage_denial_does_not_break_boot_or_news_filters(page: Page, base_url: str) -> None:
+    page.add_init_script(
+        """
+        Object.defineProperty(window, "localStorage", {
+          configurable: true,
+          get() { throw new DOMException("storage denied", "SecurityError"); },
+        });
+        """
+    )
+
+    _goto_board(page, base_url)
+    expect(page.locator("#daily-view")).to_be_visible()
+    page.locator("#news-toggle").click()
+    expect(page.locator("#news-panel")).to_have_attribute("aria-hidden", "false")
+    channel = page.locator("#news-channels button[data-channel]").first
+    expect(channel).to_be_visible()
+    channel.click()
+    expect(channel).to_have_attribute("aria-pressed", "false")
+
+
+def test_malformed_websocket_frame_is_dropped_without_breaking_live_view(
+    page: Page,
+    base_url: str,
+) -> None:
+    _goto_board(page, base_url)
+
+    emitted = page.evaluate(
+        """
+        () => {
+          if (!window.__lastQuietWebSocket) return false;
+          window.__lastQuietWebSocket.emit("message", { data: "{" });
+          return true;
+        }
+        """
+    )
+
+    assert emitted is True
+    expect(page.locator("#daily-view")).to_be_visible()
+    expect(page.locator("#status-strip")).to_be_visible()
+
+
+def test_trends_late_response_cannot_replace_newer_range_and_offline_keeps_grid(
+    page: Page,
+    base_url: str,
+) -> None:
+    page.goto(f"{base_url}/#view=trends", wait_until="domcontentloaded")
+    expect(page.locator(".trend-card")).to_have_count(2)
+    page.evaluate(
+        """
+        () => {
+          window.__baseFetch = window.fetch.bind(window);
+          window.__trendResolvers = {};
+          window.fetch = (input, init) => {
+            const url = new URL(String(input), window.location.origin);
+            if (url.pathname !== "/api/trends") return window.__baseFetch(input, init);
+            const days = url.searchParams.get("days");
+            return new Promise((resolve) => {
+              window.__trendResolvers[days] = (payload) => resolve(
+                new Response(JSON.stringify(payload), {
+                  status: 200,
+                  headers: { "Content-Type": "application/json" },
+                })
+              );
+            });
+          };
+        }
+        """
+    )
+
+    page.locator('#trends-range button[data-days="30"]').click()
+    page.wait_for_function("() => Boolean(window.__trendResolvers['30'])")
+    page.locator('#trends-range button[data-days="180"]').click()
+    page.wait_for_function("() => Boolean(window.__trendResolvers['180'])")
+
+    latest = json.loads(json.dumps(TRENDS_PAYLOAD))
+    latest["days"] = 180
+    latest["groups"][1]["name"] = "LATEST_180"
+    stale = json.loads(json.dumps(TRENDS_PAYLOAD))
+    stale["days"] = 30
+    stale["groups"][1]["name"] = "STALE_30"
+    page.evaluate("(payload) => window.__trendResolvers['180'](payload)", latest)
+    expect(page.locator(".trend-card").first.locator("header strong")).to_have_text("LATEST 180")
+    page.evaluate("(payload) => window.__trendResolvers['30'](payload)", stale)
+    page.wait_for_timeout(50)
+    expect(page.locator(".trend-card").first.locator("header strong")).to_have_text("LATEST 180")
+
+    page.evaluate(
+        """
+        () => {
+          window.fetch = (input, init) => {
+            const url = new URL(String(input), window.location.origin);
+            if (url.pathname === "/api/trends") return Promise.reject(new Error("offline"));
+            return window.__baseFetch(input, init);
+          };
+        }
+        """
+    )
+    page.locator('#trends-range button[data-days="90"]').click()
+    expect(page.locator('#trends-grid > .trends-note[role="status"]')).to_contain_text(
+        "showing cached data"
+    )
+    expect(page.locator(".trend-card").first.locator("header strong")).to_have_text("LATEST 180")
+
+
+def test_watch_distinguishes_network_failure_from_empty_history(
+    page: Page,
+    base_url: str,
+) -> None:
+    def history(route: Any) -> None:
+        symbol = unquote(urlparse(route.request.url).path.rsplit("/", 1)[1]).upper()
+        if symbol == "SPY":
+            route.fulfill(status=503, content_type="application/json", body='{"detail":"down"}')
+        else:
+            _fulfill_json(route, {"bars": []})
+
+    page.route("**/api/history/**", history)
+    page.goto(f"{base_url}/#view=watch", wait_until="domcontentloaded")
+    for symbol in ("SPY", "QQQ"):
+        page.locator("#watch-add").fill(symbol)
+        page.locator("#watch-add").press("Enter")
+
+    expect(page.locator('[data-watch-symbol="SPY"] .watch-error')).to_contain_text(
+        "Chart data unavailable"
+    )
+    expect(page.locator('[data-watch-symbol="QQQ"] .watch-error')).to_contain_text(
+        "No history for this symbol"
+    )
+
+
+def test_untrusted_external_urls_never_become_clickable_links(
+    page: Page,
+    base_url: str,
+) -> None:
+    key_dates = json.loads(json.dumps(KEY_DATES_PAYLOAD))
+    key_dates["key_dates"][0]["release"]["series_url"] = "javascript:alert(1)"
+    news = json.loads(json.dumps(NEWS_PAYLOAD))
+    for item in news["items"]:
+        item["link"] = "javascript:alert(1)"
+    components = json.loads(json.dumps(COMPONENT_TRENDS_PAYLOAD))
+    components["categories"][0]["url"] = "data:text/html,unsafe"
+    page.route("**/api/key-dates", lambda route: _fulfill_json(route, key_dates))
+    page.route("**/api/news", lambda route: _fulfill_json(route, news))
+    page.route("**/api/component-trends", lambda route: _fulfill_json(route, components))
+
+    _goto_board(page, base_url)
+    unsafe_key_date = page.locator("#daily-board div.key-date-row").first
+    expect(unsafe_key_date).to_be_visible()
+
+    page.locator("#news-toggle").click()
+    unsafe_news = page.locator("#news-list .news-item").first
+    expect(unsafe_news).to_be_visible()
+    assert unsafe_news.get_attribute("href") == "#"
+
+    page.locator("#trends-tab").click()
+    unsafe_component = page.locator("#components-grid .component-card").first
+    expect(unsafe_component).to_be_visible()
+    assert unsafe_component.evaluate("(element) => element.tagName") == "DIV"
 
 
 def _stub_board_apis(page: Page) -> None:

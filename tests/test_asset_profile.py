@@ -1,4 +1,4 @@
-from concurrent.futures import ThreadPoolExecutor
+import asyncio
 from threading import Barrier, Lock
 from time import sleep
 from typing import cast
@@ -83,7 +83,7 @@ def test_non_usd_profile_monetary_metrics_are_converted(
     assert by_label["52W Range"] == "$100.00 - $2,000"
 
 
-def test_partial_profile_failures_are_not_long_cached(
+async def test_partial_profile_failures_are_not_long_cached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = {"count": 0}
@@ -110,8 +110,8 @@ def test_partial_profile_failures_are_not_long_cached(
     service = AssetProfileService(cache_seconds=3600, failure_retry_seconds=0)
     asset = AssetConfig(symbol="ASTS", type="equity", source="yahoo", name="AST SpaceMobile")
 
-    first = service.get_profile(asset)
-    second = service.get_profile(asset)
+    first = await service.get_profile(asset)
+    second = await service.get_profile(asset)
 
     assert first["status"] == "partial"
     assert second["status"] == "ok"
@@ -119,7 +119,7 @@ def test_partial_profile_failures_are_not_long_cached(
     assert calls["count"] == 2
 
 
-def test_profile_failure_cooldown_suppresses_retries_then_expires(
+async def test_profile_failure_cooldown_suppresses_retries_then_expires(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = {"count": 0}
@@ -144,8 +144,8 @@ def test_profile_failure_cooldown_suppresses_retries_then_expires(
     service = AssetProfileService(cache_seconds=3600, failure_retry_seconds=120)
     asset = AssetConfig(symbol="ASTS", type="equity", source="yahoo")
 
-    first = service.get_profile(asset)
-    second = service.get_profile(asset)
+    first = await service.get_profile(asset)
+    second = await service.get_profile(asset)
 
     assert first is second
     assert first["status"] == "partial"
@@ -153,14 +153,14 @@ def test_profile_failure_cooldown_suppresses_retries_then_expires(
 
     failed_at, failed_payload = service._failures["ASTS"]
     service._failures["ASTS"] = (failed_at - 121, failed_payload)
-    recovered = service.get_profile(asset)
+    recovered = await service.get_profile(asset)
 
     assert recovered["status"] == "ok"
     assert recovered["description"] == "Recovered profile"
     assert calls["count"] == 2
 
 
-def test_concurrent_profile_misses_collapse_per_symbol(
+async def test_concurrent_profile_misses_collapse_per_symbol(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = 0
@@ -183,14 +183,13 @@ def test_concurrent_profile_misses_collapse_per_symbol(
     service = AssetProfileService()
     asset = AssetConfig(symbol="AAPL", type="equity", source="yahoo")
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        results = list(pool.map(service.get_profile, [asset] * 8))
+    results = await asyncio.gather(*(service.get_profile(asset) for _ in range(8)))
 
     assert calls == 1
     assert all(result is results[0] for result in results)
 
 
-def test_different_profile_symbols_fetch_concurrently(
+async def test_different_profile_symbols_fetch_concurrently(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rendezvous = Barrier(2, timeout=1)
@@ -216,14 +215,15 @@ def test_different_profile_symbols_fetch_concurrently(
         AssetConfig(symbol="MSFT", type="equity", source="yahoo"),
     ]
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(service.get_profile, assets))
+    # Barrier(2): both to_thread fetches must be in flight at once, or the
+    # 1s barrier timeout breaks — a serialized (global-lock) fetch fails here.
+    results = await asyncio.gather(*(service.get_profile(asset) for asset in assets))
 
     assert [result["symbol"] for result in results] == ["AAPL", "MSFT"]
     assert all(result["status"] == "ok" for result in results)
 
 
-def test_expired_good_profile_is_served_when_refresh_fails(
+async def test_expired_good_profile_is_served_when_refresh_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FailingTicker:
@@ -253,7 +253,7 @@ def test_expired_good_profile_is_served_when_refresh_fails(
     service._cache["TSM"] = (0.0, cached)
     asset = AssetConfig(symbol="TSM", type="equity", source="yahoo", name="TSM")
 
-    profile = service.get_profile(asset)
+    profile = await service.get_profile(asset)
 
     assert profile is cached
     assert profile["description"] == "Cached profile"

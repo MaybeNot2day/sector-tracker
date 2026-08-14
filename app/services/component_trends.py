@@ -21,7 +21,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -57,7 +57,11 @@ _IMAGE_ENTRY = re.compile(
     re.DOTALL,
 )
 
-_cache: dict[str, Any] = {"at": 0.0, "payload": None}
+# failed_at (None-monotonic sentinel, like news.py's _fetched): a scrape
+# round that produced nothing stamps it so every poll for the next
+# FAILURE_RETRY_SECONDS serves fallbacks instead of re-hitting Cloudflare.
+FAILURE_RETRY_SECONDS = 300.0
+_cache: dict[str, Any] = {"at": 0.0, "payload": None, "failed_at": None}
 _lock = asyncio.Lock()
 
 
@@ -107,17 +111,19 @@ async def component_trends_payload(store_path: Path | None = None) -> dict[str, 
         if pushed is not None and _payload_age_seconds(pushed) < PUSH_FRESH_SECONDS:
             _cache["payload"] = pushed
             _cache["at"] = monotonic()
+            _cache["failed_at"] = None
             return pushed
+        failed_at = _cache["failed_at"]
+        if failed_at is not None and monotonic() - float(failed_at) < FAILURE_RETRY_SECONDS:
+            return _fallback_payload(pushed)
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
             results = await asyncio.gather(
                 *(_fetch_category(client, slug, label) for slug, label in CATEGORIES)
             )
         categories = [category for category in results if category is not None]
         if not categories:
-            for fallback in (pushed, _cache["payload"]):
-                if fallback is not None:
-                    return fallback
-            return {"as_of": _now_iso(), "source": f"{BASE_URL}/trends/", "categories": []}
+            _cache["failed_at"] = monotonic()
+            return _fallback_payload(pushed)
         payload: dict[str, object] = {
             "as_of": _now_iso(),
             "source": f"{BASE_URL}/trends/",
@@ -125,7 +131,16 @@ async def component_trends_payload(store_path: Path | None = None) -> dict[str, 
         }
         _cache["payload"] = payload
         _cache["at"] = monotonic()
+        _cache["failed_at"] = None
         return payload
+
+
+def _fallback_payload(pushed: dict[str, object] | None) -> dict[str, object]:
+    """Best stale content when a scrape cannot run: pushed, memory, empty."""
+    for fallback in (pushed, _cache["payload"]):
+        if fallback is not None:
+            return cast(dict[str, object], fallback)
+    return {"as_of": _now_iso(), "source": f"{BASE_URL}/trends/", "categories": []}
 
 
 # --- pushed store ----------------------------------------------------------
@@ -184,6 +199,7 @@ def save_pushed_payload(store_path: Path, payload: dict[str, object]) -> None:
     # The next GET must serve the fresh push, not yesterday's memory cache.
     _cache["payload"] = payload
     _cache["at"] = monotonic()
+    _cache["failed_at"] = None
 
 
 def _load_store(store_path: Path | None) -> dict[str, object] | None:

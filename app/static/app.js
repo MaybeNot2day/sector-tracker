@@ -93,9 +93,16 @@ let activeAsset = null;
 let activeHistoryContext = null;
 let activeRange = "1y";
 let activeInterval = "1d";
-let activeDialog = null;
-let lastFocusedElement = null;
+// Open dialogs, bottom to top: Escape and the focus trap act on the TOP
+// entry only, and closing a lower dialog must not disturb the ones above.
+// Each entry remembers the element that opened it for focus return.
+const dialogStack = []; // { dialog, trigger }
 let chart = null;
+let chartCandleSeries = null; // main modal candles, restyled on theme flips
+let chartMovingAverageSeries = []; // [{ series, colorToken }]
+let chartVolumeSeries = null;
+let chartVolumeBars = [];
+let chartPreviousCloseLine = null;
 let chartLoadToken = 0;
 let chartContextLoading = false;
 let chartResizeObserver = null;
@@ -366,6 +373,9 @@ function setTheme(theme, persist = false) {
   themeToggle.setAttribute("aria-pressed", String(light));
   themeToggle.setAttribute("aria-label", light ? "Switch to dark theme" : "Switch to light theme");
   themeToggle.title = light ? "Switch to dark theme" : "Switch to light theme";
+  // CSS variables flip with the dataset, but live lightweight-charts
+  // instances hold their canvas colors until told otherwise.
+  restyleLiveCharts();
   if (!persist) return;
   try {
     localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
@@ -505,7 +515,13 @@ function init() {
   fetchKeyDates();
   fetchSnapshots();
   fetchFringe();
-  setNewsOpen(localStorage.getItem(NEWS_OPEN_KEY) === "1", { focus: false });
+  let newsOpen = false;
+  try {
+    newsOpen = localStorage.getItem(NEWS_OPEN_KEY) === "1";
+  } catch (error) {
+    // Private browsing can deny storage reads; default to the closed drawer.
+  }
+  setNewsOpen(newsOpen, { focus: false });
   fetchNews();
   refreshReportsBadge();
   window.setInterval(() => {
@@ -598,7 +614,11 @@ function init() {
     } else {
       mutedNewsChannels.add(channel);
     }
-    localStorage.setItem(NEWS_MUTED_KEY, JSON.stringify([...mutedNewsChannels]));
+    try {
+      localStorage.setItem(NEWS_MUTED_KEY, JSON.stringify([...mutedNewsChannels]));
+    } catch (error) {
+      // Storage is best-effort; channel filters still work for this session.
+    }
     if (latestNews) renderNews(latestNews);
   });
   focusChip.addEventListener("click", () => openFringeTicker(focusedSymbol));
@@ -726,11 +746,11 @@ function init() {
     openReport(id);
   });
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Tab" && activeDialog) {
-      trapDialogFocus(event, activeDialog);
+    if (event.key === "Tab" && dialogStack.length) {
+      trapDialogFocus(event, topDialog());
       return;
     }
-    if (event.key === "/" && !activeDialog && !isTextInput(event.target)) {
+    if (event.key === "/" && !dialogStack.length && !isTextInput(event.target)) {
       event.preventDefault();
       selectView("markets");
       marketSearch.focus();
@@ -741,10 +761,14 @@ function init() {
         hideHelpTooltip();
         return;
       }
-      if (activeDialog) {
-        closeModal();
-        closeEditor();
-        closeReports();
+      const top = topDialog();
+      if (top) {
+        // Peel one dialog per press: a chart opened over the reports
+        // library must close alone, leaving the library open.
+        if (top === modal) closeModal();
+        else if (top === editorModal) closeEditor();
+        else if (top === reportsModal) closeReports();
+        else closeDialog(top);
         return;
       }
       if (document.body.classList.contains("news-open")) setNewsOpen(false);
@@ -752,7 +776,7 @@ function init() {
     }
     if (
       (event.key === "j" || event.key === "k") &&
-      !activeDialog &&
+      !dialogStack.length &&
       !isTextInput(event.target) &&
       !marketsView.hidden
     ) {
@@ -810,6 +834,9 @@ async function renderTrendsView() {
     Date.now() - trendsFetchedAt < TRENDS_TTL_MS
   ) {
     renderTrendsGrid(latestTrends);
+    // Invalidate any in-flight fetch (e.g. a range flipped back mid-request):
+    // its late response must not overwrite the state just rendered.
+    trendsLoadToken += 1;
     return;
   }
   const token = ++trendsLoadToken;
@@ -826,6 +853,16 @@ async function renderTrendsView() {
     renderTrendsGrid(payload);
   } catch (error) {
     if (token !== trendsLoadToken) return;
+    if (latestTrends) {
+      // Offline refresh: keep the stale-but-real bands on screen with a
+      // note instead of blanking the grid.
+      renderTrendsGrid(latestTrends);
+      trendsGrid.insertAdjacentHTML(
+        "afterbegin",
+        '<div class="trends-note" role="status">Trends refresh failed — showing cached data</div>'
+      );
+      return;
+    }
     trendsGrid.innerHTML = '<div class="empty-state">Trends unavailable</div>';
   }
 }
@@ -884,13 +921,22 @@ function renderComponentsSection() {
     .join("");
   const active = categories.find((category) => category.slug === componentsCategory);
   const charts = active?.charts || [];
+  // Scraped/config URLs are untrusted like news links: only http(s) may
+  // reach an href (blocks javascript: and friends); else a plain card.
+  const safeUrl = /^https?:\/\//i.test(active?.url || "") ? active.url : "";
+  const [cardOpen, cardClose] = safeUrl
+    ? [
+        `<a class="component-card" href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer" title="Open ${escapeHtml(active.label)} trends on PCPartPicker">`,
+        "</a>",
+      ]
+    : ['<div class="component-card">', "</div>"];
   componentsGrid.innerHTML = charts
     .map(
       (chart) =>
-        `<a class="component-card" href="${escapeHtml(active.url)}" target="_blank" rel="noopener noreferrer" title="Open ${escapeHtml(active.label)} trends on PCPartPicker">
+        `${cardOpen}
           <header><strong>${escapeHtml(chart.title)}</strong></header>
           <img src="/api/component-image?src=${encodeURIComponent(chart.image)}" alt="${escapeHtml(`${chart.title} price trend`)}" loading="lazy" decoding="async">
-        </a>`
+        ${cardClose}`
     )
     .join("");
 }
@@ -1143,7 +1189,13 @@ async function loadWatchChart(symbol, token) {
     watchCharts.set(symbol, { instance, series, container });
   } catch (error) {
     if (token !== watchRenderToken) return;
-    container.innerHTML = '<div class="watch-error">No history for this symbol</div>';
+    // Only a genuinely empty payload means the symbol has no history;
+    // network/HTTP failures are transient and retryable.
+    const copy =
+      error?.message === "no_history"
+        ? "No history for this symbol"
+        : "Chart data unavailable — retry from the timeframe buttons";
+    container.innerHTML = `<div class="watch-error">${copy}</div>`;
   }
 }
 
@@ -1388,7 +1440,15 @@ function openSocket() {
     setConnection("live");
   });
   socket.addEventListener("message", (event) => {
-    const message = JSON.parse(event.data);
+    let message;
+    try {
+      message = JSON.parse(event.data);
+    } catch (error) {
+      // Malformed frame: the socket is demonstrably alive, so stamp the
+      // zombie detector and drop only this frame.
+      lastWsFrameAt = Date.now();
+      return;
+    }
     lastWsFrameAt = Date.now();
     if (message.type === "quotes") {
       dataIsCached = false;
@@ -1544,7 +1604,11 @@ function setNewsOpen(open, { focus = true } = {}) {
   newsPanel.inert = !open;
   newsPanel.setAttribute("aria-hidden", String(!open));
   newsToggle.setAttribute("aria-pressed", String(open));
-  localStorage.setItem(NEWS_OPEN_KEY, open ? "1" : "0");
+  try {
+    localStorage.setItem(NEWS_OPEN_KEY, open ? "1" : "0");
+  } catch (error) {
+    // Private browsing can deny storage; the panel still opens for this session.
+  }
   if (open && focus) {
     window.requestAnimationFrame(() => newsClose.focus());
   } else if (!open && newsPanel.contains(document.activeElement)) {
@@ -1804,9 +1868,18 @@ function markReportsSeen(reports, latestUpdate = null) {
   // Watermark only advances: a filtered or paged view of older reports must
   // never regress "seen" and resurrect the badge.
   const newest = latestUpdate || reports[0]?.updated_at || reports[0]?.created_at;
-  const seen = localStorage.getItem(REPORTS_SEEN_KEY) || "";
+  let seen = "";
+  try {
+    seen = localStorage.getItem(REPORTS_SEEN_KEY) || "";
+  } catch (error) {
+    // Private browsing can deny storage; treat everything as unseen.
+  }
   if (newest && newest > seen) {
-    localStorage.setItem(REPORTS_SEEN_KEY, newest);
+    try {
+      localStorage.setItem(REPORTS_SEEN_KEY, newest);
+    } catch (error) {
+      // Storage denied: the badge still hides for this session.
+    }
     reportsBadge.hidden = true;
   }
 }
@@ -3327,7 +3400,10 @@ function keyDateRow(item, asOf) {
   ].filter(Boolean).join(" \u00b7 ");
   const tooltip = tooltipText ? ` title="${escapeHtml(tooltipText)}"` : "";
   const high = release?.importance === 1;
-  const href = release?.series_url || "";
+  // Calendar URLs arrive from scraped/config data: only http(s) may become
+  // an href (blocks javascript: and friends), same guard as the news feed.
+  const rawHref = release?.series_url || "";
+  const href = /^https?:\/\//i.test(rawHref) ? rawHref : "";
   const [tagOpen, tagClose] = href
     ? [`<a href="${escapeHtml(href)}" target="_blank" rel="noopener"`, "</a>"]
     : ["<div", "</div>"];
@@ -3880,11 +3956,28 @@ function renderMarketMap(categoryGroups, payload) {
   if (!visibleTiles) {
     host.style.height = "auto";
     host.innerHTML = '<div class="empty-state">No matching markets</div>';
+    host.dataset.renderKey = ""; // stale key must not suppress the next real render
     return;
   }
 
   const width = Math.max(board.clientWidth, 320);
   const height = Math.min(Math.max(Math.round(window.innerHeight * 0.72), 440), 860);
+  // Quotes tick every few seconds but the layout inputs rarely move: skip
+  // the full innerHTML rebuild (two squarify passes plus hover/focus
+  // teardown) when the rounded inputs match the previous render. Keyed on
+  // the host element so a rebuilt host always repaints.
+  const renderKey = [
+    `${Math.round(width)}x${height}`,
+    ...populated.map(
+      (sector) =>
+        `${sector.name}=` +
+        sector.tiles
+          .map((tile) => `${tile.symbol}:${tile.pct === null ? "" : tile.pct.toFixed(2)}:${Math.round(tile.value)}`)
+          .join(",")
+    ),
+  ].join("|");
+  if (host.dataset.renderKey === renderKey) return;
+  host.dataset.renderKey = renderKey;
   const sectorItems = populated.map((sector) => ({
     ...sector,
     value: sector.tiles.reduce((sum, tile) => sum + tile.value, 0),
@@ -5150,6 +5243,11 @@ function closeModal() {
   if (chart) {
     chart.remove();
     chart = null;
+    chartCandleSeries = null;
+    chartMovingAverageSeries = [];
+    chartVolumeSeries = null;
+    chartVolumeBars = [];
+    chartPreviousCloseLine = null;
   }
   showProfilePanel();
   profileElement.innerHTML = '<div class="profile-empty">Select an asset to load profile data</div>';
@@ -5188,6 +5286,11 @@ async function loadChart(symbol, range, interval) {
   if (chart) {
     chart.remove();
     chart = null;
+    chartCandleSeries = null;
+    chartMovingAverageSeries = [];
+    chartVolumeSeries = null;
+    chartVolumeBars = [];
+    chartPreviousCloseLine = null;
   }
 
   try {
@@ -5227,6 +5330,11 @@ async function loadChart(symbol, range, interval) {
     if (chart) {
       chart.remove();
       chart = null;
+      chartCandleSeries = null;
+      chartMovingAverageSeries = [];
+      chartVolumeSeries = null;
+      chartVolumeBars = [];
+      chartPreviousCloseLine = null;
     }
     chartContextLoading = false;
     activeHistoryContext = null;
@@ -5305,6 +5413,45 @@ function chartThemeColors() {
   };
 }
 
+// Theme flips restyle every live canvas series in place, preserving the
+// current zoom, scroll position, and data.
+function restyleLiveCharts() {
+  if (!chart && !watchCharts.size) return;
+  const colors = chartThemeColors();
+  const chartOptions = {
+    layout: { background: { color: colors.background }, textColor: colors.text },
+    grid: { vertLines: { color: colors.grid }, horzLines: { color: colors.grid } },
+    rightPriceScale: { borderColor: colors.border },
+    timeScale: { borderColor: colors.border },
+  };
+  const candleOptions = {
+    upColor: colors.up,
+    downColor: colors.down,
+    borderUpColor: colors.up,
+    borderDownColor: colors.down,
+    wickUpColor: colors.up,
+    wickDownColor: colors.down,
+  };
+  if (chart) {
+    chart.applyOptions(chartOptions);
+    chartCandleSeries?.applyOptions(candleOptions);
+    chartMovingAverageSeries.forEach((entry) => {
+      entry.series.applyOptions({ color: themeColor(entry.colorToken) });
+    });
+    if (chartVolumeSeries && chartVolumeBars.length) {
+      chartVolumeSeries.setData(volumeSeriesData(chartVolumeBars, colors));
+    }
+    chartPreviousCloseLine?.applyOptions({ color: colors.previous });
+    chartElement.querySelectorAll(".chart-legend i[data-color-token]").forEach((swatch) => {
+      swatch.style.background = themeColor(swatch.dataset.colorToken);
+    });
+  }
+  watchCharts.forEach((entry) => {
+    entry.instance.applyOptions(chartOptions);
+    entry.series.applyOptions(candleOptions);
+  });
+}
+
 function renderChart(bars, interval) {
   if (!window.LightweightCharts) throw new Error("Chart library unavailable");
   const chartWidth = chartElement.clientWidth || 900;
@@ -5329,6 +5476,7 @@ function renderChart(bars, interval) {
     wickUpColor: colors.up,
     wickDownColor: colors.down,
   });
+  chartCandleSeries = series;
   series.setData(bars);
 
   const drawnMas = drawMovingAverages(bars);
@@ -5363,29 +5511,33 @@ function drawMovingAverages(bars) {
       crosshairMarkerVisible: false,
     });
     line.setData(points);
-    drawn.push({ period, color });
+    chartMovingAverageSeries.push({ series: line, colorToken });
+    drawn.push({ period, color, colorToken });
   });
   return drawn;
 }
 
 function drawVolumePane(bars, colors) {
   if (!bars.some((bar) => typeof bar.volume === "number" && bar.volume > 0)) return;
-  const volumeSeries = chart.addHistogramSeries({
+  chartVolumeBars = bars;
+  chartVolumeSeries = chart.addHistogramSeries({
     priceScaleId: "volume",
     priceFormat: { type: "volume" },
     priceLineVisible: false,
     lastValueVisible: false,
   });
   chart.priceScale("volume").applyOptions({ scaleMargins: { top: 0.84, bottom: 0 } });
-  volumeSeries.setData(
-    bars
-      .filter((bar) => typeof bar.volume === "number")
-      .map((bar) => ({
-        time: bar.time,
-        value: bar.volume,
-        color: bar.close >= bar.open ? colors.volumeUp : colors.volumeDown,
-      }))
-  );
+  chartVolumeSeries.setData(volumeSeriesData(bars, colors));
+}
+
+function volumeSeriesData(bars, colors) {
+  return bars
+    .filter((bar) => typeof bar.volume === "number")
+    .map((bar) => ({
+      time: bar.time,
+      value: bar.volume,
+      color: bar.close >= bar.open ? colors.volumeUp : colors.volumeDown,
+    }));
 }
 
 function drawPreviousCloseLine(series, interval, colors) {
@@ -5395,7 +5547,7 @@ function drawPreviousCloseLine(series, interval, colors) {
     typeof quote.display_previous_close === "number" ? quote.display_previous_close : quote.previous_close
   );
   if (prevClose === null || prevClose <= 0) return;
-  series.createPriceLine({
+  chartPreviousCloseLine = series.createPriceLine({
     price: prevClose,
     color: colors.previous,
     lineWidth: 1,
@@ -5410,7 +5562,10 @@ function renderChartLegend(mas) {
   const legend = document.createElement("div");
   legend.className = "chart-legend";
   legend.innerHTML = mas
-    .map(({ period, color }) => `<span><i style="background:${color}"></i>MA${period}</span>`)
+    .map(
+      ({ period, color, colorToken }) =>
+        `<span><i data-color-token="${escapeHtml(colorToken)}" style="background:${color}"></i>MA${period}</span>`
+    )
     .join("");
   chartElement.appendChild(legend);
 }
@@ -5988,11 +6143,19 @@ function bindProfileDescriptionToggle() {
   });
 }
 
+function topDialog() {
+  return dialogStack.length ? dialogStack[dialogStack.length - 1].dialog : null;
+}
+
 function openDialog(dialog, focusTarget) {
-  lastFocusedElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  // Re-opening a stacked dialog moves it to the top but keeps its original
+  // trigger, so closing still returns focus to where the user started.
+  const existingIndex = dialogStack.findIndex((entry) => entry.dialog === dialog);
+  const entry = existingIndex !== -1 ? dialogStack.splice(existingIndex, 1)[0] : { dialog, trigger };
+  dialogStack.push(entry);
   dialog.classList.add("open");
   dialog.setAttribute("aria-hidden", "false");
-  activeDialog = dialog;
   document.body.classList.add("modal-open");
   window.requestAnimationFrame(() => {
     const target = focusTarget || firstFocusableElement(dialog);
@@ -6004,13 +6167,20 @@ function closeDialog(dialog) {
   if (!dialog.classList.contains("open")) return false;
   dialog.classList.remove("open");
   dialog.setAttribute("aria-hidden", "true");
-  if (activeDialog === dialog) activeDialog = null;
+  const index = dialogStack.findIndex((entry) => entry.dialog === dialog);
+  const wasTop = index === dialogStack.length - 1;
+  const entry = index !== -1 ? dialogStack.splice(index, 1)[0] : null;
   if (!document.querySelector(".modal.open")) document.body.classList.remove("modal-open");
-  const returnTarget = dialogReturnTarget(lastFocusedElement);
-  if (returnTarget) {
-    returnTarget.focus();
+  // Focus returns to the closer's trigger only when the TOP dialog closed;
+  // a lower dialog leaving the stack must not steal focus from the one
+  // still open above it.
+  if (wasTop && entry) {
+    const remaining = topDialog();
+    let returnTarget = dialogReturnTarget(entry.trigger);
+    if (remaining && returnTarget && !remaining.contains(returnTarget)) returnTarget = null;
+    const fallback = remaining ? firstFocusableElement(remaining) : null;
+    (returnTarget || fallback)?.focus();
   }
-  lastFocusedElement = null;
   return true;
 }
 

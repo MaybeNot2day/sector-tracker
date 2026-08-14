@@ -195,6 +195,29 @@ def test_ytd_ignores_stale_quote_timestamp_from_prior_year() -> None:
     assert summary["performance"]["YTD"] == 5.0  # type: ignore[index]
 
 
+def test_first_snapshot_writes_when_monotonic_clock_is_near_zero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved_dates: list[str] = []
+    service = DailyBoardService(tmp_path / "board.sqlite3")
+    monkeypatch.setattr(daily_board, "monotonic", lambda: 1.0)
+    monkeypatch.setattr(
+        db,
+        "save_board_snapshot",
+        lambda path, snapshot_date, payload: saved_dates.append(snapshot_date),
+    )
+
+    service._maybe_snapshot(
+        {
+            "as_of": datetime.now(UTC).isoformat(),
+            "universe": {"quoted": 1},
+        }
+    )
+
+    assert saved_dates == [datetime.now(UTC).date().isoformat()]
+
+
 def test_snapshot_save_failure_is_reported_without_raising(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -80,7 +80,7 @@ def test_crypto_tape_rows_carry_baskets_from_the_snapshot(
         symbol.upper(): {"coin": symbol, "display": symbol, "last": 1.0}
         for symbol in ["UNI", "ARB", "kFOO", "NEWCOIN"]
     }
-    provider._markets_time = monotonic()
+    provider._crypto_time = monotonic()
 
     tape = provider.crypto_tape_cached()
 

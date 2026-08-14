@@ -54,6 +54,7 @@ def hyperliquid_with(tradfi: dict[str, dict[str, Any]]) -> HyperliquidProvider:
     provider = HyperliquidProvider()
     provider._tradfi = tradfi
     provider._markets_time = monotonic()
+    provider._tradfi_time = provider._markets_time
     return provider
 
 
@@ -265,6 +266,21 @@ async def test_overlay_skips_non_usd_listings(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_overlay_skips_unknown_listing_currency(tmp_path: Path) -> None:
+    groups = equity_group("AAPL")
+    original = yahoo_quote("AAPL", currency=None)
+    yahoo = ScriptedQuotes({"AAPL": original})
+    service = QuoteService(
+        tmp_path / "board.sqlite3",
+        {"yahoo": yahoo, "hyperliquid": hyperliquid_with(aapl_market())},
+    )
+
+    fresh = await service._fetch_fresh_quotes(groups)
+
+    assert fresh["AAPL"] == original
+
+
+@pytest.mark.asyncio
 async def test_overlay_skips_error_quotes(tmp_path: Path) -> None:
     groups = equity_group("AAPL")
     broken = yahoo_quote("AAPL", last=210.0, previous_close=208.0, error="upstream_down")
@@ -306,6 +322,8 @@ class RecordingHyperliquid(HyperliquidProvider):
         self._crypto = crypto
         self._tradfi = tradfi
         self._markets_time = monotonic()  # keep the map warm: no HTTP
+        self._crypto_time = self._markets_time if crypto else 0.0
+        self._tradfi_time = self._markets_time if tradfi else 0.0
         self.requested_candidates: set[str] | None = None
 
     async def live_prices(self, symbols: set[str]) -> dict[str, float]:
@@ -360,6 +378,7 @@ async def test_overlay_skips_crypto_classified_ticker_collisions(
     # Listed on the main (crypto) dex only: a ticker collision with the ETF.
     hyperliquid._crypto = {"ROBO": {"coin": "ROBO", "display": "ROBO", "last": 0.014}}
     hyperliquid._markets_time = monotonic()
+    hyperliquid._crypto_time = hyperliquid._markets_time
     service = QuoteService(tmp_path / "board.sqlite3", {"yahoo": yahoo, "hyperliquid": hyperliquid})
 
     quotes = await service._fetch_fresh_quotes(equity_group("ROBO"))

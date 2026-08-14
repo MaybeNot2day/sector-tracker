@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from time import monotonic
 from typing import Any, cast
@@ -10,6 +12,8 @@ import httpx
 
 from app.models import AssetConfig, Bar, Quote, is_valid_bar
 from app.providers.base import QuoteProvider, ValidationStatus
+
+logger = logging.getLogger(__name__)
 
 INFO_URL = "https://api.hyperliquid.xyz/info"
 
@@ -21,6 +25,11 @@ TRADFI_DEX = "xyz"
 MARKETS_TTL_SECONDS = 8.0
 RATE_LIMIT_COOLDOWN_SECONDS = 60.0
 FAILURE_COOLDOWN_SECONDS = 30.0
+# A market map that has not refreshed for this long must not price anything:
+# the overlay would rewrite live venue quotes with dead marks and the tape
+# would show frozen prices as if they were live. Stale maps still serve
+# has_market/is_crypto_market lookups — routing can resolve from old listings.
+MAX_QUOTE_AGE_SECONDS = 120.0
 
 # candleSnapshot serves at most ~5000 recent candles per call — enough for
 # every range the board requests at each interval, so no paging.
@@ -49,6 +58,11 @@ class HyperliquidProvider(QuoteProvider):
         self._crypto: dict[str, dict[str, Any]] = {}
         self._tradfi: dict[str, dict[str, Any]] = {}
         self._markets_time = 0.0
+        # Per-dex parse-success stamps: one dex can fail while the other keeps
+        # refreshing, and freshness decisions must track the serving map.
+        self._crypto_time = 0.0
+        self._tradfi_time = 0.0
+        self._outage_warned_until = 0.0
         self._cooldown_until: dict[str, float] = {}
         self._markets_lock = asyncio.Lock()
         self._client: httpx.AsyncClient | None = None
@@ -57,6 +71,8 @@ class HyperliquidProvider(QuoteProvider):
         if not assets:
             return []
         await self._refresh_markets()
+        if not self._map_fresh(self._crypto_time) and not self._map_fresh(self._tradfi_time):
+            self._warn_outage_once()
         now = datetime.now(UTC)
         quotes: list[Quote] = []
         for asset in assets:
@@ -64,8 +80,16 @@ class HyperliquidProvider(QuoteProvider):
             if market is None:
                 continue
             quote = _quote_from_market(asset, market, now)
-            if quote is not None:
-                quotes.append(quote)
+            if quote is None:
+                continue
+            serving_time = (
+                self._crypto_time
+                if asset.type in {"crypto_perp", "crypto_spot"}
+                else self._tradfi_time
+            )
+            if not self._map_fresh(serving_time):
+                quote = replace(quote, is_stale=True)
+            quotes.append(quote)
         return quotes
 
     async def get_history(self, asset: AssetConfig, *, interval: str, range_: str) -> list[Bar]:
@@ -75,7 +99,9 @@ class HyperliquidProvider(QuoteProvider):
             return []
         start, end = _range_to_window(range_)
         payload = await self._post_info(
-            "candleSnapshot",
+            # Per-coin cooldown key: one symbol's failing candle request must
+            # never black out every other symbol's chart.
+            f"candleSnapshot:{market['coin']}",
             {
                 "type": "candleSnapshot",
                 "req": {
@@ -115,6 +141,10 @@ class HyperliquidProvider(QuoteProvider):
         a token ticker must never price the same-named equity.
         """
         await self._refresh_markets()
+        # A stale xyz map must never feed the overlay: it would replace live
+        # venue quotes with frozen marks that still look authoritative.
+        if not self._map_fresh(self._tradfi_time):
+            return {}
         prices: dict[str, float] = {}
         for symbol in symbols:
             market = self._tradfi.get(symbol.upper())
@@ -140,6 +170,10 @@ class HyperliquidProvider(QuoteProvider):
         quote poll has refreshed the market map, so no HTTP happens here.
         Cold caches yield an empty tape until the first poll lands.
         """
+        # A frozen tape is worse than an empty one: rows carry no timestamps,
+        # so stale marks would read as live prices.
+        if not self._map_fresh(self._crypto_time):
+            return []
         tape: list[dict[str, object]] = []
         for market in self._crypto.values():
             last = market.get("last")
@@ -166,11 +200,15 @@ class HyperliquidProvider(QuoteProvider):
     def status(self) -> dict[str, object]:
         """Cache freshness and cooldowns, for the diagnostics endpoint."""
         now = monotonic()
-        age = round(now - self._markets_time, 1) if self._markets_time > 0 else None
+
+        def age(stamp: float) -> float | None:
+            return round(now - stamp, 1) if stamp > 0 else None
+
         return {
             "crypto_markets": len(self._crypto),
             "tradfi_markets": len(self._tradfi),
-            "age_seconds": age,
+            "crypto_age_seconds": age(self._crypto_time),
+            "tradfi_age_seconds": age(self._tradfi_time),
             "cooldowns_seconds": {
                 key: round(until - now, 1)
                 for key, until in self._cooldown_until.items()
@@ -201,12 +239,32 @@ class HyperliquidProvider(QuoteProvider):
             )
             crypto = _parse_universe(main, strip_prefix=None)
             synths = _parse_universe(tradfi, strip_prefix=f"{TRADFI_DEX}:")
+            now = monotonic()
             if crypto:
                 self._crypto = crypto
+                self._crypto_time = now
             if synths:
                 self._tradfi = synths
+                self._tradfi_time = now
             if crypto or synths:
-                self._markets_time = monotonic()
+                self._markets_time = now
+
+    def _map_fresh(self, stamp: float) -> bool:
+        return stamp > 0 and monotonic() - stamp <= MAX_QUOTE_AGE_SECONDS
+
+    def _warn_outage_once(self) -> None:
+        """One warning per failure-cooldown window, not one per 10s poll."""
+        now = monotonic()
+        if now < self._outage_warned_until:
+            return
+        self._outage_warned_until = now + FAILURE_COOLDOWN_SECONDS
+        logger.warning(
+            "Hyperliquid quotes unavailable: market maps empty or older than %.0fs "
+            "(crypto: %d markets, tradfi: %d markets)",
+            MAX_QUOTE_AGE_SECONDS,
+            len(self._crypto),
+            len(self._tradfi),
+        )
 
     def _http_client(self) -> httpx.AsyncClient:
         if self._client is None:

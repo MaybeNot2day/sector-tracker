@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
@@ -113,3 +114,20 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
     assert set(tracker.started) == {"yahoo", "hyperliquid", "stooq", "news", "options", "econ"}
     # Hyperliquid's close failure is isolated; every other resource still closes.
     assert set(tracker.completed) == {"yahoo", "stooq", "news", "options", "econ"}
+
+
+@pytest.mark.asyncio
+async def test_background_loop_crash_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def fail() -> None:
+        raise RuntimeError("loop failed")
+
+    task = asyncio.create_task(fail(), name="quote-poll")
+    with pytest.raises(RuntimeError, match="loop failed"):
+        await task
+
+    with caplog.at_level(logging.ERROR, logger=main_module.logger.name):
+        main_module._log_loop_crash(task)
+
+    assert "background task quote-poll crashed" in caplog.text

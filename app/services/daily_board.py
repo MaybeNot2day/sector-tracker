@@ -28,7 +28,10 @@ class _PreparedBars:
 class DailyBoardService:
     def __init__(self, database_path: Path) -> None:
         self.database_path = database_path
-        self._last_snapshot_write = 0.0
+        # None (not 0.0): monotonic() is near-zero right after host boot,
+        # which would otherwise read as a live throttle window and skip the
+        # first snapshot write on a fresh microVM.
+        self._last_snapshot_write: float | None = None
         self._last_snapshot_success_at: datetime | None = None
         self._last_snapshot_error: str | None = None
 
@@ -88,7 +91,10 @@ class DailyBoardService:
         if not isinstance(universe, dict) or not universe.get("quoted"):
             return
         now = monotonic()
-        if now - self._last_snapshot_write < SNAPSHOT_WRITE_INTERVAL_SECONDS:
+        if (
+            self._last_snapshot_write is not None
+            and now - self._last_snapshot_write < SNAPSHOT_WRITE_INTERVAL_SECONDS
+        ):
             return
         # Key strictly by today's UTC date. as_of is max(quote.timestamp),
         # which during a full provider outage is the date of the last

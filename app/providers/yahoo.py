@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import bisect
 import json
+import logging
 import math
 import subprocess
 from collections.abc import Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
+from threading import Lock
 from time import monotonic, sleep
 from typing import Any, cast
 from urllib.parse import quote as url_quote
@@ -17,6 +19,8 @@ from urllib.parse import urlencode
 from app.models import AssetConfig, Bar, Quote, is_valid_bar
 from app.providers.aggregate import aggregate_bars
 from app.providers.base import QuoteProvider, ValidationStatus
+
+logger = logging.getLogger(__name__)
 
 YAHOO_SPARK_URLS = (
     "https://query1.finance.yahoo.com/v7/finance/spark",
@@ -63,6 +67,8 @@ class YahooProvider(QuoteProvider):
                 for quote in pool.map(self._get_chart_quote_sync, missing_assets):
                     if quote is not None:
                         quotes_by_symbol[quote.symbol] = quote
+        if not quotes_by_symbol:
+            _warn_quote_outage_once(len(unique_assets))
         return list(self._with_usd_display_quotes(quotes_by_symbol).values())
 
     async def validate_asset(self, asset: AssetConfig) -> ValidationStatus:
@@ -362,7 +368,7 @@ def _get_json_with_retry(
     for attempt in range(3):
         for url in urls:
             try:
-                return _get_json(url, params)
+                payload = _get_json(url, params)
             except (YahooRateLimited, YahooFailureCooldown):
                 # Retrying during either cooldown only adds latency (and a
                 # retried 429 can extend Yahoo's ban).
@@ -370,11 +376,16 @@ def _get_json_with_retry(
             except Exception as exc:
                 error = exc
                 continue
+            if _endpoint_family(url) == "chart":
+                _reset_chart_family_failures()
+            return payload
         if attempt < 2:
             sleep(1.5 * (attempt + 1))
     failed_at = monotonic()
     for scope in {_failure_scope(url) for url in urls}:
         _failure_until[scope] = failed_at + YAHOO_FAILURE_COOLDOWN_SECONDS
+    if any(_endpoint_family(url) == "chart" for url in urls):
+        _register_chart_family_failure(failed_at, error)
     if error is not None:
         raise error
     raise RuntimeError("request did not run")
@@ -389,6 +400,49 @@ _rate_limited_until: dict[str, float] = {}
 # every other symbol's chart calls. Scopes come from configured watchlist
 # symbols, so the dict stays naturally bounded.
 _failure_until: dict[str, float] = {}
+# Consecutive fully-exhausted chart fetches, across symbols. Isolated 404s
+# stay per-symbol, but a streak means the endpoint itself is down: arm one
+# family-wide cooldown so a total outage costs ~3 symbols' worth of retries
+# per cycle instead of one per watchlist symbol (~90).
+YAHOO_CHART_FAMILY_FAILURE_THRESHOLD = 3
+_chart_failure_streak = 0
+_chart_failure_lock = Lock()
+
+# Full-cycle outage warnings, rate-limited to one per failure-cooldown
+# window so a 10s poll loop cannot spam the log.
+_outage_warned_until = 0.0
+
+
+def _reset_chart_family_failures() -> None:
+    global _chart_failure_streak
+    with _chart_failure_lock:
+        _chart_failure_streak = 0
+
+
+def _register_chart_family_failure(failed_at: float, error: Exception | None) -> None:
+    """Arm a family breaker after repeated transport/server failures."""
+    global _chart_failure_streak
+    # A delisted ticker is a symbol-local miss, not evidence that the chart
+    # family is unavailable.
+    if error is not None and "404" in str(error):
+        return
+    with _chart_failure_lock:
+        _chart_failure_streak += 1
+        if _chart_failure_streak >= YAHOO_CHART_FAMILY_FAILURE_THRESHOLD:
+            _failure_until["chart"] = failed_at + YAHOO_FAILURE_COOLDOWN_SECONDS
+            _chart_failure_streak = 0
+
+
+def _warn_quote_outage_once(asset_count: int) -> None:
+    global _outage_warned_until
+    now = monotonic()
+    if now < _outage_warned_until:
+        return
+    _outage_warned_until = now + YAHOO_FAILURE_COOLDOWN_SECONDS
+    logger.warning(
+        "Yahoo quote fetch returned nothing for all %d assets (spark and chart failed)",
+        asset_count,
+    )
 
 
 class YahooRateLimited(Exception):
@@ -416,7 +470,9 @@ def _raise_if_cooling_down(url: str) -> None:
     if now < _rate_limited_until.get(family, 0.0):
         raise YahooRateLimited(f"{family} cooling down after 429")
     scope = _failure_scope(url)
-    if now < _failure_until.get(scope, 0.0):
+    # Family-wide stamp first: during a full chart outage every symbol is
+    # blocked, not just the ones that already failed.
+    if now < _failure_until.get(family, 0.0) or now < _failure_until.get(scope, 0.0):
         raise YahooFailureCooldown(f"{scope} cooling down after request failures")
 
 
@@ -687,6 +743,10 @@ def _yahoo_period(range_: str, interval: str) -> str:
             "1d": "1d",
             "1w": "5d",
             "1mo": "1mo",
+            # Long daily ranges pass through instead of capping at the 2y
+            # over-fetch: 5y/10y charts otherwise silently truncate.
+            "5y": "5y",
+            "10y": "10y",
         }.get(range_, "2y")
     if interval in {"1wk", "1mo"}:
         return {"5y": "5y", "10y": "10y"}.get(range_, "10y")

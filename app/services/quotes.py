@@ -164,9 +164,9 @@ class QuoteService:
             quote = fresh_by_symbol.get(symbol)
             if quote is None or quote.error or quote.last <= 0:
                 continue
-            if quote.currency not in (None, "USD"):
-                # Non-USD listings keep their venue pricing; the FX display
-                # pipeline is built around the listing currency.
+            if quote.currency != "USD":
+                # Unknown or non-USD listing currency is not safe to combine
+                # with a USD-denominated synthetic mark.
                 continue
             baseline = _official_close(quote, now)
             if baseline is None or baseline <= 0:

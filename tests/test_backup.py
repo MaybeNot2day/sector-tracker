@@ -2,8 +2,10 @@
 
 import gzip
 import importlib.util
+import os
 import sqlite3
 import sys
+import tempfile
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +16,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from app import db
+from app import main as main_module
 from app.main import app
 
 _SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -160,3 +163,24 @@ def test_failed_replacement_preserves_existing_same_day_archive(
     assert archive.read_bytes() == original
     assert not list(backup_dir.glob("*.tmp"))
     assert len(alerts) == 1 and "FAILED" in alerts[0]
+
+
+def test_stale_orphaned_backup_temps_are_removed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stale = tmp_path / "board-backup-stale.sqlite3"
+    fresh = tmp_path / "board-backup-fresh.sqlite3"
+    unrelated = tmp_path / "unrelated.sqlite3"
+    for path in (stale, fresh, unrelated):
+        path.write_bytes(b"temp")
+    os.utime(stale, (1.0, 1.0))
+    os.utime(fresh, (4_999.0, 4_999.0))
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(main_module, "time", lambda: 5_000.0)
+
+    main_module._remove_stale_backup_temps()
+
+    assert not stale.exists()
+    assert fresh.exists()
+    assert unrelated.exists()

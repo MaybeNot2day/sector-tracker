@@ -73,10 +73,50 @@ async def test_history_bounds_requests_reuses_client_and_closes(
         "d1": "20251225",
         "d2": "20260710",
     }
-    assert requests[2][1] == {"s": "spy.us", "i": "d", "d2": "20260710"}
+    assert requests[2][1] == {
+        "s": "spy.us",
+        "i": "d",
+        "d1": "20250702",
+        "d2": "20260710",
+    }
     assert [request[2] for request in requests] == [15.0, 15.0, 15.0]
     assert tracker["client_kwargs"] == {"timeout": 10.0}
     assert tracker["constructions"] == 1
 
     await provider.aclose()
     assert tracker["closes"] == 1
+
+
+@pytest.mark.asyncio
+async def test_validate_asset_distinguishes_not_found_from_outage() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        symbol = request.url.params["s"]
+        if symbol == "down.us":
+            return httpx.Response(503)
+        if symbol == "spy.us":
+            body = (
+                "Symbol,Date,Time,Open,High,Low,Close,Volume\n"
+                "SPY.US,2026-07-10,12:00:00,100,102,99,101,1000\n"
+            )
+        else:
+            body = (
+                "Symbol,Date,Time,Open,High,Low,Close,Volume\nNONE.US,N/D,N/D,N/D,N/D,N/D,N/D,N/D\n"
+            )
+        return httpx.Response(200, text=body)
+
+    provider = StooqProvider()
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    assert (
+        await provider.validate_asset(AssetConfig(symbol="SPY", type="etf", source="stooq"))
+        == "valid"
+    )
+    assert (
+        await provider.validate_asset(AssetConfig(symbol="NONE", type="etf", source="stooq"))
+        == "not_found"
+    )
+    assert (
+        await provider.validate_asset(AssetConfig(symbol="DOWN", type="etf", source="stooq"))
+        == "unavailable"
+    )
+    await provider.aclose()

@@ -25,3 +25,15 @@ def test_hsts_is_not_sent_over_plain_http() -> None:
 
     assert response.status_code == 200
     assert "strict-transport-security" not in response.headers
+
+
+def test_static_html_is_revalidated_while_hashed_assets_are_immutable() -> None:
+    client = TestClient(app)
+
+    html = client.get("/static/index.html")
+    asset = client.get("/static/app.js")
+
+    assert html.status_code == 200
+    assert html.headers["cache-control"] == "no-cache"
+    assert asset.status_code == 200
+    assert asset.headers["cache-control"] == "public, max-age=31536000, immutable"

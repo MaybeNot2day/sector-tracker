@@ -342,7 +342,7 @@ def load_latest_quotes(path: Path, symbols: Sequence[str]) -> dict[str, Quote]:
                        display_previous_close, display_change_abs, display_change_pct,
                        display_currency, volume, funding_rate, open_interest_usd
                 FROM latest_quotes
-                WHERE UPPER(symbol) IN ({placeholders})
+                WHERE symbol IN ({placeholders})
                 """,
                 chunk,
             ).fetchall()
@@ -1271,11 +1271,12 @@ def _connect(path: Path) -> Iterator[sqlite3.Connection]:
     # as "database is locked" and the write was lost.
     conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
-    # WAL lets readers proceed alongside the single writer. The mode
-    # persists in the file, so re-running the pragma here is a cheap no-op.
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
     try:
+        # WAL lets readers proceed alongside the single writer. The mode
+        # persists in the file, so re-running the pragma here is a cheap
+        # no-op. Inside the try: a pragma failure must still close conn.
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
         # sqlite3's own context manager commits/rolls back but never
         # closes; every call-site's `with` was leaking a connection.
         with conn:

@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 import csv
+import logging
 import math
 from datetime import UTC, date, datetime, timedelta
 from io import StringIO
+from time import monotonic
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
 
 from app.models import AssetConfig, Bar, Quote, is_valid_bar
-from app.providers.base import QuoteProvider
+from app.providers.base import QuoteProvider, ValidationStatus
+
+logger = logging.getLogger(__name__)
+
+# One outage warning per window; the quote poll retries every cycle and
+# must not turn a Stooq outage into log spam.
+FAILURE_WARN_INTERVAL_SECONDS = 30.0
 
 
 class StooqProvider(QuoteProvider):
@@ -18,6 +26,7 @@ class StooqProvider(QuoteProvider):
 
     def __init__(self) -> None:
         self._client: httpx.AsyncClient | None = None
+        self._outage_warned_until = 0.0
 
     async def aclose(self) -> None:
         if self._client is not None:
@@ -32,15 +41,23 @@ class StooqProvider(QuoteProvider):
     async def get_quotes(self, assets: list[AssetConfig]) -> list[Quote]:
         if not assets:
             return []
-        symbols = ",".join(_stooq_symbol(asset.symbol) for asset in assets)
-        url = "https://stooq.com/q/l/"
-        params = {"s": symbols, "f": "sd2t2ohlcv", "h": "", "e": "csv"}
         try:
-            response = await self._http_client().get(url, params=params)
-            response.raise_for_status()
+            return await self._fetch_quotes(assets)
         except Exception:
+            now = monotonic()
+            if now >= self._outage_warned_until:
+                self._outage_warned_until = now + FAILURE_WARN_INTERVAL_SECONDS
+                logger.warning("Stooq quote fetch failed for %d assets", len(assets))
             return []
 
+    async def _fetch_quotes(self, assets: list[AssetConfig]) -> list[Quote]:
+        """Fetch without swallowing transport failures; validation reuses it."""
+        symbols = ",".join(_stooq_symbol(asset.symbol) for asset in assets)
+        response = await self._http_client().get(
+            "https://stooq.com/q/l/",
+            params={"s": symbols, "f": "sd2t2ohlcv", "h": "", "e": "csv"},
+        )
+        response.raise_for_status()
         by_stooq_symbol = {_stooq_symbol(asset.symbol).upper(): asset for asset in assets}
         quotes: list[Quote] = []
         for row in csv.DictReader(StringIO(response.text)):
@@ -63,6 +80,15 @@ class StooqProvider(QuoteProvider):
                 )
             )
         return quotes
+
+    async def validate_asset(self, asset: AssetConfig) -> ValidationStatus:
+        try:
+            quotes = await self._fetch_quotes([asset])
+        except Exception:
+            return "unavailable"
+        if any(quote.symbol == asset.symbol for quote in quotes):
+            return "valid"
+        return "not_found"
 
     async def get_history(self, asset: AssetConfig, *, interval: str, range_: str) -> list[Bar]:
         if interval != "1d":
@@ -114,14 +140,16 @@ def _history_date_params(range_: str) -> dict[str, str]:
         "6mo": 186,
         "1y": 366,
         "5y": 366 * 5,
+        "10y": 366 * 10,
     }
-    if range_ in day_counts:
-        overfetch_days = 14 if range_ == "1d" else 7
-        start = today - timedelta(days=day_counts[range_] + overfetch_days)
-    elif range_ == "ytd":
+    if range_ == "ytd":
         start = date(today.year, 1, 1) - timedelta(days=7)
     else:
-        return params
+        # Unknown internal callers default to a bounded 1y fetch instead of
+        # accidentally downloading Stooq's full multi-decade history.
+        days = day_counts.get(range_, day_counts["1y"])
+        overfetch_days = 14 if range_ == "1d" else 7
+        start = today - timedelta(days=days + overfetch_days)
     params["d1"] = start.strftime("%Y%m%d")
     return params
 

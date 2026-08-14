@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from threading import Lock
-from time import monotonic
+from time import monotonic, time
 from typing import Annotated, Literal, cast
 
 from fastapi import (
@@ -149,6 +149,15 @@ class FringeCloseRequest(BaseModel):
     reason: str = Field(default="auto-stop", min_length=1, max_length=300)
 
 
+def _log_loop_crash(task: asyncio.Task[None]) -> None:
+    # A crashed poll loop previously died silently; the board just froze.
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("background task %s crashed", task.get_name(), exc_info=exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = Settings()
@@ -199,10 +208,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.news_task = None
     app.state.econ_calendar_task = None
     if settings.enable_background_tasks:
-        app.state.poll_task = asyncio.create_task(quote_poll_loop(app.state))
-        app.state.history_task = asyncio.create_task(history_refresh_loop(app.state))
-        app.state.news_task = asyncio.create_task(news_poll_loop(app.state))
-        app.state.econ_calendar_task = asyncio.create_task(econ_calendar_loop(app.state))
+        app.state.poll_task = asyncio.create_task(
+            quote_poll_loop(app.state), name="quote_poll_loop"
+        )
+        app.state.history_task = asyncio.create_task(
+            history_refresh_loop(app.state), name="history_refresh_loop"
+        )
+        app.state.news_task = asyncio.create_task(news_poll_loop(app.state), name="news_poll_loop")
+        app.state.econ_calendar_task = asyncio.create_task(
+            econ_calendar_loop(app.state), name="econ_calendar_loop"
+        )
+        for task in (
+            app.state.poll_task,
+            app.state.history_task,
+            app.state.news_task,
+            app.state.econ_calendar_task,
+        ):
+            task.add_done_callback(_log_loop_crash)
 
     try:
         yield
@@ -287,7 +309,13 @@ class CachedStaticFiles(StaticFiles):
         status_code: int = 200,
     ) -> Response:
         response = super().file_response(full_path, stat_result, scope, status_code)
-        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        # index.html carries the ?v= cache-busters; an immutable copy would
+        # pin old asset versions forever. It is normally served by the root
+        # route, but the mount must not hand out a poisoned copy either.
+        if Path(full_path).name == "index.html":
+            response.headers["Cache-Control"] = "no-cache"
+        else:
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         return response
 
 
@@ -369,7 +397,7 @@ def require_edit_token(
 @app.post("/api/groups", dependencies=[Depends(require_edit_token)])
 async def create_group(request: GroupRequest) -> dict[str, object]:
     async with app.state.watchlist_lock:
-        groups_current = load_watchlists(app.state.settings.watchlist_path)
+        groups_current = await asyncio.to_thread(load_watchlists, app.state.settings.watchlist_path)
         name = clean_text(request.name)
         if name.upper() == MACRO_TAPE_GROUP_NAME:
             # Reserved: the virtual macro group is appended at fetch time;
@@ -379,21 +407,29 @@ async def create_group(request: GroupRequest) -> dict[str, object]:
         if find_group(groups_current, name):
             raise HTTPException(status_code=409, detail="group_already_exists")
         groups_current.append(GroupConfig(name=name.upper(), assets=[]))
-        save_watchlists(app.state.settings.watchlist_path, groups_current)
-        app.state.groups = load_watchlists(app.state.settings.watchlist_path)
+        await asyncio.to_thread(save_watchlists, app.state.settings.watchlist_path, groups_current)
+        app.state.groups = await asyncio.to_thread(
+            load_watchlists, app.state.settings.watchlist_path
+        )
+        # Trend bands are keyed by the watchlist shape; a cached payload would
+        # keep serving the pre-edit groups for up to 5 minutes.
+        _trends_cache.clear()
     return groups_payload(app.state.groups)
 
 
 @app.delete("/api/groups/{group_name}", dependencies=[Depends(require_edit_token)])
 async def delete_group(group_name: str) -> dict[str, object]:
     async with app.state.watchlist_lock:
-        groups_current = load_watchlists(app.state.settings.watchlist_path)
+        groups_current = await asyncio.to_thread(load_watchlists, app.state.settings.watchlist_path)
         group = find_group(groups_current, group_name)
         if group is None:
             raise HTTPException(status_code=404, detail="group_not_found")
         groups_current = [item for item in groups_current if item is not group]
-        save_watchlists(app.state.settings.watchlist_path, groups_current)
-        app.state.groups = load_watchlists(app.state.settings.watchlist_path)
+        await asyncio.to_thread(save_watchlists, app.state.settings.watchlist_path, groups_current)
+        app.state.groups = await asyncio.to_thread(
+            load_watchlists, app.state.settings.watchlist_path
+        )
+        _trends_cache.clear()
     return groups_payload(app.state.groups)
 
 
@@ -409,7 +445,7 @@ async def create_asset(group_name: str, request: AssetRequest) -> dict[str, obje
     )
     await validate_symbol_exists(asset)
     async with app.state.watchlist_lock:
-        groups_current = load_watchlists(app.state.settings.watchlist_path)
+        groups_current = await asyncio.to_thread(load_watchlists, app.state.settings.watchlist_path)
         group = find_group(groups_current, group_name)
         if group is None:
             raise HTTPException(status_code=404, detail="group_not_found")
@@ -430,8 +466,11 @@ async def create_asset(group_name: str, request: AssetRequest) -> dict[str, obje
                 status_code=409,
                 detail="symbol_configuration_conflict",
             ) from exc
-        save_watchlists(app.state.settings.watchlist_path, groups_current)
-        app.state.groups = load_watchlists(app.state.settings.watchlist_path)
+        await asyncio.to_thread(save_watchlists, app.state.settings.watchlist_path, groups_current)
+        app.state.groups = await asyncio.to_thread(
+            load_watchlists, app.state.settings.watchlist_path
+        )
+        _trends_cache.clear()
     return groups_payload(app.state.groups)
 
 
@@ -457,7 +496,7 @@ async def validate_symbol_exists(asset: AssetConfig) -> None:
 @app.delete("/api/groups/{group_name}/assets/{symbol}", dependencies=[Depends(require_edit_token)])
 async def delete_asset(group_name: str, symbol: str) -> dict[str, object]:
     async with app.state.watchlist_lock:
-        groups_current = load_watchlists(app.state.settings.watchlist_path)
+        groups_current = await asyncio.to_thread(load_watchlists, app.state.settings.watchlist_path)
         group = find_group(groups_current, group_name)
         if group is None:
             raise HTTPException(status_code=404, detail="group_not_found")
@@ -473,8 +512,11 @@ async def delete_asset(group_name: str, symbol: str) -> dict[str, object]:
             )
             for item in groups_current
         ]
-        save_watchlists(app.state.settings.watchlist_path, groups_current)
-        app.state.groups = load_watchlists(app.state.settings.watchlist_path)
+        await asyncio.to_thread(save_watchlists, app.state.settings.watchlist_path, groups_current)
+        app.state.groups = await asyncio.to_thread(
+            load_watchlists, app.state.settings.watchlist_path
+        )
+        _trends_cache.clear()
     return groups_payload(app.state.groups)
 
 
@@ -516,11 +558,11 @@ def clean_optional(value: str | None) -> str | None:
 
 @app.get("/api/quotes")
 async def quotes() -> dict[str, object]:
-    # One snapshot: an edit completing across the heal await must not
-    # rebuild the payload from swapped groups zipped against old quotes.
+    # One snapshot: an edit landing mid-request must not rebuild the payload
+    # from swapped groups zipped against old quotes.
     groups = app.state.groups
     grouped = await app.state.quote_service.get_board_quotes(with_macro_group(groups))
-    await _heal_stale_history()
+    _schedule_history_heal()
     return await board_payload_async(app.state, groups, grouped)
 
 
@@ -549,6 +591,28 @@ async def _heal_stale_history() -> None:
         logger.exception("stale daily-bar heal failed")
 
 
+# Fire-and-forget with a floor: /api/quotes must never wait on the heal, and
+# weekend polls (when nothing can refresh) must not respawn it every request.
+_HEAL_MIN_INTERVAL_SECONDS = 60.0
+_heal_task: asyncio.Task[None] | None = None
+# None (not 0.0): monotonic() is near-zero right after host boot, which would
+# otherwise read as a live interval window and skip the first heal.
+_heal_started: float | None = None
+
+
+def _schedule_history_heal() -> None:
+    """Start a background heal unless one is running or ran within the floor."""
+    global _heal_task, _heal_started
+    if _heal_task is not None and not _heal_task.done():
+        return
+    now = monotonic()
+    if _heal_started is not None and now - _heal_started < _HEAL_MIN_INTERVAL_SECONDS:
+        return
+    _heal_started = now
+    # _heal_stale_history catches everything itself, so no done-callback.
+    _heal_task = asyncio.create_task(_heal_stale_history())
+
+
 @app.get("/api/crypto-etf-flows")
 async def crypto_etf_flows() -> dict[str, object]:
     service: CryptoEtfFlowService = app.state.crypto_etf_flow_service
@@ -571,9 +635,10 @@ async def create_report(request: ReportRequest) -> dict[str, object]:
     slug = _report_slug(request.slug or request.title)
     if not slug:
         raise HTTPException(status_code=422, detail="report_slug_invalid")
-    events = parse_key_dates(request.body, default_date=report_date)
+    # Parsers walk the whole markdown body; keep the event loop free.
+    events = await asyncio.to_thread(parse_key_dates, request.body, default_date=report_date)
     # None: no fringe section — the ledger stays untouched.
-    actions = parse_fringe_actions(request.body)
+    actions = await asyncio.to_thread(parse_fringe_actions, request.body)
 
     def _ingest() -> int:
         return db.ingest_report(
@@ -716,6 +781,21 @@ async def close_fringe_position(idea_id: int, request: FringeCloseRequest) -> di
     return {"closed": item}
 
 
+# A crashed request or killed download can orphan the FileResponse temp file;
+# sweep old ones on the next backup call instead of leaking /tmp forever.
+_BACKUP_TEMP_MAX_AGE_SECONDS = 3600.0
+
+
+def _remove_stale_backup_temps() -> None:
+    cutoff = time() - _BACKUP_TEMP_MAX_AGE_SECONDS
+    for leftover in Path(tempfile.gettempdir()).glob("board-backup-*.sqlite3"):
+        try:
+            if leftover.stat().st_mtime < cutoff:
+                leftover.unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
 @app.get("/api/backup", dependencies=[Depends(require_edit_token)])
 async def database_backup() -> FileResponse:
     """Stream a consistent SQLite snapshot for off-box backups.
@@ -724,6 +804,7 @@ async def database_backup() -> FileResponse:
     state; the nightly hermes-box job pulls this into the Syncthing-mirrored
     vault so the track record survives the droplet.
     """
+    await asyncio.to_thread(_remove_stale_backup_temps)
     handle, temp_path = tempfile.mkstemp(prefix="board-backup-", suffix=".sqlite3")
     os.close(handle)
     os.unlink(temp_path)  # VACUUM INTO refuses an existing target
@@ -818,6 +899,7 @@ async def snapshots(days: int = Query(default=30, ge=1, le=365)) -> dict[str, ob
 # keeps tab switches and range flips from re-scanning SQLite.
 _trends_cache: dict[int, tuple[float, dict[str, object]]] = {}
 _TRENDS_CACHE_SECONDS = 300.0
+_TRENDS_CACHE_MAX = 8
 
 
 @app.get("/api/trends")
@@ -830,6 +912,9 @@ async def trends(days: int = Query(default=90, ge=14, le=365)) -> dict[str, obje
         group_trends_payload, app.state.settings.database_path, app.state.groups, days
     )
     _trends_cache[days] = (monotonic(), payload)
+    # days spans 14-365; without a cap a scanner could hold 350 payloads.
+    if len(_trends_cache) > _TRENDS_CACHE_MAX:
+        del _trends_cache[min(_trends_cache, key=lambda key: _trends_cache[key][0])]
     return payload
 
 
@@ -935,7 +1020,7 @@ async def profile(symbol: str) -> dict[str, object]:
     if asset is None:
         raise HTTPException(status_code=404, detail="asset_not_found")
     service: AssetProfileService = app.state.asset_profile_service
-    return await asyncio.to_thread(service.get_profile, asset)
+    return await service.get_profile(asset)
 
 
 @app.websocket("/ws/quotes")
