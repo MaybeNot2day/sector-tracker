@@ -117,19 +117,19 @@ groups:
   assets:
   - symbol: BTC
     type: crypto_perp
-    source: lighter
+    source: hyperliquid
     name: Bitcoin
   - symbol: ETH
     type: crypto_perp
-    source: lighter
+    source: hyperliquid
     name: Ethereum
   - symbol: SOL
     type: crypto_perp
-    source: lighter
+    source: hyperliquid
     name: Solana
   - symbol: HYPE
     type: crypto_perp
-    source: lighter
+    source: hyperliquid
     name: Hyperliquid
 - name: CRYPTO_EQUITIES
   assets:

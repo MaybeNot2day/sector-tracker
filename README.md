@@ -9,8 +9,8 @@ rides above both views, VIX feeds a volatility read in the regime panel, and the
 splits into TradFi, Crypto, and Commodities categories. TradFi keeps the clickable watchlist
 grid — Last / Abs / 1D% / ΔOpen (move since today's session open; UTC day for crypto) /
 RVOL (volume vs 20-day average) / trend sparkline — with the chart workflow; Crypto shows
-the curated perp watchlist plus an auto-synced tape of every crypto perp listed on Lighter
-(~110 markets), grouped into Lighter's own baskets (L1, DeFi, AI, L2, Memes, Other via its
+the curated perp watchlist plus an auto-synced tape of every crypto perp listed on Hyperliquid
+(~110 markets), grouped into Hyperliquid's own baskets (L1, DeFi, AI, L2, Memes, Other via its
 tokenlist categories) and sortable by 24h volume, funding, and OI — new listings appear
 without config changes, and every tape row charts on click. Commodities tracks Yahoo
 continuous front-month futures (metals, energy, ags) with a Globex-aware session chip.
@@ -20,13 +20,13 @@ A toggleable full-height news drawer streams public Telegram channels (scraped f
 t.me previews, no API key): the server polls every 15 seconds and pushes new posts to the
 browser over the WebSocket, and each channel gets a per-browser mute chip.
 
-Market data blends two worlds. Lighter DEX drives crypto perps end to end (quotes, candles,
-funding, OI) and overlays live 24/7 prices onto the ~34 equities/ETFs it lists as synthetic
+Market data blends two worlds. Hyperliquid drives crypto perps end to end (quotes, candles,
+funding, OI) and overlays live 24/7 prices onto the equities/ETFs its xyz dex lists as synthetic
 perps — day change is measured against the last official session close, so weekend and
 after-hours moves show up without breaking session semantics. Intraday chart candles come
-from Lighter wherever a market exists; daily bars, volume, profiles, and everything
+from Hyperliquid wherever a market exists; daily bars, volume, profiles, and everything
 analytics-related (DMAs, breadth, RVOL, 52W) stay on official Yahoo session data. Assets
-not listed on Lighter run fully on Yahoo.
+not listed on Hyperliquid run fully on Yahoo.
 
 For U.S. equities and ETFs, the chart modal can also load a MarketData.app option-chain
 snapshot: expiry selection, ATM IV, put/call OI, call and put walls, max pain, and switchable
@@ -39,7 +39,7 @@ to SQLite; the UI uses it for the 50DMA breadth trend sparkline and day-over-day
 score deltas, and `/api/snapshots?days=30` serves the raw history.
 
 Watchlists live in YAML and can also be edited in the app. Quotes and OHLC bars are cached in
-SQLite, and market data providers are isolated behind a common interface so Yahoo, Lighter,
+SQLite, and market data providers are isolated behind a common interface so Yahoo, Hyperliquid,
 Stooq, and Farside can be swapped or extended.
 
 ## Quick Start
@@ -261,7 +261,7 @@ actions idempotently and retracts ideas the run created that day but no longer
 mentions (they never really existed) — prior days' ideas are never rolled back, and
 deleting a report leaves the book intact.
 
-Entry prices are stamped at ingest and exits at close, using Lighter for tickers it
+Entry prices are stamped at ingest and exits at close, using Hyperliquid for tickers it
 lists as crypto and Yahoo for everything else (arbitrary tickers work; the watchlist
 is not consulted). A provider outage leaves the price null and the next `/api/fringe`
 build re-stamps it lazily. `GET /api/fringe` serves the open book marked to market
@@ -398,7 +398,7 @@ curl http://127.0.0.1:8000/api/snapshots
 curl http://127.0.0.1:8000/api/options/SPY   # requires MARKETDATA_TOKEN
 ```
 
-Diagnostics: `/api/lighter-status` (feed cache freshness, 429 cooldowns) and
+Diagnostics: `/api/hyperliquid-status` (feed cache freshness, 429 cooldowns) and
 `/api/yahoo-status` (curl presence, live spark probe).
 
 ## Deployment
@@ -407,7 +407,7 @@ Diagnostics: `/api/lighter-status` (feed cache freshness, 429 cooldowns) and
 
 A single long-lived process is what this architecture wants: warm caches (no funding
 flicker), background quote/history loops, live WebSocket streaming, accruing daily
-snapshots, durable watchlist edits, and a dedicated rate-limit budget for Lighter/Yahoo.
+snapshots, durable watchlist edits, and a dedicated rate-limit budget for Hyperliquid/Yahoo.
 
 On a fresh Ubuntu 22.04/24.04 (or Debian 12) server, install Tailscale and join
 the server to your tailnet first. Then run:

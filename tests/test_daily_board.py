@@ -223,7 +223,6 @@ def test_snapshot_save_failure_is_reported_without_raising(
     }
 
 
-
 def _rising_bars(symbol: str, start_price: float = 100.0) -> list[Bar]:
     start = datetime(2025, 1, 1, tzinfo=UTC)
     bars: list[Bar] = []

@@ -216,17 +216,15 @@ async def test_quote_service_rejects_cached_symbol_with_different_asset_type(
     groups = [
         GroupConfig(
             name="CRYPTO",
-            assets=[
-                AssetConfig(symbol="ROBO", type="crypto_perp", source="lighter")
-            ],
+            assets=[AssetConfig(symbol="ROBO", type="crypto_perp", source="hyperliquid")],
         )
     ]
-    service = QuoteService(database, {"lighter": EmptyProvider()})
+    service = QuoteService(database, {"hyperliquid": EmptyProvider()})
 
     quote = (await service.get_board_quotes(groups))["CRYPTO"][0]
 
     assert quote.asset_type == "crypto_perp"
-    assert quote.provider == "lighter"
+    assert quote.provider == "hyperliquid"
     assert quote.last == 0.0
     assert quote.error == "no_quote_available"
 

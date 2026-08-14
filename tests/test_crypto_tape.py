@@ -4,7 +4,7 @@ from typing import Any
 import httpx
 import pytest
 
-from app.providers.lighter import LighterProvider, _is_crypto_detail
+from app.providers.hyperliquid import HyperliquidProvider, _parse_universe
 from app.services.daily_board import crypto_breadth_metrics
 
 
@@ -18,158 +18,97 @@ def forbid_http(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(httpx, "AsyncClient", _Boom)
 
 
-def seeded_provider(details: dict[str, dict[str, Any]]) -> LighterProvider:
-    """Provider with a warm details cache, so lookups never hit HTTP."""
-    provider = LighterProvider()
-    provider._details = details
-    provider._details_time = monotonic()
+def seeded_provider(payload: list[Any]) -> HyperliquidProvider:
+    """Provider with a warm crypto market map, so lookups never hit HTTP."""
+    provider = HyperliquidProvider()
+    provider._crypto = _parse_universe(payload, strip_prefix=None)
+    provider._markets_time = monotonic()
     return provider
 
 
-@pytest.mark.parametrize(
-    ("detail", "expected"),
-    [
-        pytest.param({"symbol": "BTC", "strategy_index": 2}, True, id="crypto-perp-bucket"),
-        pytest.param({"symbol": "PEPE", "strategy_index": 0}, True, id="legacy-meme-bucket"),
-        pytest.param({"symbol": "MAGS", "strategy_index": 0}, False, id="legacy-tradfi-symbol"),
-        pytest.param({"symbol": "XAU", "strategy_index": 3}, False, id="commodity-bucket"),
-        pytest.param({"symbol": "EURUSD", "strategy_index": 4}, False, id="fx-bucket"),
-        pytest.param({"symbol": "AAPL", "strategy_index": 5}, False, id="us-equity-bucket"),
-        pytest.param({"symbol": "SAMSUNG", "strategy_index": 6}, False, id="asia-equity-bucket"),
-        pytest.param({"symbol": "OPENAI", "strategy_index": 7}, False, id="pre-ipo-bucket"),
-        pytest.param({"symbol": "BTC"}, True, id="missing-strategy-crypto-symbol"),
-        pytest.param({"symbol": "MAGS"}, False, id="missing-strategy-legacy-tradfi"),
-        pytest.param(
-            {"symbol": "BTC", "strategy_index": "5"}, True, id="non-int-strategy-symbol-wins"
-        ),
-        pytest.param(
-            {"symbol": "spacex", "strategy_index": None}, False, id="legacy-symbol-case-folded"
-        ),
-    ],
-)
-def test_is_crypto_detail_classification(detail: dict[str, Any], expected: bool) -> None:
-    assert _is_crypto_detail(detail) is expected
-
-
-def tape_details() -> dict[str, dict[str, Any]]:
-    return {
-        "BTC": {
-            "symbol": "BTC",
-            "strategy_index": 2,
-            "status": "active",
-            "market_id": 1,
-            "last_trade_price": 62000.0,
-            "daily_price_change": 0.59,
-            "open_interest": 1729.9,
-            "daily_quote_token_volume": 250_000_000.0,
+def tape_payload() -> list[Any]:
+    """A main-dex metaAndAssetCtxs response; universe[i] pairs with ctxs[i]."""
+    universe = [
+        {"name": "BTC", "szDecimals": 5, "maxLeverage": 40},
+        {"name": "ETH"},
+        {"name": "SOL"},
+        # Meme wrapper with a sparse ctx: carries the missing-field duties.
+        {"name": "kPEPE"},
+        # Excluded: delisted market.
+        {"name": "OLD", "isDelisted": True},
+        # Excluded: zero, negative, and missing mark price.
+        {"name": "HALTED"},
+        {"name": "NEGP"},
+        {"name": "NOPX"},
+    ]
+    # Hyperliquid serves every number as a string; the tape must parse them.
+    ctxs = [
+        {
+            "markPx": "62000.0",
+            "prevDayPx": "61000.0",
+            "funding": "0.0000125",
+            "openInterest": "1729.9",
+            "dayNtlVlm": "250000000.0",
+            "dayBaseVlm": "4032.5",
         },
-        # Lighter's API serves numbers as strings; the tape must parse them.
-        "ETH": {
-            "symbol": "ETH",
-            "strategy_index": 2,
-            "status": "active",
-            "market_id": 2,
-            "last_trade_price": "2450.5",
-            "daily_price_change": -3.75,
-            "open_interest": 1000.0,
-            "daily_quote_token_volume": "300000000.0",
-        },
+        {"markPx": "2450.5", "prevDayPx": "2500.0", "dayNtlVlm": "300000000.0"},
         # 10.3333 * 147.0 = 1518.9951 -> rounds to 1519.0, not the raw product.
-        "SOL": {
-            "symbol": "SOL",
-            "strategy_index": 2,
-            "status": "active",
-            "market_id": 3,
-            "last_trade_price": 147.0,
-            "daily_price_change": 1.1,
-            "open_interest": 10.3333,
-            "daily_quote_token_volume": 1_000_000.0,
+        {
+            "markPx": "147.0",
+            "prevDayPx": "147.0",
+            "openInterest": "10.3333",
+            "dayNtlVlm": "1000000.0",
         },
-        # Legacy strategy 0 meme coin: included; carries the missing-field duties.
-        "PEPE": {
-            "symbol": "PEPE",
-            "strategy_index": 0,
-            "status": "active",
-            "market_id": 4,
-            "last_trade_price": 0.0000112,
-            "daily_price_change": -100.0,
-        },
-        # Excluded: legacy strategy 0 bucket but a known TradFi listing.
-        "MAGS": {
-            "symbol": "MAGS",
-            "strategy_index": 0,
-            "status": "active",
-            "market_id": 5,
-            "last_trade_price": 55.0,
-            "daily_price_change": 2.0,
-            "daily_quote_token_volume": 9_000_000.0,
-        },
-        # Excluded: TradFi strategy bucket.
-        "AAPL": {
-            "symbol": "AAPL",
-            "strategy_index": 5,
-            "status": "active",
-            "market_id": 6,
-            "last_trade_price": 212.5,
-            "daily_price_change": 1.25,
-            "daily_quote_token_volume": 8_000_000.0,
-        },
-        # Excluded: zero, negative, and missing last trade price.
-        "HALTED": {
-            "symbol": "HALTED",
-            "strategy_index": 2,
-            "status": "active",
-            "market_id": 7,
-            "last_trade_price": 0.0,
-            "daily_quote_token_volume": 7_000_000.0,
-        },
-        "NEGP": {
-            "symbol": "NEGP",
-            "strategy_index": 2,
-            "status": "active",
-            "market_id": 8,
-            "last_trade_price": -5.0,
-        },
-        "NOPX": {
-            "symbol": "NOPX",
-            "strategy_index": 2,
-            "status": "active",
-            "market_id": 9,
-        },
-    }
+        {"markPx": "0.0000112"},
+        {"markPx": "1.0", "prevDayPx": "1.0"},
+        {"markPx": "0.0", "dayNtlVlm": "7000000.0"},
+        {"markPx": "-5.0"},
+        {},
+    ]
+    return [{"universe": universe}, ctxs]
 
 
 def test_crypto_tape_cached_builds_sorted_rows_from_caches_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     forbid_http(monkeypatch)
-    provider = seeded_provider(tape_details())
-    provider._funding = {"BTC": 1.2e-05, "ETH": -2.5e-06, "SOL": 0.0}
+    provider = seeded_provider(tape_payload())
+    # TradFi synthetics live in a separate map and never reach the tape.
+    provider._tradfi = _parse_universe(
+        [
+            {"universe": [{"name": "xyz:AAPL"}]},
+            [{"markPx": "212.5", "prevDayPx": "210.0", "dayNtlVlm": "8000000.0"}],
+        ],
+        strip_prefix="xyz:",
+    )
 
     tape = provider.crypto_tape_cached()
 
     # Volume-descending; the missing-volume row sorts last.
-    assert [row["symbol"] for row in tape] == ["ETH", "BTC", "SOL", "PEPE"]
+    assert [row["symbol"] for row in tape] == ["ETH", "BTC", "SOL", "kPEPE"]
 
     assert tape[1] == {
         "symbol": "BTC",
-        "basket": "L1",  # cold live cache falls back to the baked-in snapshot
+        "basket": "L1",  # from the baked-in category snapshot
         "last": 62000.0,
-        "change_pct": 0.59,
-        "funding_rate": 1.2e-05,
-        "open_interest_usd": 107_253_800.0,
+        "change_pct": 1.639344,  # round((62000 - 61000) / 61000 * 100, 6)
+        "funding_rate": 1.25e-05,  # the hourly fraction, straight from the ctx
+        "open_interest_usd": 107_253_800.0,  # round(1729.9 * 62000.0, 2)
         "day_volume_usd": 250_000_000.0,
     }
 
     eth = tape[0]
     assert eth["last"] == 2450.5  # parsed from the string payload
+    assert eth["change_pct"] == -1.98
     assert eth["day_volume_usd"] == 300_000_000.0
 
     sol = tape[2]
     assert sol["open_interest_usd"] == 1519.0  # round(10.3333 * 147.0, 2)
 
     pepe = tape[3]
-    assert pepe["change_pct"] == -100.0  # verbatim, unlike the quote path
+    assert pepe["symbol"] == "kPEPE"  # the API coin name, displayed verbatim
+    assert pepe["basket"] == "Memes"
+    assert pepe["change_pct"] is None  # no prevDayPx
     assert pepe["funding_rate"] is None
     assert pepe["open_interest_usd"] is None
     assert pepe["day_volume_usd"] is None
@@ -180,28 +119,35 @@ def test_crypto_tape_cached_is_empty_when_cache_is_cold(
 ) -> None:
     forbid_http(monkeypatch)
 
-    assert LighterProvider().crypto_tape_cached() == []
+    assert HyperliquidProvider().crypto_tape_cached() == []
 
 
 def test_is_crypto_market_answers_from_cache_without_refresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     forbid_http(monkeypatch)
-    provider = seeded_provider(
-        {
-            "BTC": {"symbol": "BTC", "strategy_index": 2, "market_id": 1},
-            "AAPL": {"symbol": "AAPL", "strategy_index": 5, "market_id": 2},
-            "MAGS": {"symbol": "MAGS", "strategy_index": 0, "market_id": 3},
-        }
-    )
+    provider = HyperliquidProvider()
+    provider._crypto = {
+        "BTC": {"coin": "BTC", "display": "BTC", "last": 62000.0},
+        # Token side of a ticker collision with the ROBO ETF.
+        "ROBO": {"coin": "ROBO", "display": "ROBO", "last": 0.014},
+    }
+    provider._tradfi = {
+        "AAPL": {"coin": "xyz:AAPL", "display": "AAPL", "last": 212.5},
+        "ROBO": {"coin": "xyz:ROBO", "display": "ROBO", "last": 83.4},
+    }
     # Even a stale cache answers: the call must never refresh.
-    provider._details_time = 0.0
+    provider._markets_time = 0.0
 
     assert provider.is_crypto_market("BTC") is True
     assert provider.is_crypto_market("btc") is True
     assert provider.is_crypto_market("AAPL") is False
-    assert provider.is_crypto_market("mags") is False
     assert provider.is_crypto_market("DOGE") is False
+    assert provider.is_tradfi_market("aapl") is True
+    assert provider.is_tradfi_market("BTC") is False
+    # A collision is listed on both sides; the maps never leak into each other.
+    assert provider.is_crypto_market("ROBO") is True
+    assert provider.is_tradfi_market("ROBO") is True
 
 
 def test_crypto_breadth_metrics_counts_boundaries_and_ignores_non_numeric() -> None:

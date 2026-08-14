@@ -51,11 +51,10 @@ def load_state(path: Path = STATE_PATH) -> dict[str, Any]:
 
 def save_state(state: dict[str, Any], path: Path = STATE_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "w", dir=path.parent, encoding="utf-8", delete=False
-    ) as tmp:
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, encoding="utf-8", delete=False) as tmp:
         json.dump(state, tmp, indent=1, sort_keys=True)
     os.replace(tmp.name, path)
+
 
 def fetch_book(base_url: str) -> dict[str, Any]:
     request = urllib.request.Request(

@@ -142,7 +142,7 @@ def _stooq_currency(symbol: str) -> str | None:
 
 # Stooq is a Polish service; its quote CSV t2 field is Warsaw wall-clock
 # time, not UTC. Parsing it as UTC put timestamps up to 2h in the FUTURE,
-# which made the Lighter overlay's freshness heuristic treat stale quotes
+# which made the synthetic-perp overlay's freshness heuristic treat stale quotes
 # as fresh. If the feed is ever exchange-local instead, Warsaw errs on the
 # stale side — the safe direction for that heuristic.
 _STOOQ_ZONE = ZoneInfo("Europe/Warsaw")

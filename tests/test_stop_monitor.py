@@ -62,6 +62,7 @@ def wired(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         },
     )
     monkeypatch.setattr(monitor, "fetch_book", lambda base_url: book)
+
     def fake_alert(target: str, message: str) -> bool:
         calls["alerts"].append(message)
         return True
@@ -130,9 +131,7 @@ def test_stopless_big_move_alerts_once_per_day(wired: dict[str, Any]) -> None:
     assert wired["calls"]["closes"] == []
 
     # A mild adverse move never alerts.
-    wired["book"]["open"] = [
-        _idea(id=2, ticker="CEG", stop_price=None, unrealized_pct=-4.0)
-    ]
+    wired["book"]["open"] = [_idea(id=2, ticker="CEG", stop_price=None, unrealized_pct=-4.0)]
     assert monitor.run() == 0
     assert len(wired["calls"]["alerts"]) == 1
 

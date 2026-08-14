@@ -14,7 +14,7 @@ def hourly(
 ) -> Bar:
     return Bar(
         symbol="BTC",
-        provider="lighter",
+        provider="hyperliquid",
         interval="1h",
         timestamp=timestamp,
         open=open_,
@@ -35,7 +35,7 @@ def daily(
 ) -> Bar:
     return Bar(
         symbol="BTC",
-        provider="lighter",
+        provider="hyperliquid",
         interval="1d",
         timestamp=timestamp,
         open=open_,
@@ -60,7 +60,7 @@ def test_4h_buckets_align_to_utc_windows_and_merge_ohlcv() -> None:
     assert aggregate_bars(bars, "4h") == [
         Bar(
             symbol="BTC",
-            provider="lighter",
+            provider="hyperliquid",
             interval="4h",
             timestamp=day.replace(hour=0, minute=30),
             open=100.0,
@@ -71,7 +71,7 @@ def test_4h_buckets_align_to_utc_windows_and_merge_ohlcv() -> None:
         ),
         Bar(
             symbol="BTC",
-            provider="lighter",
+            provider="hyperliquid",
             interval="4h",
             timestamp=day.replace(hour=4),
             open=93.0,
@@ -98,7 +98,7 @@ def test_weekly_buckets_split_on_iso_week_including_year_rollover() -> None:
     assert aggregate_bars(bars, "1wk") == [
         Bar(
             symbol="BTC",
-            provider="lighter",
+            provider="hyperliquid",
             interval="1wk",
             timestamp=datetime(2024, 12, 27, tzinfo=UTC),
             open=10.0,
@@ -109,7 +109,7 @@ def test_weekly_buckets_split_on_iso_week_including_year_rollover() -> None:
         ),
         Bar(
             symbol="BTC",
-            provider="lighter",
+            provider="hyperliquid",
             interval="1wk",
             timestamp=datetime(2024, 12, 30, tzinfo=UTC),
             open=14.0,
@@ -120,7 +120,7 @@ def test_weekly_buckets_split_on_iso_week_including_year_rollover() -> None:
         ),
         Bar(
             symbol="BTC",
-            provider="lighter",
+            provider="hyperliquid",
             interval="1wk",
             timestamp=datetime(2025, 1, 6, tzinfo=UTC),
             open=12.5,
@@ -142,7 +142,7 @@ def test_monthly_buckets_split_on_calendar_month() -> None:
     assert aggregate_bars(bars, "1mo") == [
         Bar(
             symbol="BTC",
-            provider="lighter",
+            provider="hyperliquid",
             interval="1mo",
             timestamp=datetime(2026, 1, 30, tzinfo=UTC),
             open=5.0,
@@ -153,7 +153,7 @@ def test_monthly_buckets_split_on_calendar_month() -> None:
         ),
         Bar(
             symbol="BTC",
-            provider="lighter",
+            provider="hyperliquid",
             interval="1mo",
             timestamp=datetime(2026, 2, 1, tzinfo=UTC),
             open=6.5,

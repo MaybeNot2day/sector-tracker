@@ -129,7 +129,6 @@ class CryptoEtfFlowService:
         )
         return time.monotonic() - self._cache_time < ttl
 
-
     def _degraded(self, error: str, detail: str | None = None) -> dict[str, object]:
         if self._cache_payload:
             cached = dict(self._cache_payload)
@@ -165,11 +164,7 @@ class CryptoEtfFlowService:
             ]
             completed = [future.result() for future in futures]
 
-        return [
-            payload
-            for _, payload in sorted(completed)
-            if payload is not None
-        ]
+        return [payload for _, payload in sorted(completed) if payload is not None]
 
 
 def _history_rows(assets: list[dict[str, object]]) -> list[tuple[str, str, float]]:

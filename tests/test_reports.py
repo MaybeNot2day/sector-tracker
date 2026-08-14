@@ -223,7 +223,6 @@ def test_create_report_rejects_malformed_payload(
     assert response.status_code == 422
 
 
-
 def test_report_date_allows_next_session_but_rejects_far_future(
     configure_app: Callable[[str], None],
 ) -> None:
@@ -251,6 +250,7 @@ def test_report_date_allows_next_session_but_rejects_far_future(
     assert accepted.status_code == 200
     assert rejected.status_code == 422
     assert "report date is too far in the future" in rejected.text
+
 
 # --- upsert semantics keyed by (slug, date) ---
 
@@ -570,12 +570,7 @@ def test_list_bounds_large_report_body_while_detail_remains_verbatim(
 ) -> None:
     configure_app("")
     client = TestClient(app)
-    prefix = (
-        "---\n"
-        "kind: large-report\n"
-        "---\n"
-        "# Meaningful **preview**\n"
-    )
+    prefix = "---\nkind: large-report\n---\n# Meaningful **preview**\n"
     body = prefix + "x" * (500_000 - len(prefix))
     created = client.post(
         "/api/reports",
@@ -600,8 +595,7 @@ def test_list_bounds_large_report_body_while_detail_remains_verbatim(
     expected_text = "Meaningful preview " + "x" * 500_000
     assert item["preview"] == expected_text[:220] + "…"
     assert any(
-        "SUBSTR(BODY, 1, 16384) AS BODY" in statement.upper()
-        for statement in list_statements
+        "SUBSTR(BODY, 1, 16384) AS BODY" in statement.upper() for statement in list_statements
     )
     assert detail["body"] == body
 

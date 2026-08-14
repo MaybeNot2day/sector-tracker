@@ -45,7 +45,7 @@ def test_quote_round_trip_persists_volume_and_derivative_fields(tmp_path: Path) 
     quote = Quote.from_last_and_prev_close(
         symbol="BTC",
         asset_type="crypto_perp",
-        provider="lighter",
+        provider="hyperliquid",
         last=65_000.0,
         previous_close=64_000.0,
         timestamp=timestamp,
@@ -66,7 +66,7 @@ def test_quote_round_trip_persists_volume_and_derivative_fields(tmp_path: Path) 
     refreshed = Quote.from_last_and_prev_close(
         symbol="BTC",
         asset_type="crypto_perp",
-        provider="lighter",
+        provider="hyperliquid",
         last=65_500.0,
         previous_close=64_000.0,
         timestamp=timestamp,
@@ -218,7 +218,7 @@ def test_load_bars_by_symbol_limits_each_partition_in_sql(tmp_path: Path) -> Non
         for symbol, provider, count in (
             ("AAPL", "yahoo", 7),
             ("AAPL", "stooq", 5),
-            ("BTC", "lighter", 6),
+            ("BTC", "hyperliquid", 6),
         )
         for day in range(count)
     ]
@@ -232,20 +232,17 @@ def test_load_bars_by_symbol_limits_each_partition_in_sql(tmp_path: Path) -> Non
         ]
     assert index_columns == ["interval", "symbol", "provider", "timestamp"]
 
-
     loaded = db.load_bars_by_symbol(database, "1d", limit_per_series=3)
 
     assert set(loaded) == {
         ("AAPL", "yahoo"),
         ("AAPL", "stooq"),
-        ("BTC", "lighter"),
+        ("BTC", "hyperliquid"),
     }
-    assert {
-        key: [bar.timestamp for bar in series] for key, series in loaded.items()
-    } == {
+    assert {key: [bar.timestamp for bar in series] for key, series in loaded.items()} == {
         ("AAPL", "yahoo"): [start + timedelta(days=day) for day in (4, 5, 6)],
         ("AAPL", "stooq"): [start + timedelta(days=day) for day in (2, 3, 4)],
-        ("BTC", "lighter"): [start + timedelta(days=day) for day in (3, 4, 5)],
+        ("BTC", "hyperliquid"): [start + timedelta(days=day) for day in (3, 4, 5)],
     }
     assert all(len(series) == 3 for series in loaded.values())
 

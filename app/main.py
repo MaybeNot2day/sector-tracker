@@ -42,7 +42,7 @@ from app.config import (
 )
 from app.models import AssetConfig, AssetType, GroupConfig, ProviderName
 from app.providers.base import QuoteProvider
-from app.providers.lighter import LighterProvider
+from app.providers.hyperliquid import HyperliquidProvider
 from app.providers.stooq import StooqProvider
 from app.providers.yahoo import YahooProvider
 from app.scheduler import (
@@ -159,7 +159,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     providers: dict[ProviderName, QuoteProvider] = {
         "yahoo": YahooProvider(),
-        "lighter": LighterProvider(),
+        "hyperliquid": HyperliquidProvider(),
         "stooq": StooqProvider(),
     }
 
@@ -766,18 +766,18 @@ def _report_slug(value: str) -> str:
     return cleaned[:64]
 
 
-@app.get("/api/lighter-status")
-def lighter_status() -> dict[str, object]:
-    """Lighter feed diagnostics: cache freshness and active 429 cooldowns.
+@app.get("/api/hyperliquid-status")
+def hyperliquid_status() -> dict[str, object]:
+    """Hyperliquid feed diagnostics: cache freshness and active 429 cooldowns.
 
     Serverless deployments share egress IPs with other tenants, so secondary
     feeds (funding, tokenlist) can starve while quotes keep flowing; this
     shows which feed is failing on the running instance.
     """
-    lighter = app.state.providers.get("lighter")
-    if not isinstance(lighter, LighterProvider):
+    hyperliquid = app.state.providers.get("hyperliquid")
+    if not isinstance(hyperliquid, HyperliquidProvider):
         return {"status": "unavailable"}
-    return {"status": "ok", **lighter.status()}
+    return {"status": "ok", **hyperliquid.status()}
 
 
 @app.get("/api/yahoo-status")

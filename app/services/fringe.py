@@ -42,7 +42,7 @@ from typing import cast
 from app import db
 from app.models import AssetConfig, ProviderName, Quote
 from app.providers.base import QuoteProvider
-from app.providers.lighter import LighterProvider
+from app.providers.hyperliquid import HyperliquidProvider
 
 logger = logging.getLogger(__name__)
 
@@ -183,9 +183,7 @@ class FringeService:
 
     async def resolve_known_asset(self, ticker: str) -> AssetConfig | None:
         """Resolve only symbols already present in the Fringe ledger."""
-        known = await asyncio.to_thread(
-            db.fringe_ticker_exists, self.database_path, ticker
-        )
+        known = await asyncio.to_thread(db.fringe_ticker_exists, self.database_path, ticker)
         return await self._asset_for(ticker) if known else None
 
     async def stamp_prices(self) -> None:
@@ -241,9 +239,7 @@ class FringeService:
         self,
     ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
         """Load both books, lazily re-stamping prices a past ingest missed."""
-        open_rows = await asyncio.to_thread(
-            db.load_fringe_ideas, self.database_path, status="open"
-        )
+        open_rows = await asyncio.to_thread(db.load_fringe_ideas, self.database_path, status="open")
         closed_rows = await asyncio.to_thread(
             db.load_fringe_ideas, self.database_path, status="closed"
         )
@@ -259,9 +255,7 @@ class FringeService:
         need_entry: list[dict[str, object]],
         need_exit: list[dict[str, object]],
     ) -> None:
-        prices = await self._prices_for(
-            {str(row["ticker"]) for row in need_entry + need_exit}
-        )
+        prices = await self._prices_for({str(row["ticker"]) for row in need_entry + need_exit})
         entries = _stampable(need_entry, prices)
         exits = _stampable(need_exit, prices)
         if entries or exits:
@@ -292,9 +286,7 @@ class FringeService:
         ]
         if not unsized:
             return
-        realized = sum(
-            usd for row in closed_rows if (usd := _realized_usd(row)) is not None
-        )
+        realized = sum(usd for row in closed_rows if (usd := _realized_usd(row)) is not None)
         bankroll = STARTING_CAPITAL + realized
         committed = sum(
             float(str(row["size_notional"]))
@@ -318,9 +310,7 @@ class FringeService:
         when no provider can price the ticker right now — the monitor simply
         retries on its next tick.
         """
-        open_rows = await asyncio.to_thread(
-            db.load_fringe_ideas, self.database_path, status="open"
-        )
+        open_rows = await asyncio.to_thread(db.load_fringe_ideas, self.database_path, status="open")
         row = next((r for r in open_rows if int(str(r["id"])) == idea_id), None)
         if row is None:
             raise LookupError("idea_not_open")
@@ -375,23 +365,21 @@ class FringeService:
     async def _asset_for(self, ticker: str) -> AssetConfig:
         """Route arbitrary (non-watchlist) tickers to a provider.
 
-        Lighter serves it only when it both lists the market AND classifies
+        Hyperliquid serves it only when it both lists the market AND classifies
         it as crypto: its TradFi synthetics collide with exchange tickers
-        (Lighter's ROBO token is not the robotics ETF). Everything else is
+        (Hyperliquid's ROBO token is not the robotics ETF). Everything else is
         treated as a Yahoo equity — Yahoo resolves ETFs/futures fine.
         """
-        lighter = self.providers.get("lighter")
-        if isinstance(lighter, LighterProvider):
+        hyperliquid = self.providers.get("hyperliquid")
+        if isinstance(hyperliquid, HyperliquidProvider):
             try:
-                if await lighter.has_market(ticker) and lighter.is_crypto_market(ticker):
-                    return AssetConfig(symbol=ticker, type="crypto_perp", source="lighter")
+                if await hyperliquid.has_market(ticker) and hyperliquid.is_crypto_market(ticker):
+                    return AssetConfig(symbol=ticker, type="crypto_perp", source="hyperliquid")
             except Exception:
-                logger.warning("lighter market lookup failed for %s", ticker, exc_info=True)
+                logger.warning("hyperliquid market lookup failed for %s", ticker, exc_info=True)
         return AssetConfig(symbol=ticker, type="equity", source="yahoo")
 
-    async def _fetch_quotes(
-        self, source: ProviderName, assets: list[AssetConfig]
-    ) -> list[Quote]:
+    async def _fetch_quotes(self, source: ProviderName, assets: list[AssetConfig]) -> list[Quote]:
         provider = self.providers.get(source)
         if provider is None:
             return []
@@ -423,9 +411,7 @@ def _open_item(
     target_price = _directional_level(
         direction, entry, _target_price(row["target"]), favorable=True
     )
-    stop_price = _directional_level(
-        direction, entry, _target_price(row["stop"]), favorable=False
-    )
+    stop_price = _directional_level(direction, entry, _target_price(row["stop"]), favorable=False)
     unrealized_pct = _pnl_pct(direction, entry, last)
     return {
         "id": row["id"],
@@ -676,8 +662,7 @@ def _equity_curve(
     if equity_now is not None:
         points[today] = equity_now
     return [
-        {"date": date_text, "equity": round(points[date_text], 2)}
-        for date_text in sorted(points)
+        {"date": date_text, "equity": round(points[date_text], 2)} for date_text in sorted(points)
     ]
 
 
@@ -685,9 +670,7 @@ def _trade_stats(
     closed_items: list[dict[str, object]], curve: list[dict[str, object]]
 ) -> dict[str, object]:
     """Track-record numbers for the Fringe tab; dollars from sized closes."""
-    sized = [
-        item for item in closed_items if isinstance(item["realized_usd"], int | float)
-    ]
+    sized = [item for item in closed_items if isinstance(item["realized_usd"], int | float)]
     dollars = {int(str(item["id"])): float(str(item["realized_usd"])) for item in sized}
     wins = [item for item in sized if dollars[int(str(item["id"]))] > 0]
     losses = [item for item in sized if dollars[int(str(item["id"]))] < 0]
@@ -727,9 +710,7 @@ def _sharpe_ratio(curve: list[dict[str, object]]) -> float | None:
     early readings are small-sample noise and converge as marks accrue."""
     equities = [float(str(point["equity"])) for point in curve]
     returns = [
-        equities[i] / equities[i - 1] - 1.0
-        for i in range(1, len(equities))
-        if equities[i - 1] > 0
+        equities[i] / equities[i - 1] - 1.0 for i in range(1, len(equities)) if equities[i - 1] > 0
     ]
     if len(returns) < 2:
         return None

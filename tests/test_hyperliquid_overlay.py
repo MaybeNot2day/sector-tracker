@@ -7,7 +7,7 @@ import pytest
 
 from app.models import AssetConfig, Bar, GroupConfig, Quote
 from app.providers.base import QuoteProvider
-from app.providers.lighter import LighterProvider
+from app.providers.hyperliquid import HyperliquidProvider
 from app.services.quotes import QuoteService, _official_close
 
 
@@ -49,24 +49,16 @@ def yahoo_quote(
     )
 
 
-def lighter_with(details: dict[str, dict[str, Any]]) -> LighterProvider:
-    """Real LighterProvider with a warm details cache, so overlay never does HTTP."""
-    provider = LighterProvider()
-    provider._details = details
-    provider._details_time = monotonic()
+def hyperliquid_with(tradfi: dict[str, dict[str, Any]]) -> HyperliquidProvider:
+    """Real HyperliquidProvider with a warm market map, so overlay never does HTTP."""
+    provider = HyperliquidProvider()
+    provider._tradfi = tradfi
+    provider._markets_time = monotonic()
     return provider
 
 
-def aapl_details(last_trade_price: float = 213.5) -> dict[str, dict[str, Any]]:
-    return {
-        "AAPL": {
-            "symbol": "AAPL",
-            "market_id": 42,
-            "status": "active",
-            "strategy_index": 5,  # TradFi synthetic: eligible for the overlay
-            "last_trade_price": last_trade_price,
-        }
-    }
+def aapl_market(last: float = 213.5) -> dict[str, dict[str, Any]]:
+    return {"AAPL": {"coin": "xyz:AAPL", "display": "AAPL", "last": last}}
 
 
 def equity_group(*symbols: str) -> list[GroupConfig]:
@@ -145,7 +137,7 @@ def test_official_close_has_no_jump_at_freshness_expiry() -> None:
 
 
 @pytest.mark.asyncio
-async def test_overlay_replaces_price_with_lighter_live_and_keeps_volume(
+async def test_overlay_replaces_price_with_hyperliquid_live_and_keeps_volume(
     tmp_path: Path,
 ) -> None:
     groups = equity_group("AAPL")
@@ -154,13 +146,13 @@ async def test_overlay_replaces_price_with_lighter_live_and_keeps_volume(
     )
     service = QuoteService(
         tmp_path / "board.sqlite3",
-        {"yahoo": yahoo, "lighter": lighter_with(aapl_details(213.5))},
+        {"yahoo": yahoo, "hyperliquid": hyperliquid_with(aapl_market(213.5))},
     )
 
     fresh = await service._fetch_fresh_quotes(groups)
 
     quote = fresh["AAPL"]
-    assert quote.provider == "lighter"
+    assert quote.provider == "hyperliquid"
     assert quote.last == 213.5
     # Session live (fresh venue quote) -> baseline is the venue previous close.
     assert quote.previous_close == 208.0
@@ -180,13 +172,13 @@ async def test_overlay_baseline_is_venue_last_after_hours(tmp_path: Path) -> Non
     )
     service = QuoteService(
         tmp_path / "board.sqlite3",
-        {"yahoo": yahoo, "lighter": lighter_with(aapl_details(213.5))},
+        {"yahoo": yahoo, "hyperliquid": hyperliquid_with(aapl_market(213.5))},
     )
 
     fresh = await service._fetch_fresh_quotes(groups)
 
     quote = fresh["AAPL"]
-    assert quote.provider == "lighter"
+    assert quote.provider == "hyperliquid"
     assert quote.last == 213.5
     # Venue closed and no explicit close carried -> heuristic fallback: the
     # final print is the official close baseline.
@@ -215,13 +207,13 @@ async def test_overlay_weekend_baseline_is_friday_regular_close(tmp_path: Path) 
     )
     service = QuoteService(
         tmp_path / "board.sqlite3",
-        {"yahoo": yahoo, "lighter": lighter_with(aapl_details(213.5))},
+        {"yahoo": yahoo, "hyperliquid": hyperliquid_with(aapl_market(213.5))},
     )
 
     fresh = await service._fetch_fresh_quotes(groups)
 
     quote = fresh["AAPL"]
-    assert quote.provider == "lighter"
+    assert quote.provider == "hyperliquid"
     assert quote.last == 213.5
     assert quote.previous_close == 209.5
     assert quote.change_abs == pytest.approx(4.0)
@@ -249,7 +241,7 @@ async def test_overlay_friday_evening_baseline_is_friday_close_not_thursday(
     )
     service = QuoteService(
         tmp_path / "board.sqlite3",
-        {"yahoo": yahoo, "lighter": lighter_with(aapl_details(213.5))},
+        {"yahoo": yahoo, "hyperliquid": hyperliquid_with(aapl_market(213.5))},
     )
 
     fresh = await service._fetch_fresh_quotes(groups)
@@ -264,10 +256,8 @@ async def test_overlay_skips_non_usd_listings(tmp_path: Path) -> None:
     groups = equity_group("SMSN")
     original = yahoo_quote("SMSN", last=71000.0, previous_close=70500.0, currency="KRW")
     yahoo = ScriptedQuotes({"SMSN": original})
-    lighter = lighter_with(
-        {"SMSN": {"symbol": "SMSN", "market_id": 5, "status": "active", "last_trade_price": 50.0}}
-    )
-    service = QuoteService(tmp_path / "board.sqlite3", {"yahoo": yahoo, "lighter": lighter})
+    hyperliquid = hyperliquid_with({"SMSN": {"coin": "xyz:SMSN", "display": "SMSN", "last": 50.0}})
+    service = QuoteService(tmp_path / "board.sqlite3", {"yahoo": yahoo, "hyperliquid": hyperliquid})
 
     fresh = await service._fetch_fresh_quotes(groups)
 
@@ -281,7 +271,7 @@ async def test_overlay_skips_error_quotes(tmp_path: Path) -> None:
     yahoo = ScriptedQuotes({"AAPL": broken})
     service = QuoteService(
         tmp_path / "board.sqlite3",
-        {"yahoo": yahoo, "lighter": lighter_with(aapl_details(213.5))},
+        {"yahoo": yahoo, "hyperliquid": hyperliquid_with(aapl_market(213.5))},
     )
 
     fresh = await service._fetch_fresh_quotes(groups)
@@ -290,7 +280,7 @@ async def test_overlay_skips_error_quotes(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_overlay_leaves_symbols_without_lighter_market_untouched(
+async def test_overlay_leaves_symbols_without_hyperliquid_market_untouched(
     tmp_path: Path,
 ) -> None:
     groups = equity_group("MSFT")
@@ -298,7 +288,7 @@ async def test_overlay_leaves_symbols_without_lighter_market_untouched(
     yahoo = ScriptedQuotes({"MSFT": original})
     service = QuoteService(
         tmp_path / "board.sqlite3",
-        {"yahoo": yahoo, "lighter": lighter_with(aapl_details())},
+        {"yahoo": yahoo, "hyperliquid": hyperliquid_with(aapl_market())},
     )
 
     fresh = await service._fetch_fresh_quotes(groups)
@@ -306,12 +296,16 @@ async def test_overlay_leaves_symbols_without_lighter_market_untouched(
     assert fresh["MSFT"] == original
 
 
-class RecordingLighter(LighterProvider):
-    def __init__(self, details: dict[str, dict[str, Any]]) -> None:
+class RecordingHyperliquid(HyperliquidProvider):
+    def __init__(
+        self,
+        crypto: dict[str, dict[str, Any]],
+        tradfi: dict[str, dict[str, Any]],
+    ) -> None:
         super().__init__()
-        self._details = details
-        self._details_time = monotonic()
-        self._funding_time = monotonic()  # keep funding warm: no HTTP for perps
+        self._crypto = crypto
+        self._tradfi = tradfi
+        self._markets_time = monotonic()  # keep the map warm: no HTTP
         self.requested_candidates: set[str] | None = None
 
     async def live_prices(self, symbols: set[str]) -> dict[str, float]:
@@ -320,7 +314,7 @@ class RecordingLighter(LighterProvider):
 
 
 @pytest.mark.asyncio
-async def test_overlay_candidates_exclude_lighter_sourced_and_crypto_assets(
+async def test_overlay_candidates_exclude_hyperliquid_sourced_and_crypto_assets(
     tmp_path: Path,
 ) -> None:
     groups = [
@@ -329,8 +323,8 @@ async def test_overlay_candidates_exclude_lighter_sourced_and_crypto_assets(
             assets=[
                 AssetConfig(symbol="AAPL", type="equity", source="yahoo"),
                 AssetConfig(symbol="XLE", type="etf", source="yahoo"),
-                AssetConfig(symbol="BTC", type="crypto_perp", source="lighter"),
-                AssetConfig(symbol="SYN", type="equity", source="lighter"),
+                AssetConfig(symbol="BTC", type="crypto_perp", source="hyperliquid"),
+                AssetConfig(symbol="SYN", type="equity", source="hyperliquid"),
             ],
         )
     ]
@@ -340,59 +334,33 @@ async def test_overlay_candidates_exclude_lighter_sourced_and_crypto_assets(
             "XLE": yahoo_quote("XLE", last=95.0, previous_close=94.0),
         }
     )
-    lighter = RecordingLighter(
-        {
-            "AAPL": {
-                "symbol": "AAPL",
-                "market_id": 42,
-                "status": "active",
-                "strategy_index": 5,
-                "last_trade_price": 213.5,
-            },
-            "BTC": {
-                "symbol": "BTC",
-                "market_id": 1,
-                "status": "active",
-                "strategy_index": 2,
-                "last_trade_price": 62000.0,
-            },
-            "SYN": {
-                "symbol": "SYN",
-                "market_id": 6,
-                "status": "active",
-                "strategy_index": 2,
-                "last_trade_price": 12.0,
-                "daily_price_change": 1.0,
-            },
-        }
+    hyperliquid = RecordingHyperliquid(
+        crypto={"BTC": {"coin": "BTC", "display": "BTC", "last": 62000.0}},
+        tradfi={
+            "AAPL": {"coin": "xyz:AAPL", "display": "AAPL", "last": 213.5},
+            "SYN": {"coin": "xyz:SYN", "display": "SYN", "last": 12.0},
+        },
     )
-    service = QuoteService(tmp_path / "board.sqlite3", {"yahoo": yahoo, "lighter": lighter})
+    service = QuoteService(tmp_path / "board.sqlite3", {"yahoo": yahoo, "hyperliquid": hyperliquid})
 
     await service._fetch_fresh_quotes(groups)
 
     # Only listing-venue equities/ETFs are overlay candidates; assets already
-    # sourced from Lighter (crypto perps and synthetic equities) are not.
-    assert lighter.requested_candidates == {"AAPL", "XLE"}
+    # sourced from Hyperliquid (crypto perps and synthetic equities) are not.
+    assert hyperliquid.requested_candidates == {"AAPL", "XLE"}
 
 
 @pytest.mark.asyncio
 async def test_overlay_skips_crypto_classified_ticker_collisions(
     tmp_path: Path,
 ) -> None:
-    """Lighter's ROBO is a crypto token; the ROBO ETF must keep its venue quote."""
+    """Hyperliquid's ROBO is a crypto token; the ROBO ETF must keep its venue quote."""
     yahoo = ScriptedQuotes({"ROBO": yahoo_quote("ROBO", last=83.4, previous_close=85.4)})
-    lighter = LighterProvider()
-    lighter._details = {
-        "ROBO": {
-            "symbol": "ROBO",
-            "market_id": 149,
-            "status": "active",
-            "strategy_index": 2,  # crypto bucket: ticker collision
-            "last_trade_price": 0.014,
-        }
-    }
-    lighter._details_time = monotonic()
-    service = QuoteService(tmp_path / "board.sqlite3", {"yahoo": yahoo, "lighter": lighter})
+    hyperliquid = HyperliquidProvider()
+    # Listed on the main (crypto) dex only: a ticker collision with the ETF.
+    hyperliquid._crypto = {"ROBO": {"coin": "ROBO", "display": "ROBO", "last": 0.014}}
+    hyperliquid._markets_time = monotonic()
+    service = QuoteService(tmp_path / "board.sqlite3", {"yahoo": yahoo, "hyperliquid": hyperliquid})
 
     quotes = await service._fetch_fresh_quotes(equity_group("ROBO"))
 

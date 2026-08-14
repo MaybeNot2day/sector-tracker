@@ -1,6 +1,7 @@
 """Timeframe routing: Yahoo period caps, Yahoo 4h aggregation path,
-Lighter weekly/monthly aggregation path, and history range trimming."""
+Hyperliquid native weekly/monthly path, and history range trimming."""
 
+import json
 from datetime import UTC, datetime, timedelta
 from time import monotonic
 from typing import Any
@@ -9,14 +10,14 @@ import httpx
 import pytest
 
 from app.models import AssetConfig, Bar
-from app.providers import lighter as lighter_module
+from app.providers import hyperliquid as hyperliquid_module
 from app.providers import yahoo as yahoo_module
-from app.providers.lighter import LighterProvider
+from app.providers.hyperliquid import HyperliquidProvider
 from app.providers.yahoo import _get_raw_history_sync, _yahoo_period
 from app.services.history import filter_bars_to_range
 
 SPY = AssetConfig(symbol="SPY", type="etf", source="yahoo")
-BTC_PERP = AssetConfig(symbol="BTC", type="crypto_perp", source="lighter")
+BTC_PERP = AssetConfig(symbol="BTC", type="crypto_perp", source="hyperliquid")
 
 
 # --- _yahoo_period: board range -> chart-API range, capped per interval ---
@@ -132,83 +133,76 @@ def test_yahoo_4h_history_fetches_1h_and_aggregates(
     ]
 
 
-# --- Lighter 1wk/1mo path: fetch daily candles, aggregate locally ---
-
-
-class _FakeResponse:
-    def __init__(self, payload: Any) -> None:
-        self._payload = payload
-        self.status_code = 200
-
-    def raise_for_status(self) -> None:
-        pass
-
-    def json(self) -> Any:
-        return self._payload
+# --- Hyperliquid 1wk/1mo path: served natively by candleSnapshot, no local
+# aggregation ---
 
 
 def _install_candles(
-    monkeypatch: pytest.MonkeyPatch, payload: dict[str, Any]
+    provider: HyperliquidProvider, payload: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Route /candles to a scripted payload, capturing request params."""
+    """Route candleSnapshot to a scripted payload, capturing request bodies."""
     requests: list[dict[str, Any]] = []
 
-    class _Client:
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            pass
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == hyperliquid_module.INFO_URL
+        body = json.loads(request.content)
+        assert body["type"] == "candleSnapshot"
+        requests.append(dict(body["req"]))
+        return httpx.Response(200, json=payload)
 
-        async def __aenter__(self) -> "_Client":
-            return self
-
-        async def __aexit__(self, *exc: Any) -> bool:
-            return False
-
-        async def get(self, url: str, params: dict[str, Any] | None = None) -> _FakeResponse:
-            assert url == f"{lighter_module.BASE_URL}/candles"
-            requests.append(dict(params or {}))
-            return _FakeResponse(payload)
-
-    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return requests
 
 
-def _seeded_btc_provider() -> LighterProvider:
-    provider = LighterProvider()
-    provider._details = {"BTC": {"symbol": "BTC", "market_id": 1, "status": "active"}}
-    provider._details_time = monotonic()
+def _seeded_btc_provider() -> HyperliquidProvider:
+    provider = HyperliquidProvider()
+    provider._crypto = {"BTC": {"coin": "BTC", "display": "BTC", "last": 1.0}}
+    provider._markets_time = monotonic()
     return provider
 
 
-def _candle(day: datetime, o: float, h: float, low: float, c: float, v: float) -> dict[str, Any]:
-    return {"t": int(day.timestamp() * 1000), "o": o, "h": h, "l": low, "c": c, "v": v}
+def _candle(
+    day: datetime, interval: str, o: float, h: float, low: float, c: float, v: float
+) -> dict[str, Any]:
+    # Hyperliquid serves OHLCV as strings.
+    return {
+        "t": int(day.timestamp() * 1000),
+        "T": int((day + timedelta(days=1)).timestamp() * 1000),
+        "s": "BTC",
+        "i": interval,
+        "o": str(o),
+        "h": str(h),
+        "l": str(low),
+        "c": str(c),
+        "v": str(v),
+        "n": 5,
+    }
 
 
 @pytest.mark.asyncio
-async def test_lighter_weekly_history_fetches_daily_and_aggregates(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Thu 2025-06-05 and Fri 2025-06-06 are ISO W23; Mon 2025-06-09 is W24.
-    candles = {
-        "c": [
-            _candle(datetime(2025, 6, 5, tzinfo=UTC), 10.0, 12.0, 9.0, 11.0, 100.0),
-            _candle(datetime(2025, 6, 6, tzinfo=UTC), 11.0, 14.0, 10.0, 13.0, 50.0),
-            _candle(datetime(2025, 6, 9, tzinfo=UTC), 13.0, 13.5, 12.0, 12.5, 25.0),
-        ]
-    }
-    requests = _install_candles(monkeypatch, candles)
+async def test_hyperliquid_weekly_history_fetches_native_weekly_candles() -> None:
+    # Served out of order to prove the provider sorts; values pass through
+    # untouched because 1wk needs no local aggregation.
+    candles = [
+        _candle(datetime(2025, 6, 9, tzinfo=UTC), "1w", 13.0, 13.5, 12.0, 12.5, 25.0),
+        _candle(datetime(2025, 6, 2, tzinfo=UTC), "1w", 10.0, 14.0, 9.0, 13.0, 150.0),
+    ]
     provider = _seeded_btc_provider()
+    requests = _install_candles(provider, candles)
 
     bars = await provider.get_history(BTC_PERP, interval="1wk", range_="1y")
 
+    # Exactly one native-resolution request: no daily fetch, no paging.
     assert len(requests) == 1
-    assert requests[0]["resolution"] == "1d"
-    assert requests[0]["market_id"] == 1
+    assert requests[0]["coin"] == "BTC"
+    assert requests[0]["interval"] == "1w"
+    assert requests[0]["startTime"] < requests[0]["endTime"]
     assert bars == [
         Bar(
             symbol="BTC",
-            provider="lighter",
+            provider="hyperliquid",
             interval="1wk",
-            timestamp=datetime(2025, 6, 5, tzinfo=UTC),
+            timestamp=datetime(2025, 6, 2, tzinfo=UTC),
             open=10.0,
             high=14.0,
             low=9.0,
@@ -217,7 +211,7 @@ async def test_lighter_weekly_history_fetches_daily_and_aggregates(
         ),
         Bar(
             symbol="BTC",
-            provider="lighter",
+            provider="hyperliquid",
             interval="1wk",
             timestamp=datetime(2025, 6, 9, tzinfo=UTC),
             open=13.0,
@@ -230,28 +224,24 @@ async def test_lighter_weekly_history_fetches_daily_and_aggregates(
 
 
 @pytest.mark.asyncio
-async def test_lighter_monthly_history_fetches_daily_and_aggregates(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    candles = {
-        "c": [
-            _candle(datetime(2026, 1, 30, tzinfo=UTC), 5.0, 6.0, 4.0, 5.5, 10.0),
-            _candle(datetime(2026, 1, 31, tzinfo=UTC), 5.5, 7.0, 5.0, 6.5, 20.0),
-            _candle(datetime(2026, 2, 1, tzinfo=UTC), 6.5, 6.6, 6.0, 6.2, 30.0),
-        ]
-    }
-    requests = _install_candles(monkeypatch, candles)
+async def test_hyperliquid_monthly_history_fetches_native_monthly_candles() -> None:
+    candles = [
+        _candle(datetime(2026, 1, 1, tzinfo=UTC), "1M", 5.0, 7.0, 4.0, 6.5, 30.0),
+        _candle(datetime(2026, 2, 1, tzinfo=UTC), "1M", 6.5, 6.6, 6.0, 6.2, 30.0),
+    ]
     provider = _seeded_btc_provider()
+    requests = _install_candles(provider, candles)
 
     bars = await provider.get_history(BTC_PERP, interval="1mo", range_="5y")
 
-    assert requests[0]["resolution"] == "1d"
+    assert len(requests) == 1
+    assert requests[0]["interval"] == "1M"
     assert bars == [
         Bar(
             symbol="BTC",
-            provider="lighter",
+            provider="hyperliquid",
             interval="1mo",
-            timestamp=datetime(2026, 1, 30, tzinfo=UTC),
+            timestamp=datetime(2026, 1, 1, tzinfo=UTC),
             open=5.0,
             high=7.0,
             low=4.0,
@@ -260,7 +250,7 @@ async def test_lighter_monthly_history_fetches_daily_and_aggregates(
         ),
         Bar(
             symbol="BTC",
-            provider="lighter",
+            provider="hyperliquid",
             interval="1mo",
             timestamp=datetime(2026, 2, 1, tzinfo=UTC),
             open=6.5,

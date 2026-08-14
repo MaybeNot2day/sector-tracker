@@ -35,8 +35,7 @@ async def test_board_payload_async_shares_one_inflight_build(
     monkeypatch.setattr(scheduler, "_board_payload", blocked_build)
     grouped: dict[str, object] = {}
     callers = [
-        asyncio.create_task(scheduler.board_payload_async(object(), [], grouped))
-        for _ in range(8)
+        asyncio.create_task(scheduler.board_payload_async(object(), [], grouped)) for _ in range(8)
     ]
 
     assert await asyncio.to_thread(entered.wait, 2)
@@ -101,13 +100,9 @@ async def test_older_payload_build_cannot_overwrite_newer_finished_cache(
         return new_payload
 
     monkeypatch.setattr(scheduler, "_board_payload", ordered_build)
-    old_task = asyncio.create_task(
-        scheduler.board_payload_async(object(), [], old_grouped)
-    )
+    old_task = asyncio.create_task(scheduler.board_payload_async(object(), [], old_grouped))
     assert await asyncio.to_thread(old_entered.wait, 2)
-    new_task = asyncio.create_task(
-        scheduler.board_payload_async(object(), [], new_grouped)
-    )
+    new_task = asyncio.create_task(scheduler.board_payload_async(object(), [], new_grouped))
     assert await asyncio.to_thread(new_entered.wait, 2)
 
     release_new.set()

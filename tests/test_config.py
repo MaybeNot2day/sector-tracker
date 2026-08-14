@@ -76,7 +76,7 @@ def test_save_watchlists_rejects_conflicting_duplicate_symbol_identities(
         ),
         GroupConfig(
             name="CRYPTO",
-            assets=[AssetConfig(symbol="ROBO", type="crypto_perp", source="lighter")],
+            assets=[AssetConfig(symbol="ROBO", type="crypto_perp", source="hyperliquid")],
         ),
     ]
 

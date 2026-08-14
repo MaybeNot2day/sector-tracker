@@ -238,9 +238,7 @@ async def test_refresh_counts_only_previously_unseen_posts(
 
 @pytest.mark.asyncio
 async def test_refresh_reuses_and_closes_http_client(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = FakeHTTP(
-        {"alpha": page(post_block("alpha/1", "A1", "2026-07-07T08:00:00+00:00"))}
-    )
+    fake = FakeHTTP({"alpha": page(post_block("alpha/1", "A1", "2026-07-07T08:00:00+00:00"))})
     fake.install(monkeypatch)
     service = NewsService(["alpha"], cache_seconds=0)
 
@@ -251,7 +249,6 @@ async def test_refresh_reuses_and_closes_http_client(monkeypatch: pytest.MonkeyP
     assert fake.constructions == 1
     await service.aclose()
     assert fake.closes == 1
-
 
 
 @pytest.mark.asyncio

@@ -8,7 +8,7 @@ from time import monotonic
 from app import db
 from app.models import AssetConfig, Bar, GroupConfig, ProviderName
 from app.providers.base import QuoteProvider
-from app.providers.lighter import LighterProvider
+from app.providers.hyperliquid import HyperliquidProvider
 
 STALE_BAR_AGE = timedelta(hours=26)
 SELF_HEAL_COOLDOWN_SECONDS = 3600.0
@@ -17,7 +17,7 @@ HISTORY_CACHE_SECONDS = 300.0
 INTRADAY_CACHE_SECONDS = 15.0
 HISTORY_FAILURE_CACHE_SECONDS = 15.0
 
-# Intraday candles come from Lighter when it lists the symbol: its synthetic
+# Intraday candles come from Hyperliquid when it lists the symbol: its synthetic
 # markets trade 24/7 and are not delayed. Daily/weekly history stays with the
 # configured source so DMAs and 52W metrics keep official session bars.
 INTRADAY_INTERVALS = {"1m", "5m", "15m", "30m", "1h", "4h"}
@@ -86,18 +86,18 @@ class HistoryService:
         range_: str,
     ) -> list[Bar]:
         providers_to_try: list[QuoteProvider] = []
-        lighter = self.providers.get("lighter")
+        hyperliquid = self.providers.get("hyperliquid")
         if (
             interval in INTRADAY_INTERVALS
-            and asset.source != "lighter"
-            and isinstance(lighter, LighterProvider)
-            and await lighter.has_market(asset.symbol)
-            # Ticker collisions: Lighter's ROBO is a crypto token, not the
-            # robotics ETF. A Lighter market may only serve a TradFi asset's
-            # candles when Lighter classifies it as a TradFi synthetic.
-            and not lighter.is_crypto_market(asset.symbol)
+            and asset.source != "hyperliquid"
+            and isinstance(hyperliquid, HyperliquidProvider)
+            and await hyperliquid.has_market(asset.symbol)
+            # Ticker collisions: Hyperliquid's ROBO is a crypto token, not the
+            # robotics ETF. A Hyperliquid market may only serve a TradFi asset's
+            # candles when Hyperliquid classifies it as a TradFi synthetic.
+            and not hyperliquid.is_crypto_market(asset.symbol)
         ):
-            providers_to_try.append(lighter)
+            providers_to_try.append(hyperliquid)
         configured = self.providers.get(asset.source)
         if configured is not None:
             providers_to_try.append(configured)
@@ -130,18 +130,23 @@ class HistoryService:
         return filter_bars_to_range(cached_any_provider, range_)
 
     async def _tape_asset(self, symbol: str) -> AssetConfig | None:
-        """Synthetic config for Lighter crypto perps outside the watchlist.
+        """Synthetic config for Hyperliquid markets outside the watchlist.
 
-        The Markets crypto tape lists every Lighter perp, so its rows must
-        chart without a YAML entry. Restricted to crypto markets: TradFi
-        synthetics stay chartable only through their configured assets.
+        The Markets crypto tape lists every Hyperliquid perp, and the Watch
+        grid accepts free-typed symbols — both must chart without a YAML
+        entry. Crypto markets chart as perps; xyz TradFi synthetics chart as
+        equities so the whole Hyperliquid universe stays reachable.
         """
-        lighter = self.providers.get("lighter")
-        if not isinstance(lighter, LighterProvider):
+        hyperliquid = self.providers.get("hyperliquid")
+        if not isinstance(hyperliquid, HyperliquidProvider):
             return None
-        if not await lighter.has_market(symbol) or not lighter.is_crypto_market(symbol):
+        if not await hyperliquid.has_market(symbol):
             return None
-        return AssetConfig(symbol=symbol.upper(), type="crypto_perp", source="lighter")
+        if hyperliquid.is_crypto_market(symbol):
+            return AssetConfig(symbol=symbol.upper(), type="crypto_perp", source="hyperliquid")
+        if hyperliquid.is_tradfi_market(symbol):
+            return AssetConfig(symbol=symbol.upper(), type="equity", source="hyperliquid")
+        return None
 
     async def refresh_stale_daily_bars(self, groups: list[GroupConfig]) -> None:
         """Opportunistically refresh the stalest daily histories.

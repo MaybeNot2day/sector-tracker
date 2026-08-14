@@ -36,9 +36,7 @@ REQUEST_TIMEOUT = 180
 
 
 def fetch_snapshot(base_url: str, token: str) -> bytes:
-    request = urllib.request.Request(
-        base_url + "/api/backup", headers={"X-Edit-Token": token}
-    )
+    request = urllib.request.Request(base_url + "/api/backup", headers={"X-Edit-Token": token})
     with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:  # nosec B310
         return bytes(response.read())
 
@@ -53,9 +51,7 @@ def verify_snapshot(path: Path) -> str | None:
                 return f"integrity_check: {integrity}"
             tables = {
                 str(row[0])
-                for row in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                )
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
             }
             missing = REQUIRED_TABLES - tables
             if missing:

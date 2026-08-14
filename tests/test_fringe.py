@@ -22,7 +22,7 @@ from app import db
 from app.main import app
 from app.models import AssetConfig, Bar, GroupConfig, ProviderName, Quote
 from app.providers.base import QuoteProvider
-from app.providers.lighter import LighterProvider
+from app.providers.hyperliquid import HyperliquidProvider
 from app.services.crypto_etf_flows import CryptoEtfFlowService
 from app.services.fringe import (
     FringeService,
@@ -143,14 +143,18 @@ def open_ideas(path: Path) -> list[dict[str, object]]:
 def test_open_then_hold_updates_thesis_and_last_mentioned(tmp_path: Path) -> None:
     path = tmp_path / "board.sqlite3"
     db.apply_fringe_actions(
-        path, slug="fringe", report_date="2026-07-15",
+        path,
+        slug="fringe",
+        report_date="2026-07-15",
         actions=[act("open", "CIFR", "long", "initial thesis", "2w")],
     )
     (idea,) = open_ideas(path)
     db.stamp_fringe_prices(path, entries=[(int(str(idea["id"])), 8.42)])
 
     db.apply_fringe_actions(
-        path, slug="fringe", report_date="2026-07-16",
+        path,
+        slug="fringe",
+        report_date="2026-07-16",
         actions=[act("hold", "CIFR", "long", "still working")],
     )
 
@@ -166,14 +170,18 @@ def test_open_then_hold_updates_thesis_and_last_mentioned(tmp_path: Path) -> Non
 def test_reopen_is_idempotent_and_preserves_entry_and_opened_date(tmp_path: Path) -> None:
     path = tmp_path / "board.sqlite3"
     db.apply_fringe_actions(
-        path, slug="fringe", report_date="2026-07-15",
+        path,
+        slug="fringe",
+        report_date="2026-07-15",
         actions=[act("open", "CIFR", "long", "v1", "2w")],
     )
     (idea,) = open_ideas(path)
     db.stamp_fringe_prices(path, entries=[(int(str(idea["id"])), 8.42)])
 
     db.apply_fringe_actions(
-        path, slug="fringe", report_date="2026-07-16",
+        path,
+        slug="fringe",
+        report_date="2026-07-16",
         actions=[act("open", "CIFR", "long", "v2", "1m")],
     )
 
@@ -186,13 +194,17 @@ def test_reopen_is_idempotent_and_preserves_entry_and_opened_date(tmp_path: Path
 def test_target_follows_horizon_semantics_on_open_and_hold(tmp_path: Path) -> None:
     path = tmp_path / "board.sqlite3"
     db.apply_fringe_actions(
-        path, slug="fringe", report_date="2026-07-15",
+        path,
+        slug="fringe",
+        report_date="2026-07-15",
         actions=[act("open", "CIFR", "long", "thesis", "2w", "$12")],
     )
 
     # HOLD keeps the target it does not restate.
     db.apply_fringe_actions(
-        path, slug="fringe", report_date="2026-07-16",
+        path,
+        slug="fringe",
+        report_date="2026-07-16",
         actions=[act("hold", "CIFR", "long", "still working")],
     )
     (idea,) = open_ideas(path)
@@ -200,7 +212,9 @@ def test_target_follows_horizon_semantics_on_open_and_hold(tmp_path: Path) -> No
 
     # OPEN restates the whole idea: a missing target clears it.
     db.apply_fringe_actions(
-        path, slug="fringe", report_date="2026-07-17",
+        path,
+        slug="fringe",
+        report_date="2026-07-17",
         actions=[act("open", "CIFR", "long", "fresh thesis")],
     )
     (idea,) = open_ideas(path)
@@ -212,11 +226,15 @@ def test_close_stamps_date_and_reason_and_close_without_open_is_ignored(
 ) -> None:
     path = tmp_path / "board.sqlite3"
     db.apply_fringe_actions(
-        path, slug="fringe", report_date="2026-07-15",
+        path,
+        slug="fringe",
+        report_date="2026-07-15",
         actions=[act("open", "NVDA", "long", "run into earnings")],
     )
     db.apply_fringe_actions(
-        path, slug="fringe", report_date="2026-07-16",
+        path,
+        slug="fringe",
+        report_date="2026-07-16",
         actions=[
             act("close", "NVDA", "long", "earnings played out"),
             act("close", "TSLA", "short", "never existed"),
@@ -234,19 +252,25 @@ def test_close_stamps_date_and_reason_and_close_without_open_is_ignored(
 def test_hold_without_open_idea_opens_one(tmp_path: Path) -> None:
     path = tmp_path / "board.sqlite3"
     db.apply_fringe_actions(
-        path, slug="fringe", report_date="2026-07-16",
+        path,
+        slug="fringe",
+        report_date="2026-07-16",
         actions=[act("hold", "XLU", "short", "crowded", "1w")],
     )
     (idea,) = open_ideas(path)
     assert (idea["ticker"], idea["direction"], idea["opened_date"]) == (
-        "XLU", "short", "2026-07-16",
+        "XLU",
+        "short",
+        "2026-07-16",
     )
 
 
 def test_same_ticker_opposite_directions_are_separate_ideas(tmp_path: Path) -> None:
     path = tmp_path / "board.sqlite3"
     db.apply_fringe_actions(
-        path, slug="fringe", report_date="2026-07-16",
+        path,
+        slug="fringe",
+        report_date="2026-07-16",
         actions=[act("open", "GLD", "long"), act("open", "GLD", "short")],
     )
     assert sorted(str(idea["direction"]) for idea in open_ideas(path)) == ["long", "short"]
@@ -259,7 +283,9 @@ def test_same_day_rerun_retracts_only_that_days_absent_creations(tmp_path: Path)
         path, slug="fringe", report_date="2026-07-15", actions=[act("open", "AAA", "long")]
     )
     db.apply_fringe_actions(
-        path, slug="fringe", report_date="2026-07-16",
+        path,
+        slug="fringe",
+        report_date="2026-07-16",
         actions=[act("open", "BBB", "long"), act("open", "CCC", "long")],
     )
 
@@ -360,25 +386,24 @@ class ScriptedYahoo(QuoteProvider):
         return []
 
 
-class ScriptedLighter(LighterProvider):
-    """Real LighterProvider (isinstance gates the routing) with a warm cache."""
+class ScriptedHyperliquid(HyperliquidProvider):
+    """Real HyperliquidProvider (isinstance gates the routing) with a warm cache."""
 
     def __init__(self, prices: dict[str, float]) -> None:
         super().__init__()
         self.prices = dict(prices)
         self.requested: list[AssetConfig] = []
-        # strategy_index 2 = crypto perp bucket (see _is_crypto_detail).
-        self._details = {
-            symbol: {"symbol": symbol, "market_id": index + 1, "status": "active",
-                     "strategy_index": 2}
-            for index, symbol in enumerate(sorted(prices))
+        # Warm crypto market map so has_market/is_crypto_market skip HTTP.
+        self._crypto = {
+            symbol: {"coin": symbol, "display": symbol, "last": price}
+            for symbol, price in sorted(prices.items())
         }
-        self._details_time = monotonic()
+        self._markets_time = monotonic()
 
     async def get_quotes(self, assets: list[AssetConfig]) -> list[Quote]:
         self.requested.extend(assets)
         return [
-            make_quote(asset, "lighter", self.prices[asset.symbol])
+            make_quote(asset, "hyperliquid", self.prices[asset.symbol])
             for asset in assets
             if asset.symbol in self.prices
         ]
@@ -427,26 +452,24 @@ FRINGE_REPORT = {
 }
 
 
-def test_fringe_route_stamps_entries_and_routes_lighter_vs_yahoo(
+def test_fringe_route_stamps_entries_and_routes_hyperliquid_vs_yahoo(
     configure_app: Callable[..., Path],
 ) -> None:
     yahoo = ScriptedYahoo({"CIFR": 8.42})
-    lighter = ScriptedLighter({"BTC": 60000.0})
-    configure_app({"yahoo": yahoo, "lighter": lighter})
+    hyperliquid = ScriptedHyperliquid({"BTC": 60000.0})
+    configure_app({"yahoo": yahoo, "hyperliquid": hyperliquid})
     client = TestClient(app)
 
     created = client.post("/api/reports", json=FRINGE_REPORT)
     assert created.status_code == 200
     assert created.json()["fringe_actions"] == 2
 
-    # Crypto tickers Lighter lists go to Lighter as crypto perps; anything
-    # else is a Yahoo equity. Entry prices are stamped at ingest.
-    assert [(a.symbol, a.type, a.source) for a in lighter.requested] == [
-        ("BTC", "crypto_perp", "lighter")
+    # Crypto tickers Hyperliquid lists go to Hyperliquid as crypto perps;
+    # anything else is a Yahoo equity. Entry prices are stamped at ingest.
+    assert [(a.symbol, a.type, a.source) for a in hyperliquid.requested] == [
+        ("BTC", "crypto_perp", "hyperliquid")
     ]
-    assert [(a.symbol, a.type, a.source) for a in yahoo.requested] == [
-        ("CIFR", "equity", "yahoo")
-    ]
+    assert [(a.symbol, a.type, a.source) for a in yahoo.requested] == [("CIFR", "equity", "yahoo")]
 
     # Mark-to-market on a later build: bust the quote TTL and move the tape.
     yahoo.prices["CIFR"] = 8.77
@@ -540,9 +563,7 @@ def test_fringe_route_rejects_levels_parsed_from_wrong_side_prose(
     )
     assert response.status_code == 200
 
-    by_ticker = {
-        item["ticker"]: item for item in client.get("/api/fringe").json()["open"]
-    }
+    by_ticker = {item["ticker"]: item for item in client.get("/api/fringe").json()["open"]}
     assert by_ticker["AMD"]["target"] == "2x weekly ATR"
     assert by_ticker["AMD"]["stop"] == "$580"
     assert by_ticker["AMD"]["target_price"] is None
@@ -781,7 +802,13 @@ def test_market_context_shape_movers_and_clamped_days(
 
     assert payload["days"] == 90  # clamped, not rejected: the caller is a bot
     assert set(payload) == {
-        "as_of", "days", "snapshots", "movers", "etf_flows", "key_dates", "fringe_book",
+        "as_of",
+        "days",
+        "snapshots",
+        "movers",
+        "etf_flows",
+        "key_dates",
+        "fringe_book",
     }
     # Snapshots are the exact rows /api/snapshots serves (oldest first, date-keyed).
     assert [row["date"] for row in payload["snapshots"]] == ["2026-07-15", "2026-07-16"]
@@ -915,8 +942,7 @@ def test_kelly_sizing_clamps_floor_cap_and_gross_exposure(
 
     # 95% conf with a tight stop grades far beyond the 25% cap.
     hot = "".join(
-        f"- OPEN LONG T{i} — max edge [conf: 95%] [stop: $99] [target: $120]\n"
-        for i in range(5)
+        f"- OPEN LONG T{i} — max edge [conf: 95%] [stop: $99] [target: $120]\n" for i in range(5)
     )
     created = client.post(
         "/api/reports",

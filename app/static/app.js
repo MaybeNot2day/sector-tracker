@@ -188,7 +188,7 @@ let reportsBadgeFetchSeq = 0;
 
 const sourceLabels = {
   yahoo: "YH",
-  lighter: "LTR",
+  hyperliquid: "HL",
   stooq: "STQ",
 };
 
@@ -3047,8 +3047,8 @@ function cryptoBreadthPanel(breadth) {
   return `<section class="analytics-panel">
     ${panelHeading(
       "Crypto Breadth",
-      `${formatInteger(cb.total)} Lighter perps`,
-      "Same participation check for the whole crypto market: every perp listed on Lighter. Median 1D = the typical coin's day. Funding > 0 = share of markets where longs pay shorts, a proxy for bullish positioning. High advance % with high funding = crowded optimism."
+      `${formatInteger(cb.total)} Hyperliquid perps`,
+      "Same participation check for the whole crypto market: every perp listed on Hyperliquid. Median 1D = the typical coin's day. Funding > 0 = share of markets where longs pay shorts, a proxy for bullish positioning. High advance % with high funding = crowded optimism."
     )}
     <div class="breadth-grid">
       ${breadthRow("Median 1D", formatSignedPct(cb.median_change), medianTone)}
@@ -4050,9 +4050,9 @@ function squarify(items, rect) {
 }
 
 // --- Crypto tape -----------------------------------------------------------
-// Every crypto perp on Lighter, auto-synced from the exchange: no YAML entry
+// Every crypto perp on Hyperliquid, auto-synced from the exchange: no YAML entry
 // needed, new listings appear on their own. Rows are quote-only (funding, OI,
-// 24h volume); clicking one opens the chart via on-demand Lighter candles.
+// 24h volume); clicking one opens the chart via on-demand Hyperliquid candles.
 const TAPE_SORT_KEYS = {
   symbol: (row) => row.symbol,
   last: (row) => numericOrNull(row.last),
@@ -4062,7 +4062,7 @@ const TAPE_SORT_KEYS = {
   volume: (row) => numericOrNull(row.day_volume_usd),
 };
 
-// Panel order mirrors Lighter's app baskets; "Other" catches untagged tails.
+// Panel order mirrors the exchange app baskets; "Other" catches untagged tails.
 const TAPE_BASKET_ORDER = ["L1", "DeFi", "AI", "L2", "Memes", "Other"];
 
 // Big baskets (DeFi ~31, L1 ~24) paginate so panels stay scannable.
@@ -4195,7 +4195,7 @@ function reconcileTapePanel(panel, basket, rows) {
   });
   const sessionChip = header.querySelector(".session-chip");
   sessionChip.textContent = String(rows.length);
-  sessionChip.title = `${rows.length} perps · Lighter basket · trades 24/7`;
+  sessionChip.title = `${rows.length} perps · Hyperliquid basket · trades 24/7`;
 
   const existingRows = Array.from(panel.querySelectorAll(":scope > .asset-row"));
   const rowsBySymbol = new Map(existingRows.map((row) => [row.dataset.symbol, row]));
@@ -4302,7 +4302,7 @@ function tapeBasketMarkup(basket, rows) {
       : "";
   return `<section class="group-panel tape-panel" data-basket="${escapeHtml(basket)}">
     <div class="group-title">
-      <span>${header(basket, "symbol")}<em class="session-chip" data-state="open" title="${rows.length} perps · Lighter basket · trades 24/7">${rows.length}</em></span>
+      <span>${header(basket, "symbol")}<em class="session-chip" data-state="open" title="${rows.length} perps · Hyperliquid basket · trades 24/7">${rows.length}</em></span>
       <span>${header("Last", "last")}</span>
       <span>${header("24h %", "pct")}</span>
       <span>${header("Fund", "funding")}</span>
@@ -4374,7 +4374,7 @@ function openTapeChart(symbol, options = {}) {
       symbol,
       type: "crypto_perp",
       quote: {
-        provider: "lighter",
+        provider: "hyperliquid",
         last,
         change_pct: changePct,
         previous_close:
@@ -4558,7 +4558,7 @@ function sortValue(asset, key) {
   const quote = asset.quote || {};
   // Crypto rows swap the two day-change columns: "1D %" holds the UTC-day
   // move and the old ΔOpen slot holds the exchange's rolling 24h change
-  // (Lighter's daily_price_change) — mirror that here so sorting follows
+  // (Hyperliquid's rolling 24h change) — mirror that here so sorting follows
   // the displayed values.
   const crypto = isCryptoAsset(asset.type);
   if (key === "last") return numericOrNull(displayQuoteValue(quote, "last"));
@@ -4858,8 +4858,8 @@ async function mutateWatchlists(url, options) {
 }
 
 function syncSourceToType() {
-  if (assetTypeSelect.value === "crypto_perp") assetSourceSelect.value = "lighter";
-  else if (assetSourceSelect.value === "lighter") assetSourceSelect.value = "yahoo";
+  if (assetTypeSelect.value === "crypto_perp") assetSourceSelect.value = "hyperliquid";
+  else if (assetSourceSelect.value === "hyperliquid") assetSourceSelect.value = "yahoo";
 }
 
 function setEditorStatus(text) {
@@ -4923,7 +4923,7 @@ function updateRow(row, asset, options = {}) {
     !options.initial
   );
   // Crypto rows: "1D %" anchors to the UTC day (what ΔOpen used to show)
-  // and the old ΔOpen column carries Lighter's rolling 24h change, so each
+  // and the old ΔOpen column carries Hyperliquid's rolling 24h change, so each
   // number sits under a truthful label. TradFi rows are unchanged.
   const openChange = numericOrNull(asset.summary?.open_change_pct);
   const rowIsCrypto = isCryptoAsset(asset.type);
@@ -5018,7 +5018,7 @@ function rvolClass(value) {
   return "rvol-cell";
 }
 
-// Perp funding chip for crypto rows: hourly Lighter rate annualized.
+// Perp funding chip for crypto rows: hourly Hyperliquid rate annualized.
 // Negative funding (shorts pay) reads green; hot positive funding reads red.
 function updateFundingChip(cell, quote) {
   const rate = typeof quote.funding_rate === "number" ? quote.funding_rate : null;

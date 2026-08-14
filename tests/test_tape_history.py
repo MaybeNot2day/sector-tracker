@@ -1,19 +1,19 @@
-"""History for crypto-tape symbols that have no watchlist (YAML) entry.
+"""History for Hyperliquid symbols that have no watchlist (YAML) entry.
 
-Charting a tape row must synthesize a lighter crypto_perp asset; Lighter's
-TradFi synthetics and unknown symbols must stay unchartable that way.
+Charting a tape row must synthesize a hyperliquid crypto_perp asset; xyz
+TradFi synthetics chart as equities, and unknown symbols stay unchartable.
 """
 
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import monotonic
-from typing import Any
 
 import pytest
 
 from app.models import AssetConfig, Bar, GroupConfig, ProviderName, Quote
 from app.providers.base import QuoteProvider
-from app.providers.lighter import LighterProvider
+from app.providers.hyperliquid import HyperliquidProvider
 from app.services.history import HistoryService
 
 GROUPS = [
@@ -23,11 +23,8 @@ GROUPS = [
     )
 ]
 
-TAPE_DETAILS: dict[str, dict[str, Any]] = {
-    "TRX": {"symbol": "TRX", "strategy_index": 2, "status": "active", "market_id": 43},
-    "MAGS": {"symbol": "MAGS", "strategy_index": 0, "status": "active", "market_id": 77},
-    "AAPL": {"symbol": "AAPL", "strategy_index": 5, "status": "active", "market_id": 42},
-}
+TAPE_CRYPTO = {"TRX"}
+TAPE_TRADFI = {"MAGS", "AAPL"}
 
 
 def make_bar(symbol: str, provider: ProviderName, close: float, interval: str) -> Bar:
@@ -58,75 +55,93 @@ class ScriptedHistory(QuoteProvider):
         return [make_bar(asset.symbol, "yahoo", self._close, interval)]
 
 
-class ScriptedLighter(LighterProvider):
-    """Real LighterProvider (isinstance matters for routing) with a warm cache."""
+class ScriptedHyperliquid(HyperliquidProvider):
+    """Real HyperliquidProvider (isinstance matters for routing) with a warm cache."""
 
-    def __init__(self, details: dict[str, dict[str, Any]], close: float = 0.31) -> None:
+    def __init__(
+        self,
+        crypto: Iterable[str] = (),
+        tradfi: Iterable[str] = (),
+        close: float = 0.31,
+    ) -> None:
         super().__init__()
-        self._details = details
-        self._details_time = monotonic()
+        self._crypto = {
+            symbol.upper(): {"coin": symbol.upper(), "display": symbol.upper(), "last": 1.0}
+            for symbol in crypto
+        }
+        self._tradfi = {
+            symbol.upper(): {
+                "coin": f"xyz:{symbol.upper()}",
+                "display": symbol.upper(),
+                "last": 1.0,
+            }
+            for symbol in tradfi
+        }
+        self._markets_time = monotonic()
         self._close = close
         self.history_assets: list[AssetConfig] = []
 
     async def get_history(self, asset: AssetConfig, *, interval: str, range_: str) -> list[Bar]:
         self.history_assets.append(asset)
-        return [make_bar(asset.symbol, "lighter", self._close, interval)]
+        return [make_bar(asset.symbol, "hyperliquid", self._close, interval)]
 
 
 def make_service(
-    tmp_path: Path, lighter: LighterProvider | None
+    tmp_path: Path, hyperliquid: HyperliquidProvider | None
 ) -> tuple[HistoryService, ScriptedHistory]:
     yahoo = ScriptedHistory(close=222.0)
     providers: dict[ProviderName, QuoteProvider] = {"yahoo": yahoo}
-    if lighter is not None:
-        providers["lighter"] = lighter
+    if hyperliquid is not None:
+        providers["hyperliquid"] = hyperliquid
     return HistoryService(tmp_path / "board.sqlite3", providers), yahoo
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("interval", ["1h", "1d"])
-async def test_tape_symbol_charts_via_synthetic_lighter_asset(
+async def test_tape_symbol_charts_via_synthetic_crypto_perp_asset(
     tmp_path: Path, interval: str
 ) -> None:
-    lighter = ScriptedLighter(TAPE_DETAILS)
-    service, yahoo = make_service(tmp_path, lighter)
+    hyperliquid = ScriptedHyperliquid(crypto=TAPE_CRYPTO, tradfi=TAPE_TRADFI)
+    service, yahoo = make_service(tmp_path, hyperliquid)
 
     bars = await service.get_history(GROUPS, "trx", interval=interval, range_="1d")
 
-    assert [(bar.provider, bar.close) for bar in bars] == [("lighter", 0.31)]
-    assert lighter.history_assets == [
-        AssetConfig(symbol="TRX", type="crypto_perp", source="lighter")
+    assert [(bar.provider, bar.close) for bar in bars] == [("hyperliquid", 0.31)]
+    assert hyperliquid.history_assets == [
+        AssetConfig(symbol="TRX", type="crypto_perp", source="hyperliquid")
     ]
     assert yahoo.calls == []
 
 
 @pytest.mark.asyncio
-async def test_lighter_tradfi_market_is_not_chartable_as_tape_symbol(tmp_path: Path) -> None:
-    lighter = ScriptedLighter(TAPE_DETAILS)
-    service, yahoo = make_service(tmp_path, lighter)
+async def test_tradfi_synthetic_charts_via_synthetic_equity_asset(tmp_path: Path) -> None:
+    hyperliquid = ScriptedHyperliquid(crypto=TAPE_CRYPTO, tradfi=TAPE_TRADFI)
+    service, yahoo = make_service(tmp_path, hyperliquid)
 
     bars = await service.get_history(GROUPS, "MAGS", interval="1h", range_="1d")
 
-    assert bars == []
-    assert lighter.history_assets == []
+    assert [(bar.provider, bar.close) for bar in bars] == [("hyperliquid", 0.31)]
+    assert hyperliquid.history_assets == [
+        AssetConfig(symbol="MAGS", type="equity", source="hyperliquid")
+    ]
     assert yahoo.calls == []
 
 
 @pytest.mark.asyncio
 async def test_unknown_symbol_returns_empty_without_fetch(tmp_path: Path) -> None:
-    lighter = ScriptedLighter(TAPE_DETAILS)
-    service, yahoo = make_service(tmp_path, lighter)
+    hyperliquid = ScriptedHyperliquid(crypto=TAPE_CRYPTO, tradfi=TAPE_TRADFI)
+    service, yahoo = make_service(tmp_path, hyperliquid)
 
     bars = await service.get_history(GROUPS, "ZZZZ", interval="1h", range_="1d")
 
     assert bars == []
-    assert lighter.history_assets == []
+    assert hyperliquid.history_assets == []
     assert yahoo.calls == []
 
 
 @pytest.mark.asyncio
-async def test_tape_symbol_needs_a_lighter_provider(tmp_path: Path) -> None:
-    service, yahoo = make_service(tmp_path, lighter=None)
+async def test_tape_symbol_needs_a_hyperliquid_provider(tmp_path: Path) -> None:
+    service, yahoo = make_service(tmp_path, hyperliquid=None)
 
     bars = await service.get_history(GROUPS, "TRX", interval="1h", range_="1d")
 
@@ -136,12 +151,12 @@ async def test_tape_symbol_needs_a_lighter_provider(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_watchlist_symbol_still_uses_its_configured_provider(tmp_path: Path) -> None:
-    """AAPL is a Lighter TradFi market, but its watchlist entry must win."""
-    lighter = ScriptedLighter(TAPE_DETAILS)
-    service, yahoo = make_service(tmp_path, lighter)
+    """AAPL is a Hyperliquid TradFi synthetic, but its watchlist entry must win."""
+    hyperliquid = ScriptedHyperliquid(crypto=TAPE_CRYPTO, tradfi=TAPE_TRADFI)
+    service, yahoo = make_service(tmp_path, hyperliquid)
 
     bars = await service.get_history(GROUPS, "AAPL", interval="1d", range_="1y")
 
     assert [(bar.provider, bar.close) for bar in bars] == [("yahoo", 222.0)]
     assert yahoo.calls == [("AAPL", "1d")]
-    assert lighter.history_assets == []
+    assert hyperliquid.history_assets == []

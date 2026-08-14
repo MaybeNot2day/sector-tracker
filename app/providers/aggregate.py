@@ -6,7 +6,7 @@ from datetime import datetime
 from app.models import Bar
 
 # Timeframes providers cannot serve natively get built from finer bars:
-# Yahoo has no 4h resolution (aggregate 1h), Lighter has no weekly/monthly
+# Yahoo has no 4h resolution (aggregate 1h), some venues have no weekly/monthly
 # (aggregate 1d).
 _FOUR_HOURS = 4 * 3600
 

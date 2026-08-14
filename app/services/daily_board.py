@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 SNAPSHOT_WRITE_INTERVAL_SECONDS = 300.0
 
+
 @dataclass(frozen=True, slots=True)
 class _PreparedBars:
     bars: list[Bar]
@@ -462,7 +463,7 @@ def _theme_metrics(
 
 
 def crypto_breadth_metrics(tape: list[dict[str, object]]) -> dict[str, object]:
-    """Breadth across the full Lighter crypto tape, from quote data alone.
+    """Breadth across the full Hyperliquid crypto tape, from quote data alone.
 
     Deliberately separate from the watchlist universe so 100+ alt perps
     never distort the curated regime/breadth read.

@@ -45,7 +45,7 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
     tracker = CloseTracker()
     probes = {
         "yahoo": CloseProbe("yahoo", tracker),
-        "lighter": CloseProbe("lighter", tracker, fail=True),
+        "hyperliquid": CloseProbe("hyperliquid", tracker, fail=True),
         "stooq": CloseProbe("stooq", tracker),
         "news": CloseProbe("news", tracker),
         "econ": CloseProbe("econ", tracker),
@@ -83,7 +83,7 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
     monkeypatch.setattr(main_module, "load_watchlists", lambda path: [])
     monkeypatch.setattr(db, "init_db", lambda path: None)
     monkeypatch.setattr(main_module, "YahooProvider", lambda: probes["yahoo"])
-    monkeypatch.setattr(main_module, "LighterProvider", lambda: probes["lighter"])
+    monkeypatch.setattr(main_module, "HyperliquidProvider", lambda: probes["hyperliquid"])
     monkeypatch.setattr(main_module, "StooqProvider", lambda: probes["stooq"])
     monkeypatch.setattr(main_module, "NewsService", lambda *args, **kwargs: probes["news"])
     monkeypatch.setattr(main_module, "QuoteService", lambda *args, **kwargs: object())
@@ -110,6 +110,6 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
     await asyncio.wait_for(run_lifespan(), timeout=1.0)
 
     assert tracker.stopped_tasks == 4
-    assert set(tracker.started) == {"yahoo", "lighter", "stooq", "news", "options", "econ"}
-    # Lighter's close failure is isolated; every other resource still closes.
+    assert set(tracker.started) == {"yahoo", "hyperliquid", "stooq", "news", "options", "econ"}
+    # Hyperliquid's close failure is isolated; every other resource still closes.
     assert set(tracker.completed) == {"yahoo", "stooq", "news", "options", "econ"}

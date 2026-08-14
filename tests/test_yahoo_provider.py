@@ -207,9 +207,7 @@ def test_exhausted_failure_arms_symbol_cooldown_then_retries_after_expiry(
     monkeypatch.setattr(yahoo_module, "monotonic", lambda: clock)
     monkeypatch.setattr(yahoo_module, "_get_json", fake_get_json)
     monkeypatch.setattr(yahoo_module, "sleep", sleeps.append)
-    chart_urls = tuple(
-        url.format(symbol="SPY") for url in yahoo_module.YAHOO_CHART_URLS
-    )
+    chart_urls = tuple(url.format(symbol="SPY") for url in yahoo_module.YAHOO_CHART_URLS)
 
     with pytest.raises(RuntimeError, match="chart outage"):
         yahoo_module._get_json_with_retry(chart_urls, params={"range": "1d"})
@@ -259,9 +257,7 @@ def test_one_symbol_chart_failure_does_not_cool_down_others(
 
     # Only the delisted symbol cools down; every other chart call proceeds.
     assert set(yahoo_module._failure_until) == {"chart:DEAD"}
-    assert yahoo_module._get_json_with_retry(spy_urls, params={"range": "1d"}) == {
-        "symbol": "SPY"
-    }
+    assert yahoo_module._get_json_with_retry(spy_urls, params={"range": "1d"}) == {"symbol": "SPY"}
     with pytest.raises(yahoo_module.YahooFailureCooldown):
         yahoo_module._get_json_with_retry(dead_urls, params={"range": "1d"})
 
@@ -276,9 +272,7 @@ def test_official_close_is_previous_close_while_regular_session_trades() -> None
             "preMarketPrice": 99.5,
             "preMarketTime": 1_787_980_000,
             "previousClose": 98.0,
-            "currentTradingPeriod": {
-                "regular": {"start": 1_787_990_000, "end": 1_788_010_000}
-            },
+            "currentTradingPeriod": {"regular": {"start": 1_787_990_000, "end": 1_788_010_000}},
         },
     }
 
@@ -297,9 +291,7 @@ def test_official_close_is_regular_close_when_session_period_has_ended() -> None
             "regularMarketPrice": 100.0,
             "regularMarketTime": 1_788_010_000,
             "previousClose": 98.0,
-            "currentTradingPeriod": {
-                "regular": {"start": 1_787_986_600, "end": 1_788_010_000}
-            },
+            "currentTradingPeriod": {"regular": {"start": 1_787_986_600, "end": 1_788_010_000}},
         },
     }
 

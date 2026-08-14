@@ -162,7 +162,6 @@ _VALID_BAR_SQL = """
 """
 
 
-
 def init_db(path: Path) -> None:
     resolved = path.expanduser().resolve()
     if resolved in _initialized_paths and resolved.exists():
@@ -185,9 +184,7 @@ def init_db(path: Path) -> None:
             _ensure_column(conn, "latest_quotes", "funding_rate", "REAL")
             _ensure_column(conn, "latest_quotes", "open_interest_usd", "REAL")
             _ensure_column(conn, "reports", "updated_at", "TEXT")
-            conn.execute(
-                "UPDATE reports SET updated_at = created_at WHERE updated_at IS NULL"
-            )
+            conn.execute("UPDATE reports SET updated_at = created_at WHERE updated_at IS NULL")
             _ensure_column(conn, "fringe_ideas", "target", "TEXT")
             _ensure_column(conn, "fringe_ideas", "confidence", "REAL")
             _ensure_column(conn, "fringe_ideas", "stop", "TEXT")
@@ -736,9 +733,7 @@ def load_reports(
             if cursor_row is not None
             else None
         ),
-        "filters": [
-            {"slug": str(row["slug"]), "title": str(row["title"])} for row in facets
-        ],
+        "filters": [{"slug": str(row["slug"]), "title": str(row["title"])} for row in facets],
     }
 
 
@@ -761,6 +756,7 @@ def load_report(path: Path, report_id: int) -> dict[str, object] | None:
         "updated_at": str(row["updated_at"]),
         "body": str(row["body"]),
     }
+
 
 def delete_report(path: Path, report_id: int) -> bool:
     """Remove one report; only the current slug owner may clear projections."""
@@ -890,9 +886,7 @@ def apply_fringe_actions(
     *,
     slug: str,
     report_date: str,
-    actions: Sequence[
-        tuple[str, str, str, str, str | None, str | None, float | None, str | None]
-    ],
+    actions: Sequence[tuple[str, str, str, str, str | None, str | None, float | None, str | None]],
 ) -> dict[str, int]:
     """Replay one report's fringe actions against the accruing ideas ledger."""
     init_db(path)
@@ -910,9 +904,7 @@ def _apply_fringe_actions(
     *,
     slug: str,
     report_date: str,
-    actions: Sequence[
-        tuple[str, str, str, str, str | None, str | None, float | None, str | None]
-    ],
+    actions: Sequence[tuple[str, str, str, str, str | None, str | None, float | None, str | None]],
 ) -> dict[str, int]:
     now = _to_iso(datetime.now(UTC))
     counts = {"opened": 0, "updated": 0, "closed": 0, "removed": 0}
@@ -920,8 +912,7 @@ def _apply_fringe_actions(
     for action, ticker, direction, text, horizon, target, confidence, stop in actions:
         mentioned.add((ticker, direction))
         row = conn.execute(
-            "SELECT id FROM fringe_ideas"
-            " WHERE ticker = ? AND direction = ? AND status = 'open'",
+            "SELECT id FROM fringe_ideas WHERE ticker = ? AND direction = ? AND status = 'open'",
             (ticker, direction),
         ).fetchone()
         if action == "close":

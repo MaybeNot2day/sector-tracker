@@ -57,8 +57,7 @@ STATE_PATH = Path.home() / ".local/state/sector-tracker/vault-uploads.json"
 DATED_NAME = re.compile(r"^(\d{4}-\d{2}-\d{2}) (.+)\.md$")
 # Vault-writing cron jobs; extend via REPORT_TITLES instead of editing this.
 DEFAULT_REPORT_TITLES = (
-    "Biotech Pharma Brief, AI Semis Morning Brief, Macro Tape Brief, "
-    "US Asia Close, Fringe Corner"
+    "Biotech Pharma Brief, AI Semis Morning Brief, Macro Tape Brief, US Asia Close, Fringe Corner"
 )
 HERMES_BIN = Path.home() / ".local/bin/hermes"
 NOTIFY_TIMEOUT = 20
@@ -167,9 +166,7 @@ def _report_section(report: str, title: str) -> str | None:
     """Body of the first `## <title>` section; None when the heading is absent."""
     lines = report.splitlines()
     heading = re.compile(rf"##\s+{re.escape(title)}\s*", re.IGNORECASE)
-    start = next(
-        (i + 1 for i, line in enumerate(lines) if heading.fullmatch(line)), None
-    )
+    start = next((i + 1 for i, line in enumerate(lines) if heading.fullmatch(line)), None)
     if start is None:
         return None
     body = lines[start:]
@@ -195,11 +192,7 @@ def _due_diligence_violation(report: str) -> str | None:
             current.append(line)
     for ticker in tickers:
         heading = next(
-            (
-                name
-                for name in blocks
-                if re.match(rf"{re.escape(ticker)}(?![A-Z0-9.\-=])", name)
-            ),
+            (name for name in blocks if re.match(rf"{re.escape(ticker)}(?![A-Z0-9.\-=])", name)),
             None,
         )
         if heading is None:
@@ -222,9 +215,7 @@ def validate_report_body(title: str, date_text: str, body: str) -> str | None:
     frontmatter_end = body.find("\n---\n", 4)
     if frontmatter_end < 0:
         return "unterminated YAML frontmatter"
-    frontmatter = {
-        line.strip() for line in body[4:frontmatter_end].splitlines() if line.strip()
-    }
+    frontmatter = {line.strip() for line in body[4:frontmatter_end].splitlines() if line.strip()}
     for required in (f"date: {date_text}", "type: research", "status: draft"):
         if required not in frontmatter:
             return f"frontmatter missing {required!r}"
@@ -247,11 +238,15 @@ def validate_report_body(title: str, date_text: str, body: str) -> str | None:
     for marker in required_markers[title_key]:
         if marker not in report:
             return f"report missing {marker!r}"
-    if title_key in {
-        "ai semis morning brief",
-        "biotech pharma brief",
-        "us asia close",
-    } and report.count("---FEED-STATUS---") != 1:
+    if (
+        title_key
+        in {
+            "ai semis morning brief",
+            "biotech pharma brief",
+            "us asia close",
+        }
+        and report.count("---FEED-STATUS---") != 1
+    ):
         return "report must contain exactly one FEED-STATUS delimiter"
     if title_key == "fringe corner" and report_date >= DUE_DILIGENCE_EFFECTIVE_DATE:
         return _due_diligence_violation(report)
@@ -264,6 +259,7 @@ def load_state(path: Path = STATE_PATH) -> dict[str, str]:
     except (OSError, ValueError):
         return {}
     return {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+
 
 def prune_state(
     state: dict[str, str],
@@ -288,9 +284,7 @@ def save_state(state: dict[str, str], path: Path = STATE_PATH) -> None:
     # Unique tmp name: concurrent manual + scheduled runs must not interleave
     # writes into one shared .tmp file. (A full flock pass is deliberately out
     # of scope; systemd/launchd already serialize the scheduled runs.)
-    with tempfile.NamedTemporaryFile(
-        "w", dir=path.parent, encoding="utf-8", delete=False
-    ) as tmp:
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, encoding="utf-8", delete=False) as tmp:
         tmp.write(json.dumps(state, indent=1, sort_keys=True))
     os.replace(tmp.name, path)
 
@@ -302,9 +296,7 @@ def _is_secure_board_url(base_url: str) -> bool:
     )
 
 
-def post_report(
-    base_url: str, token: str, title: str, date_text: str, body: str
-) -> dict[str, Any]:
+def post_report(base_url: str, token: str, title: str, date_text: str, body: str) -> dict[str, Any]:
     if not _is_secure_board_url(base_url):
         raise ValueError("BOARD_URL must use HTTPS (HTTP is allowed only for localhost)")
     payload = json.dumps({"title": title, "date": date_text, "body": body}).encode("utf-8")
@@ -321,9 +313,7 @@ def post_report(
 def notify_new_reports(targets: str, base_url: str, titles: list[str]) -> None:
     """Announce a landed batch via the Hermes gateway; never fails the pass."""
     plural = "s" if len(titles) != 1 else ""
-    message = (
-        f"New brief{plural} on the dashboard: {', '.join(titles)} \u2192 {base_url}"
-    )
+    message = f"New brief{plural} on the dashboard: {', '.join(titles)} \u2192 {base_url}"
     for target in (part.strip() for part in targets.split(",")):
         if not target:
             continue

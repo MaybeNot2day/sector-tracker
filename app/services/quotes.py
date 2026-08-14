@@ -11,7 +11,7 @@ from typing import TypeAlias
 from app import db
 from app.models import AssetConfig, GroupConfig, ProviderName, Quote
 from app.providers.base import QuoteProvider
-from app.providers.lighter import LighterProvider
+from app.providers.hyperliquid import HyperliquidProvider
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +45,7 @@ class QuoteService:
             if cached is not None:
                 return cached
 
-            requested_symbols = sorted(
-                {asset.symbol for group in groups for asset in group.assets}
-            )
+            requested_symbols = sorted({asset.symbol for group in groups for asset in group.assets})
             cached_by_symbol = await asyncio.to_thread(
                 db.load_latest_quotes, self.database_path, requested_symbols
             )
@@ -55,14 +53,10 @@ class QuoteService:
                 asset.symbol
                 for group in groups
                 for asset in group.assets
-                if (
-                    cached_quote := cached_by_symbol.get(asset.symbol.upper())
-                ) is not None
+                if (cached_quote := cached_by_symbol.get(asset.symbol.upper())) is not None
                 and _cached_quote_matches(asset, cached_quote)
             }
-            fresh_by_symbol = await self._fetch_fresh_quotes(
-                groups, matching_cached_symbols
-            )
+            fresh_by_symbol = await self._fetch_fresh_quotes(groups, matching_cached_symbols)
             await asyncio.to_thread(
                 db.save_quotes, self.database_path, list(fresh_by_symbol.values())
             )
@@ -129,38 +123,38 @@ class QuoteService:
             for quote in await self._safe_provider_quotes("stooq", missing_fallback_assets):
                 fresh_by_symbol[quote.symbol] = quote
 
-        await self._overlay_lighter_prices(groups, fresh_by_symbol)
+        await self._overlay_hyperliquid_prices(groups, fresh_by_symbol)
         return fresh_by_symbol
 
-    async def _overlay_lighter_prices(
+    async def _overlay_hyperliquid_prices(
         self,
         groups: list[GroupConfig],
         fresh_by_symbol: dict[str, Quote],
     ) -> None:
-        """Live 24/7 prices for equities/ETFs that Lighter also lists as perps.
+        """Live 24/7 prices for equities/ETFs that Hyperliquid also lists as perps.
 
-        Lighter's synthetic equity markets trade around the clock, so they
+        Hyperliquid's synthetic equity markets trade around the clock, so they
         drive price discovery while official-session data (previous close,
         share volume, daily bars) stays with the listing venue. The 1D
         baseline is the close of the last COMPLETED official session — the
         provider's explicit value when carried, else a freshness heuristic.
         """
-        lighter = self.providers.get("lighter")
-        if not isinstance(lighter, LighterProvider):
+        hyperliquid = self.providers.get("hyperliquid")
+        if not isinstance(hyperliquid, HyperliquidProvider):
             return
         candidates = {
             asset.symbol
             for group in groups
             for asset in group.assets
-            if asset.type in {"equity", "etf"} and asset.source != "lighter"
+            if asset.type in {"equity", "etf"} and asset.source != "hyperliquid"
         }
         if not candidates:
             return
         try:
-            live_prices = await lighter.live_prices(candidates)
+            live_prices = await hyperliquid.live_prices(candidates)
         except Exception:
             logger.warning(
-                "Lighter equity overlay failed for %d symbols",
+                "Hyperliquid equity overlay failed for %d symbols",
                 len(candidates),
                 exc_info=True,
             )
@@ -179,7 +173,7 @@ class QuoteService:
                 continue
             fresh_by_symbol[symbol] = replace(
                 quote,
-                provider="lighter",
+                provider="hyperliquid",
                 last=live,
                 previous_close=baseline,
                 change_abs=round(live - baseline, 6),
@@ -213,9 +207,7 @@ class QuoteService:
             )
             return []
 
-    def _stale_or_error(
-        self, asset: AssetConfig, cached_by_symbol: dict[str, Quote]
-    ) -> Quote:
+    def _stale_or_error(self, asset: AssetConfig, cached_by_symbol: dict[str, Quote]) -> Quote:
         cached = cached_by_symbol.get(asset.symbol.upper())
         if cached is not None and _cached_quote_matches(asset, cached):
             return db.mark_stale(cached)

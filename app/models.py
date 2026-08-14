@@ -6,7 +6,7 @@ from math import isfinite
 from typing import Literal
 
 AssetType = Literal["equity", "etf", "future", "crypto_perp", "crypto_spot", "index_proxy"]
-ProviderName = Literal["yahoo", "stooq", "lighter"]
+ProviderName = Literal["yahoo", "stooq", "hyperliquid"]
 
 
 @dataclass(frozen=True)

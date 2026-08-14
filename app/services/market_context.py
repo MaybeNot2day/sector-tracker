@@ -57,9 +57,7 @@ async def market_context_payload(
         {},
         "etf flows",
     )
-    key_dates = await _guarded(
-        _upcoming_key_dates(database_path, econ_service), [], "key dates"
-    )
+    key_dates = await _guarded(_upcoming_key_dates(database_path, econ_service), [], "key dates")
     fringe_book = await _guarded(_fringe_book(fringe_service), _EMPTY_BOOK.copy(), "fringe book")
     return {
         "as_of": datetime.now(UTC).isoformat(),

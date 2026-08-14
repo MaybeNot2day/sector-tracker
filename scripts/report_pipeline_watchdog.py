@@ -26,9 +26,7 @@ from vault_report_uploader import (
     validate_report_body,
 )
 
-ALERT_STATE_PATH = (
-    Path.home() / ".local/state/sector-tracker/report-pipeline-watchdog.json"
-)
+ALERT_STATE_PATH = Path.home() / ".local/state/sector-tracker/report-pipeline-watchdog.json"
 CONTRACT_EFFECTIVE_DATE = date(2026, 7, 22)
 REQUEST_TIMEOUT = 20
 # The cron fleet publishes on Europe/Berlin wall times (DST-stable for the
@@ -62,9 +60,7 @@ def _get_json(url: str) -> dict[str, Any]:
 
 def _save_json(payload: dict[str, Any], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "w", dir=path.parent, encoding="utf-8", delete=False
-    ) as tmp:
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, encoding="utf-8", delete=False) as tmp:
         json.dump(payload, tmp, indent=1, sort_keys=True)
     os.replace(tmp.name, path)
 
@@ -181,9 +177,7 @@ def audit_pipeline(now: datetime | None = None) -> list[str]:
             continue
         report_date = str(report.get("date") or "")
         if report_date < date_text:
-            issues.append(
-                f"{stage.title}: dashboard is stale ({report_date or 'missing date'})"
-            )
+            issues.append(f"{stage.title}: dashboard is stale ({report_date or 'missing date'})")
             continue
         # A newer report can legitimately replace an earlier slug. The uploader
         # hash above proves this day's file was accepted before replacement.
@@ -216,8 +210,7 @@ def audit_pipeline(now: datetime | None = None) -> list[str]:
             stale_mentions = [
                 str(idea.get("ticker") or "?")
                 for idea in open_ideas
-                if isinstance(idea, dict)
-                and str(idea.get("last_mentioned") or "") < date_text
+                if isinstance(idea, dict) and str(idea.get("last_mentioned") or "") < date_text
             ]
             if stale_mentions:
                 issues.append(

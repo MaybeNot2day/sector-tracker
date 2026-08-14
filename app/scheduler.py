@@ -9,7 +9,7 @@ from typing import Any, cast
 
 from fastapi import WebSocket
 
-from app.providers.lighter import LighterProvider
+from app.providers.hyperliquid import HyperliquidProvider
 from app.services.daily_board import crypto_breadth_metrics
 from app.services.econ_calendar import any_hot_release, key_dates_payload
 from app.services.macro import MACRO_TAPE_GROUP_NAME, macro_payload, with_macro_group
@@ -154,9 +154,7 @@ async def econ_calendar_loop(app_state: Any) -> None:
             # The first cycle only primes the baseline: WS clients get a
             # full snapshot on connect, so there is nothing new to push.
             if last_state is not None and _release_changed(last_state, state):
-                await app_state.connection_manager.broadcast(
-                    {"type": "key_dates", "data": payload}
-                )
+                await app_state.connection_manager.broadcast({"type": "key_dates", "data": payload})
             last_state = state
             if any_hot_release(items):
                 sleep_seconds = ECON_HOT_POLL_SECONDS
@@ -220,9 +218,7 @@ _payload_tasks: dict[int, tuple[Any, asyncio.Task[dict[str, object]]]] = {}
 _payload_generation = 0
 
 
-async def board_payload_async(
-    app_state: Any, groups: Any, grouped: Any
-) -> dict[str, object]:
+async def board_payload_async(app_state: Any, groups: Any, grouped: Any) -> dict[str, object]:
     global _payload_generation
     if _payload_cache is not None and _payload_cache[0] is grouped:
         return _payload_cache[1]
@@ -234,14 +230,10 @@ async def board_payload_async(
     else:
         _payload_generation += 1
         task = asyncio.create_task(
-            _build_and_cache_payload(
-                app_state, groups, grouped, _payload_generation
-            )
+            _build_and_cache_payload(app_state, groups, grouped, _payload_generation)
         )
         _payload_tasks[key] = (grouped, task)
-        task.add_done_callback(
-            lambda finished: _discard_payload_task(key, grouped, finished)
-        )
+        task.add_done_callback(lambda finished: _discard_payload_task(key, grouped, finished))
 
     return await asyncio.shield(task)
 
@@ -270,8 +262,8 @@ def _discard_payload_task(
 def _board_payload(app_state: Any, groups: Any, grouped: Any) -> dict[str, object]:
     overview, summaries = app_state.daily_board_service.build_board(groups, grouped)
     payload = grouped_quotes_payload(groups, grouped, summaries=summaries)
-    lighter = app_state.providers.get("lighter")
-    tape = lighter.crypto_tape_cached() if isinstance(lighter, LighterProvider) else []
+    hyperliquid = app_state.providers.get("hyperliquid")
+    tape = hyperliquid.crypto_tape_cached() if isinstance(hyperliquid, HyperliquidProvider) else []
     overview["crypto_breadth"] = crypto_breadth_metrics(tape)
     payload["overview"] = overview
     payload["macro"] = macro_payload(grouped.get(MACRO_TAPE_GROUP_NAME, []))

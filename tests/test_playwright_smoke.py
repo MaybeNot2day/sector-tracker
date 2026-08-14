@@ -525,7 +525,7 @@ def test_crypto_panels_swap_open_column_for_rolling_24h(page: Page, base_url: st
     expect(spy_row.locator('[data-cell="open"]')).to_have_text("+0.80%")
 
     # Crypto relabels the open column to the rolling 24h move and swaps the bindings:
-    # pct = summary.open_change_pct (UTC day), open = quote change_pct (Lighter 24h).
+    # pct = summary.open_change_pct (UTC day), open = quote change_pct (Hyperliquid 24h).
     page.locator('.category-tabs button[data-category="crypto"]').click()
     crypto_panel = page.locator('#board .group-panel[data-group="QA_CRYPTO"]')
     open_button = crypto_panel.locator('.group-title button[data-sort-key="open"]')
@@ -1764,7 +1764,7 @@ CRYPTO_ASSET = _asset(
     "QA_CRYPTO",
     "BTC",
     "crypto_perp",
-    "lighter",
+    "hyperliquid",
     "Bitcoin Perp",
     118_500.0,
     116_000.0,
@@ -1776,7 +1776,7 @@ CRYPTO_ASSET_ETH = _asset(
     "QA_CRYPTO",
     "ETH",
     "crypto_perp",
-    "lighter",
+    "hyperliquid",
     "Ether Perp",
     3_580.0,
     3_650.0,
@@ -1813,14 +1813,14 @@ WATCHLIST_PAYLOAD: dict[str, Any] = {
                 {
                     "symbol": "BTC",
                     "type": "crypto_perp",
-                    "source": "lighter",
+                    "source": "hyperliquid",
                     "exchange": None,
                     "name": "Bitcoin Perp",
                 },
                 {
                     "symbol": "ETH",
                     "type": "crypto_perp",
-                    "source": "lighter",
+                    "source": "hyperliquid",
                     "exchange": None,
                     "name": "Ether Perp",
                 },
