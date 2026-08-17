@@ -1372,9 +1372,15 @@ def test_watch_tab_builds_persistent_interactive_chart_wall(page: Page, base_url
     expect(page.locator("#watch-status")).to_contain_text("already on the grid")
     expect(tiles).to_have_count(2)
 
-    # Interval flips rebuild tiles and persist. Every timeframe must map to
-    # a range the history API accepts (15m once mapped to an invalid "5d"
-    # and blanked all tiles with 422s).
+    # Interval flips rebuild tiles and persist. 15m deliberately requests one
+    # trading day so fitContent opens at a useful intraday scale, not a week.
+    history_urls: list[str] = []
+    page.on(
+        "request",
+        lambda request: (
+            history_urls.append(request.url) if "/api/history/" in request.url else None
+        ),
+    )
     for timeframe in ("15m", "1d"):
         page.locator(f'#watch-intervals button[data-interval="{timeframe}"]').click()
         expect(
@@ -1383,6 +1389,12 @@ def test_watch_tab_builds_persistent_interactive_chart_wall(page: Page, base_url
         expect(page.locator(".watch-tile")).to_have_count(2)
         expect(page.locator('[data-watch-symbol="SPY"] .watch-chart canvas').first).to_be_visible()
         expect(page.locator(".watch-error")).to_have_count(0)
+        if timeframe == "15m":
+            assert any(
+                parse_qs(urlparse(url).query).get("interval") == ["15m"]
+                and parse_qs(urlparse(url).query).get("range") == ["1d"]
+                for url in history_urls
+            )
 
     # Symbols and timeframe survive a reload (localStorage), charts rebuild.
     page.goto(f"{base_url}/?wr=1#view=watch", wait_until="domcontentloaded")
