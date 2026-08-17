@@ -1,0 +1,10 @@
+[Unit]
+Description=Deliver the Fringe weekly review after Friday's brief
+
+[Timer]
+OnCalendar=Fri *-*-* 15:30:00 Europe/Berlin
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

@@ -231,16 +231,32 @@ spaced hyphen, and optional trailing `[conf: ...]` / `[stop: ...]` / `[target: .
 target/stop (`$12`, `78.50`, `75k`) is parsed out; `conf` accepts `60%`, `60`, or
 `0.6` and clamps to 5–95%. Malformed bullets are skipped, never fatal.
 
-The book runs a **$10,000 paper portfolio sized by half-Kelly**. At entry-stamp time
-the board computes `b = |target − entry| / |entry − stop|` and `f* = conf − (1 −
-conf)/b`, commits `f*/2` of the bankroll (floored at 2%, capped at 25% per position
-and 100% gross exposure; bankroll = $10k + cumulative realized dollars), and fixes
-the notional for the life of the position — HOLD never resizes. Missing or
-geometrically broken conf/stop inputs fall back to a 5% default. `/api/fringe`
-carries per-idea `size_notional`, `unrealized_usd`/`realized_usd`, and a
-`summary.portfolio` block (equity, return, exposure); every pre-capital idea —
-open positions and priced closes alike — was grandfathered at a flat $1,000, so
-historical realized results count in dollars too.
+The book runs a **$10,000 paper portfolio sized by half-Kelly, calibrated by
+its own track record**. At entry-stamp time the board computes `b = |target −
+entry| / |entry − stop|` and `f* = conf − (1 − conf)/b`, commits `f*/2` of the
+bankroll (floored at 2%, capped at 25% per position and 100% gross exposure;
+bankroll = $10k + cumulative realized dollars), and fixes the notional for the
+life of the position — HOLD never resizes. Three risk gates sit on top:
+
+- **Calibration cap**: while the realized win rate is below 35% (5+ closed
+  trades), declared confidence is ignored and each OPEN sizes at a fixed risk
+  budget — 0.75% of the bankroll at the declared stop distance (2% floor with
+  no usable stop).
+- **Circuit breakers**: 3 consecutive losses halve new sizes; 5 consecutive
+  losses, or a negative rolling expectancy over 8+ closed trades, size new
+  OPENs at $0.
+- **Gap-risk haircut**: stops wider than 5% scale the notional down linearly
+  (`5% / stop distance`) — gaps jump wide stops.
+
+Missing or geometrically broken conf/stop inputs fall back to a 5% default.
+`/api/fringe` carries per-idea `size_notional`, `unrealized_usd`/`realized_usd`,
+a `summary.portfolio` block (equity, return, exposure), and a `stats.risk_mode`
+block exposing every gate; every pre-capital idea — open positions and priced
+closes alike — was grandfathered at a flat $1,000, so historical realized
+results count in dollars too. Closed ideas also carry **MAE/MFE** (max
+adverse/favorable excursion from cached daily bars) and the stats block
+averages them plus the giveback — how much of the best mark evaporated by the
+close.
 
 Declared stops AND targets are **enforced intraday**: `scripts/fringe_stop_monitor.py`
 runs on the Hermes box every 5 minutes around the clock, and when a position's mark
@@ -252,6 +268,21 @@ the agent to review in its next brief; a move with legs beyond a harvested targe
 re-opened next brief as a fresh, re-sized bet. Positions without a declared stop
 cannot be stop-enforced; those trigger one alert per day when the mark sits 10%+
 against entry. New ideas still open only through the daily brief.
+
+The same monitor runs a **trailing-stop ratchet**: once a position moves +1R in
+the idea's favor, the working stop lifts to breakeven; beyond that it trails 1R
+behind the mark and only ever tightens (state lives in the monitor's JSON file,
+the declared stop on the board stays the original). A trailed close lands as
+`auto-trail: ...` with the declared stop noted for context.
+
+Two housekeeping jobs feed the loop back into the agent. Before each weekday
+brief (13:45 Berlin) `scripts/fringe_stats_notepad.py` stamps the rolling track
+record — win rate, expectancy, streak, direction/asset buckets, open
+giveback-to-stops, and the active risk mode — into the Fringe cron job's
+durable notepad (`fringe_stats`), which the brief prompt reads first. On
+Fridays (15:30 Berlin) `scripts/fringe_weekly_review.py` writes a five-bullet
+self-review into the vault and posts it to the board as the `Fringe Weekly
+Review` report. Both support `--dry-run`.
 
 New ideas pass a **mandatory due-diligence stage** before they may open (briefs dated
 2026-07-31 onward). The cron agent researches each candidate independently of the

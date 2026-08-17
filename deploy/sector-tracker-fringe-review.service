@@ -1,0 +1,8 @@
+[Unit]
+Description=Write and post the Fringe weekly self-review
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/ds/.local/bin/fringe_weekly_review.py

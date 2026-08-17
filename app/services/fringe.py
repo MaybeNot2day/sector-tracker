@@ -64,6 +64,18 @@ MAX_POSITION_FRACTION = 0.25
 MIN_POSITION_FRACTION = 0.02  # floor for ideas Kelly grades at <= 0
 DEFAULT_POSITION_FRACTION = 0.05  # OPEN without usable conf/stop inputs
 
+# --- Calibration and circuit breakers --------------------------------------
+# Sizing reads the book's own track record. While the realized win rate is
+# unproven, positions size off a fixed risk budget instead of the agent's
+# optimistic confidence; loss streaks throttle new risk, then halt it.
+CALIBRATION_MIN_CLOSED = 5
+CALIBRATION_WIN_RATE = 0.35
+CALIBRATION_RISK_FRACTION = 0.0075  # max equity risked per OPEN while uncalibrated
+BREAKER_HALF_STREAK = 3
+BREAKER_HALT_STREAK = 5
+EXPECTANCY_VETO_MIN_CLOSED = 8
+GAP_RISK_STOP_PCT = 5.0  # wider stops gap through: linear notional haircut
+
 _HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
 _SECTION_TITLE = re.compile(r"fringe", re.IGNORECASE)
 _BULLET = re.compile(r"^\s{0,3}(?:[-*+]|\d{1,3}\.)\s+(.*\S)\s*$")
@@ -248,7 +260,35 @@ class FringeService:
         if need_entry or need_exit:
             await self._stamp_missing(need_entry, need_exit)
         await self._size_new_positions(open_rows, closed_rows)
+        need_excursion = [
+            row
+            for row in closed_rows
+            if row.get("mae_pct") is None
+            and isinstance(row["entry_price"], int | float)
+            and isinstance(row["exit_price"], int | float)
+            and row["closed_date"] is not None
+        ]
+        if need_excursion:
+            await self._stamp_excursions(need_excursion)
         return open_rows, closed_rows
+
+    async def _stamp_excursions(self, rows: list[dict[str, object]]) -> None:
+        """Fill MAE/MFE for closed ideas from cached daily bars (best-effort)."""
+        computed: list[tuple[int, float | None, float | None]] = []
+        for row in rows:
+            mae, mfe = await asyncio.to_thread(
+                db.fringe_excursions,
+                self.database_path,
+                symbol=str(row["ticker"]),
+                direction=str(row["direction"]),
+                entry_price=float(str(row["entry_price"])),
+                opened_date=str(row["opened_date"]),
+                closed_date=str(row["closed_date"]),
+            )
+            row["mae_pct"] = mae
+            row["mfe_pct"] = mfe
+            computed.append((int(str(row["id"])), mae, mfe))
+        await asyncio.to_thread(db.set_fringe_excursions, self.database_path, computed)
 
     async def _stamp_missing(
         self,
@@ -288,6 +328,7 @@ class FringeService:
             return
         realized = sum(usd for row in closed_rows if (usd := _realized_usd(row)) is not None)
         bankroll = STARTING_CAPITAL + realized
+        mode = _risk_mode(_realized_entries(closed_rows))
         committed = sum(
             float(str(row["size_notional"]))
             for row in open_rows
@@ -295,9 +336,8 @@ class FringeService:
         )
         sizes: list[tuple[int, float]] = []
         for row in unsized:
-            fraction = _position_fraction(row)
             available = max(bankroll - committed, 0.0)
-            notional = round(min(fraction * bankroll, available), 2)
+            notional = round(min(_position_notional(row, bankroll, mode), available), 2)
             row["size_notional"] = notional
             committed += notional
             sizes.append((int(str(row["id"])), notional))
@@ -455,8 +495,14 @@ def _closed_item(row: dict[str, object]) -> dict[str, object]:
         "realized_pct": realized_pct,
         "size_notional": _round_usd(row["size_notional"]),
         "realized_usd": _position_usd(row["size_notional"], realized_pct),
+        "mae_pct": _round_pct(row.get("mae_pct")),
+        "mfe_pct": _round_pct(row.get("mfe_pct")),
         "close_reason": row["close_reason"],
     }
+
+
+def _round_pct(value: object) -> float | None:
+    return round(float(value), 2) if isinstance(value, int | float) else None
 
 
 def _performance_summary(
@@ -512,6 +558,89 @@ def _portfolio_summary(
         "invested_notional": round(invested, 2),
         "exposure_pct": round(invested / equity * 100.0, 1) if equity > 0 else None,
     }
+
+
+def _realized_entries(closed_rows: list[dict[str, object]]) -> list[tuple[str, int, float]]:
+    """(closed_date, id, realized_usd) for every sized closed db row."""
+    entries: list[tuple[str, int, float]] = []
+    for row in closed_rows:
+        usd = _realized_usd(row)
+        if usd is not None:
+            entries.append((str(row.get("closed_date") or ""), int(str(row["id"])), usd))
+    return entries
+
+
+def _risk_mode(entries: list[tuple[str, int, float]]) -> dict[str, object]:
+    """Track-record gates: calibration cap and loss-streak circuit breakers.
+
+    Entries are (closed_date, id, realized_usd); ordering inside is derived,
+    so callers pass them in any order. A zero-dollar close breaks a streak.
+    """
+    ordered = sorted(entries, key=lambda item: (item[0], item[1]), reverse=True)
+    total = len(ordered)
+    wins = sum(1 for _, _, usd in ordered if usd > 0)
+    expectancy = sum(usd for _, _, usd in ordered) / total if total else 0.0
+    streak = 0
+    for _, _, usd in ordered:
+        if usd >= 0:
+            break
+        streak += 1
+    win_rate = wins / total if total else None
+    return {
+        "closed_count": total,
+        "win_rate_pct": round(win_rate * 100.0, 1) if win_rate is not None else None,
+        "expectancy_usd": round(expectancy, 2) if total else None,
+        "loss_streak": streak,
+        "calibration_cap": bool(
+            total >= CALIBRATION_MIN_CLOSED
+            and win_rate is not None
+            and win_rate < CALIBRATION_WIN_RATE
+        ),
+        "half_size": streak >= BREAKER_HALF_STREAK,
+        "no_new_opens": bool(
+            streak >= BREAKER_HALT_STREAK
+            or (total >= EXPECTANCY_VETO_MIN_CLOSED and expectancy < 0)
+        ),
+    }
+
+
+def _stop_distance_pct(row: dict[str, object]) -> float | None:
+    """Valid entry->stop distance in percent; None for broken geometry."""
+    entry = row["entry_price"]
+    stop = _directional_level(
+        str(row["direction"]), entry, _target_price(row["stop"]), favorable=False
+    )
+    if not isinstance(entry, int | float) or entry <= 0 or stop is None:
+        return None
+    return abs(float(entry) - stop) / float(entry) * 100.0
+
+
+def _position_notional(row: dict[str, object], bankroll: float, mode: dict[str, object]) -> float:
+    """Notional for one new position under the current risk mode.
+
+    - Breaker halt: no new risk at all (the idea is tracked at $0).
+    - Calibration cap: fixed risk budget per trade (0.75% of bankroll at the
+      declared stop), because the realized win rate does not yet justify
+      trusting the agent's confidence.
+    - Normal: half-Kelly, with a linear haircut for stops wider than 5%
+      (gaps jump wide stops).
+    - A loss streak at the half-size threshold halves either path.
+    """
+    if mode["no_new_opens"]:
+        return 0.0
+    stop_pct = _stop_distance_pct(row)
+    if mode["calibration_cap"]:
+        if stop_pct is not None and stop_pct > 0 and bankroll > 0:
+            fraction = min(CALIBRATION_RISK_FRACTION / (stop_pct / 100.0), MAX_POSITION_FRACTION)
+        else:
+            fraction = MIN_POSITION_FRACTION
+    else:
+        fraction = _position_fraction(row)
+        if stop_pct is not None and stop_pct > GAP_RISK_STOP_PCT:
+            fraction *= GAP_RISK_STOP_PCT / stop_pct
+    if mode["half_size"]:
+        fraction *= 0.5
+    return fraction * bankroll
 
 
 def _position_fraction(row: dict[str, object]) -> float:
@@ -683,6 +812,16 @@ def _trade_stats(
     ]
     best = max(sized, key=lambda item: dollars[int(str(item["id"]))], default=None)
     worst = min(sized, key=lambda item: dollars[int(str(item["id"]))], default=None)
+    entries = [
+        (str(item.get("closed") or ""), int(str(item["id"])), dollars[int(str(item["id"]))])
+        for item in sized
+    ]
+    excursioned = [
+        item
+        for item in sized
+        if isinstance(item.get("mae_pct"), int | float)
+        and isinstance(item.get("mfe_pct"), int | float)
+    ]
     peak = 0.0
     max_drawdown = 0.0
     for point in curve:
@@ -701,6 +840,28 @@ def _trade_stats(
         "avg_hold_days": round(sum(hold_days) / len(hold_days), 1) if hold_days else None,
         "max_drawdown_pct": round(max_drawdown * 100.0, 2),
         "sharpe_ratio": _sharpe_ratio(curve),
+        "risk_mode": _risk_mode(entries),
+        "avg_mae_pct": round(
+            sum(float(str(item["mae_pct"])) for item in excursioned) / len(excursioned), 2
+        )
+        if excursioned
+        else None,
+        "avg_mfe_pct": round(
+            sum(float(str(item["mfe_pct"])) for item in excursioned) / len(excursioned), 2
+        )
+        if excursioned
+        else None,
+        # Giveback: how much of the best mark evaporated by the close.
+        "avg_giveback_pct": round(
+            sum(
+                float(str(item["mfe_pct"])) - float(str(item["realized_pct"]))
+                for item in excursioned
+            )
+            / len(excursioned),
+            2,
+        )
+        if excursioned
+        else None,
     }
 
 

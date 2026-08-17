@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh Fringe notepad risk stats before the daily 14:00 brief
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 13:45:00 Europe/Berlin
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

@@ -29,6 +29,8 @@ from app.services.fringe import (
     _confidence_pct,
     _kelly_fraction,
     _pnl_pct,
+    _position_notional,
+    _risk_mode,
     parse_fringe_actions,
 )
 
@@ -919,16 +921,17 @@ def test_open_with_kelly_inputs_sizes_half_kelly_notional(
 
     payload = client.get("/api/fringe").json()
     by_ticker = {item["ticker"]: item for item in payload["open"]}
-    # AMD: f* = 0.35, half-Kelly 0.175 of $10k -> $1,750.
-    assert by_ticker["AMD"]["size_notional"] == 1750.0
+    # AMD: f* = 0.35, half-Kelly 0.175; the 10% stop tripwires the gap-risk
+    # haircut (x5/10) -> 0.0875 of $10k -> $875.
+    assert by_ticker["AMD"]["size_notional"] == 875.0
     assert by_ticker["AMD"]["confidence"] == 60.0
     assert by_ticker["AMD"]["stop_price"] == 450.0
-    # XBI short: f* = 0.25, half-Kelly 0.125 -> $1,250.
-    assert by_ticker["XBI"]["size_notional"] == 1250.0
+    # XBI short: f* = 0.25, half-Kelly 0.125; 5.26% stop -> x5/5.26 haircut.
+    assert by_ticker["XBI"]["size_notional"] == 1187.5
     portfolio = payload["summary"]["portfolio"]
-    assert portfolio["invested_notional"] == 3000.0
+    assert portfolio["invested_notional"] == 2062.5
     assert portfolio["equity"] == 10000.0
-    assert portfolio["exposure_pct"] == 30.0
+    assert portfolio["exposure_pct"] == 20.6
 
 
 def test_kelly_sizing_clamps_floor_cap_and_gross_exposure(
@@ -1035,6 +1038,205 @@ def test_sharpe_ratio_annualizes_curve_returns() -> None:
     assert _trade_stats([], flat)["sharpe_ratio"] is None
 
 
+# --- risk modes: calibration cap, breakers, gap-risk, excursions ------------
+
+
+def _entries(*usds: float) -> list[tuple[str, int, float]]:
+    return [(f"2026-07-{10 + index:02d}", index + 1, usd) for index, usd in enumerate(usds)]
+
+
+def test_risk_mode_flags_calibration_breakers_and_veto() -> None:
+    # 1 win + 4 losses, newest is the win: uncalibrated, no breaker.
+    mode = _risk_mode(_entries(-10.0, -10.0, -10.0, -10.0, 5.0))
+    assert mode["closed_count"] == 5
+    assert mode["win_rate_pct"] == 20.0
+    assert mode["calibration_cap"] is True
+    assert mode["loss_streak"] == 0
+    assert mode["half_size"] is False
+    assert mode["no_new_opens"] is False  # below the 8-trade expectancy veto
+
+    # Three fresh losses after a win: half-size only.
+    mode = _risk_mode(_entries(50.0, -10.0, -10.0, -10.0))
+    assert mode["loss_streak"] == 3
+    assert mode["half_size"] is True
+    assert mode["no_new_opens"] is False
+
+    # Five straight losses: full halt regardless of sample size.
+    mode = _risk_mode(_entries(-10.0, -10.0, -10.0, -10.0, -10.0))
+    assert mode["loss_streak"] == 5
+    assert mode["no_new_opens"] is True
+
+    # Expectancy veto: 8 closed, streak broken by a win, still net-negative.
+    mode = _risk_mode(_entries(-100.0, -100.0, -100.0, -100.0, -100.0, 10.0, 10.0, 10.0))
+    assert mode["loss_streak"] == 0
+    assert mode["calibration_cap"] is False  # 37.5% win rate
+    assert mode["no_new_opens"] is True
+
+    # Empty book: every gate open, no fake readings.
+    mode = _risk_mode([])
+    assert mode["win_rate_pct"] is None
+    assert mode["calibration_cap"] is False
+    assert mode["no_new_opens"] is False
+
+
+def test_position_notional_normal_calibration_breaker_and_gap_risk() -> None:
+    normal = _risk_mode([])
+    row = {
+        "entry_price": 100.0,
+        "direction": "long",
+        "stop": "$95",
+        "target": "$115",
+        "confidence": 90.0,
+    }
+    # Kelly f* = 0.9 - 0.1/3 = 0.8667, half = 0.4333 -> 25% cap.
+    assert _position_notional(row, 10_000.0, normal) == 2500.0
+
+    # Calibration cap: fixed 0.75% risk budget over a 5% stop -> 15% notional,
+    # ignoring the 90% confidence entirely.
+    calibration = _risk_mode(_entries(-10.0, -10.0, -10.0, -10.0, 5.0))
+    assert calibration["calibration_cap"] is True
+    assert _position_notional(row, 10_000.0, calibration) == 1500.0
+    # No usable stop in calibration mode: conservative 2% floor, not the 5% default.
+    blind = {**row, "stop": None, "confidence": None, "target": None}
+    assert _position_notional(blind, 10_000.0, calibration) == 200.0
+
+    # Half-size breaker halves the normal Kelly path.
+    half = _risk_mode(_entries(50.0, -10.0, -10.0, -10.0))
+    assert _position_notional(row, 10_000.0, half) == 1250.0
+
+    # Halt: no new risk at all.
+    halt = _risk_mode(_entries(-10.0, -10.0, -10.0, -10.0, -10.0))
+    assert _position_notional(row, 10_000.0, halt) == 0.0
+
+    # Gap-risk haircut: an 8% stop scales normal Kelly by 5/8.
+    wide = {**row, "stop": "$92", "target": "$120", "confidence": 60.0}
+    # f* = 0.6 - 0.4/2.5 = 0.44, half = 0.22, x5/8 = 0.1375.
+    assert _position_notional(wide, 10_000.0, normal) == pytest.approx(1375.0)
+
+
+def test_fringe_excursions_from_daily_bars(tmp_path: Path) -> None:
+    path = tmp_path / "board.sqlite3"
+
+    def bar(day: int, high: float, low: float) -> Bar:
+        return Bar(
+            symbol="NVDA",
+            provider="yahoo",
+            interval="1d",
+            timestamp=datetime(2026, 7, day, 13, 30, tzinfo=UTC),
+            open=160.0,
+            high=high,
+            low=low,
+            close=161.0,
+        )
+
+    db.save_bars(path, [bar(10, 165.0, 150.0), bar(13, 180.0, 159.0), bar(20, 200.0, 100.0)])
+
+    # Long window 07-10 -> 07-16: worst low 150, best high 180; the 07-20 bar
+    # sits outside the window and must not leak in.
+    mae, mfe = db.fringe_excursions(
+        path,
+        symbol="NVDA",
+        direction="long",
+        entry_price=160.2,
+        opened_date="2026-07-10",
+        closed_date="2026-07-16",
+    )
+    assert mae == pytest.approx(-6.37, abs=0.01)
+    assert mfe == pytest.approx(12.36, abs=0.01)
+
+    # Short mirror: the high is the adverse excursion.
+    mae, mfe = db.fringe_excursions(
+        path,
+        symbol="NVDA",
+        direction="short",
+        entry_price=160.2,
+        opened_date="2026-07-10",
+        closed_date="2026-07-16",
+    )
+    assert mae == pytest.approx(-12.36, abs=0.01)
+    assert mfe == pytest.approx(6.37, abs=0.01)
+
+    # No cached bars: honest nulls, never a gate.
+    assert db.fringe_excursions(
+        path,
+        symbol="UNKNOWN",
+        direction="long",
+        entry_price=10.0,
+        opened_date="2026-07-10",
+        closed_date="2026-07-16",
+    ) == (None, None)
+
+
+def test_closed_payload_carries_excursions_and_stats(
+    configure_app: Callable[..., Path],
+) -> None:
+    yahoo = ScriptedYahoo({"NVDA": 160.2})
+    path = configure_app({"yahoo": yahoo})
+    client = TestClient(app)
+    db.save_bars(
+        path,
+        [
+            Bar(
+                symbol="NVDA",
+                provider="yahoo",
+                interval="1d",
+                timestamp=datetime(2026, 7, 10, 13, 30, tzinfo=UTC),
+                open=160.0,
+                high=170.0,
+                low=150.0,
+                close=163.0,
+            ),
+            Bar(
+                symbol="NVDA",
+                provider="yahoo",
+                interval="1d",
+                timestamp=datetime(2026, 7, 15, 13, 30, tzinfo=UTC),
+                open=170.0,
+                high=180.0,
+                low=165.0,
+                close=172.0,
+            ),
+        ],
+    )
+
+    client.post(
+        "/api/reports",
+        json={
+            "title": "Hermes Fringe Corner",
+            "date": "2026-07-10",
+            "body": "## Fringe Corner\n- OPEN LONG NVDA — into earnings\n",
+        },
+    )
+    yahoo.prices["NVDA"] = 173.1
+    app.state.fringe_service.QUOTE_TTL_SECONDS = 0.0
+    client.post(
+        "/api/reports",
+        json={
+            "title": "Hermes Fringe Corner",
+            "date": "2026-07-16",
+            "body": "## Fringe Corner\n- CLOSE LONG NVDA — earnings played out\n",
+        },
+    )
+
+    payload = client.get("/api/fringe").json()
+    (item,) = payload["closed"]
+    assert item["mae_pct"] == pytest.approx(-6.37, abs=0.01)
+    assert item["mfe_pct"] == pytest.approx(12.36, abs=0.01)
+    stats = payload["stats"]
+    assert stats["avg_mae_pct"] == pytest.approx(-6.37, abs=0.01)
+    assert stats["avg_mfe_pct"] == pytest.approx(12.36, abs=0.01)
+    # Gained 8.05 of a 12.36 best mark: 4.31 points given back.
+    assert stats["avg_giveback_pct"] == pytest.approx(4.31, abs=0.01)
+    risk_mode = stats["risk_mode"]
+    assert risk_mode["closed_count"] == 1
+    assert risk_mode["calibration_cap"] is False
+
+    # Persisted: a second payload build serves the stored stamps.
+    assert db.load_fringe_ideas(path, status="closed")[0]["mae_pct"] == pytest.approx(
+        -6.37, abs=0.01
+    )
+
+
 # --- intraday auto-stop -------------------------------------------------------
 
 
@@ -1068,12 +1270,13 @@ def test_close_at_market_endpoint_closes_at_fresh_mark(
     closed = response.json()["closed"]
     assert closed["exit_price"] == 441.2
     assert closed["realized_pct"] == -11.76
-    assert closed["realized_usd"] == -205.8  # on the $1,750 half-Kelly size
+    # On the $875 size: half-Kelly 0.175 with the 10%-stop gap-risk haircut.
+    assert closed["realized_usd"] == -102.9
     assert closed["close_reason"] == "auto-stop: test breach"
 
     payload = client.get("/api/fringe").json()
     assert payload["open"] == []
-    assert payload["summary"]["portfolio"]["realized_usd"] == -205.8
+    assert payload["summary"]["portfolio"]["realized_usd"] == -102.9
 
     # Closing again: the idea is no longer open.
     again = client.post(f"/api/fringe/{idea['id']}/close", json={})

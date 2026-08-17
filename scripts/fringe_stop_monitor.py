@@ -11,6 +11,12 @@ announces the close through the Hermes gateway. Stops cut losers; targets
 harvest winners; re-opening past a target is a fresh, re-sized bet in the
 next brief.
 
+Stops are not static: a trailing ratchet tightens the working stop as the
+mark moves in the position's favor. At +1R the stop lifts to breakeven;
+beyond that it trails 1R behind the mark (+2R locks +1R of profit, and so
+on). The ratchet only ever tightens, and a trailed stop that breaches on
+two consecutive ticks closes the position as auto-trail.
+
 Positions without a declared stop cannot be stop-enforced; those get one
 alert per day when the mark sits 10% or more against entry.
 
@@ -103,6 +109,28 @@ def target_reached(direction: str, last: float, target_price: float) -> bool:
     return last >= target_price if direction != "short" else last <= target_price
 
 
+def trail_stop(
+    direction: str,
+    entry: float,
+    declared_stop: float,
+    last: float,
+    previous: float | None,
+) -> float:
+    """Working stop after the R-multiple ratchet; only ever tightens."""
+    is_long = direction != "short"
+    risk = entry - declared_stop if is_long else declared_stop - entry
+    base = previous if previous is not None else declared_stop
+    if risk <= 0:  # degenerate geometry: no R math, keep the tighter stop
+        return max(declared_stop, base) if is_long else min(declared_stop, base)
+    favorable_r = (last - entry if is_long else entry - last) / risk
+    if favorable_r < 1.0:  # not yet at breakeven: trail stays put
+        return base
+    candidate = (
+        entry + (favorable_r - 1.0) * risk if is_long else entry - (favorable_r - 1.0) * risk
+    )
+    return max(candidate, base, declared_stop) if is_long else min(candidate, base, declared_stop)
+
+
 def signed_usd(value: float) -> str:
     return f"{'-' if value < 0 else '+'}${abs(value):,.2f}"
 
@@ -126,8 +154,10 @@ def run() -> int:
     state = load_state()
     counts = state.get("breach", {}) if isinstance(state.get("breach"), dict) else {}
     alerted = state.get("alerted", {}) if isinstance(state.get("alerted"), dict) else {}
+    trailed = state.get("trail", {}) if isinstance(state.get("trail"), dict) else {}
     today = datetime.now(UTC).date().isoformat()
     next_counts: dict[str, int] = {}
+    next_trail: dict[str, float] = {}
     closed = 0
 
     for idea in open_ideas:
@@ -140,13 +170,31 @@ def run() -> int:
         last = idea.get("last")
         stop = idea.get("stop_price")
         target_price = idea.get("target_price")
+        entry = idea.get("entry_price")
         pct = idea.get("unrealized_pct")
         if not isinstance(last, int | float):
             continue
 
+        declared = float(stop) if isinstance(stop, int | float) else None
+        trail_level: float | None = None
+        if declared is not None and isinstance(entry, int | float):
+            stored = trailed.get(key)
+            level = trail_stop(
+                direction,
+                float(entry),
+                declared,
+                float(last),
+                float(stored) if isinstance(stored, int | float) else None,
+            )
+            tightened = level > declared if direction != "short" else level < declared
+            if tightened:  # only a ratcheted trail is worth persisting
+                trail_level = level
+                next_trail[key] = level
+
+        working_stop = trail_level if trail_level is not None else declared
         barriers: list[tuple[str, float]] = []
-        if isinstance(stop, int | float) and stop_breached(direction, float(last), float(stop)):
-            barriers.append(("stop", float(stop)))
+        if working_stop is not None and stop_breached(direction, float(last), working_stop):
+            barriers.append(("trail" if trail_level is not None else "stop", working_stop))
         if isinstance(target_price, int | float) and target_reached(
             direction, float(last), float(target_price)
         ):
@@ -160,11 +208,18 @@ def run() -> int:
                 next_counts[skey] = streak
                 log(f"{skey}: {level} touched at {last} (tick {streak}/{BREACH_TICKS})")
                 continue
-            verb = "breached" if kind == "stop" else "reached"
-            reason = (
-                f"auto-{kind}: {direction} {kind} ${level:g} {verb} at ${float(last):g} "
-                f"on two consecutive 5m marks"
-            )
+            if kind == "trail":
+                reason = (
+                    f"auto-trail: {direction} trailed stop ${level:g} breached at "
+                    f"${float(last):g} on two consecutive 5m marks "
+                    f"(declared stop ${declared if declared is not None else level:g})"
+                )
+            else:
+                verb = "breached" if kind == "stop" else "reached"
+                reason = (
+                    f"auto-{kind}: {direction} {kind} ${level:g} {verb} at ${float(last):g} "
+                    f"on two consecutive 5m marks"
+                )
             try:
                 result = close_position(base_url, token, int(str(idea_id)), reason)
             except (
@@ -193,7 +248,10 @@ def run() -> int:
             )
             log(f"{skey}: closed ({summary})")
             headline = (
-                f"Auto-stop: {direction.upper()} {ticker} closed — declared stop "
+                f"Trail stop: {direction.upper()} {ticker} closed — trailed stop "
+                f"${level:g} breached (mark ${float(last):g})"
+                if kind == "trail"
+                else f"Auto-stop: {direction.upper()} {ticker} closed — declared stop "
                 f"${level:g} breached (mark ${float(last):g})"
                 if kind == "stop"
                 else f"Target hit: {direction.upper()} {ticker} harvested — declared "
@@ -201,7 +259,7 @@ def run() -> int:
             )
             follow = (
                 "The agent will review it in the next Fringe brief."
-                if kind == "stop"
+                if kind in ("stop", "trail")
                 else "If the move has legs, the agent can re-open a fresh, re-sized bet "
                 "in the next brief."
             )
@@ -225,7 +283,7 @@ def run() -> int:
             ):
                 alerted[key] = today
 
-    save_state({"breach": next_counts, "alerted": alerted})
+    save_state({"breach": next_counts, "alerted": alerted, "trail": next_trail})
     log(f"tick done: {len(open_ideas)} open, {closed} auto-closed")
     return 0
 

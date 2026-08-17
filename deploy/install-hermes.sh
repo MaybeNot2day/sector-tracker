@@ -3,7 +3,7 @@
 #
 # The repo is the source of truth for the scripts and systemd user units
 # that run on the Hermes box (uploader, delivery watchdog, auto-stop
-# monitor, nightly board backup). This syncs them, reloads systemd,
+# monitor, nightly board backup, Fringe risk stats + weekly review). This syncs them, reloads systemd,
 # enables every trigger, and verifies checksums so "the box matches git"
 # is a command, not a hope.
 #
@@ -18,6 +18,8 @@ SCRIPTS=(
   report_pipeline_watchdog.py
   fringe_stop_monitor.py
   board_backup.py
+  fringe_stats_notepad.py
+  fringe_weekly_review.py
 )
 UNITS=(
   sector-tracker-uploader.service
@@ -29,6 +31,10 @@ UNITS=(
   sector-tracker-stops.timer
   sector-tracker-backup.service
   sector-tracker-backup.timer
+  sector-tracker-fringe-stats.service
+  sector-tracker-fringe-stats.timer
+  sector-tracker-fringe-review.service
+  sector-tracker-fringe-review.timer
 )
 TRIGGERS=(
   sector-tracker-uploader.path
@@ -36,6 +42,8 @@ TRIGGERS=(
   sector-tracker-report-watchdog.timer
   sector-tracker-stops.timer
   sector-tracker-backup.timer
+  sector-tracker-fringe-stats.timer
+  sector-tracker-fringe-review.timer
 )
 
 echo "==> Syncing ${#SCRIPTS[@]} scripts and ${#UNITS[@]} units to $HOST"

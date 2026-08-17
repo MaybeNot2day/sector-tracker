@@ -5,7 +5,7 @@ import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from threading import Lock
 from typing import SupportsFloat, SupportsIndex, cast
@@ -188,6 +188,8 @@ def init_db(path: Path) -> None:
             _ensure_column(conn, "fringe_ideas", "target", "TEXT")
             _ensure_column(conn, "fringe_ideas", "confidence", "REAL")
             _ensure_column(conn, "fringe_ideas", "stop", "TEXT")
+            _ensure_column(conn, "fringe_ideas", "mae_pct", "REAL")
+            _ensure_column(conn, "fringe_ideas", "mfe_pct", "REAL")
             sized_added = _ensure_column(conn, "fringe_ideas", "size_notional", "REAL")
             if sized_added:
                 # Pre-capital open ideas are grandfathered at a flat $1,000
@@ -1016,8 +1018,8 @@ def load_fringe_ideas(
             f"""
             SELECT id, ticker, direction, thesis, horizon, target, confidence,
                    stop, size_notional, status, opened_date, closed_date,
-                   close_reason, entry_price, exit_price, last_mentioned,
-                   source_slug
+                   close_reason, entry_price, exit_price, mae_pct, mfe_pct,
+                   last_mentioned, source_slug
             FROM fringe_ideas
             WHERE status = ?
             ORDER BY {order}
@@ -1042,6 +1044,8 @@ def load_fringe_ideas(
             "close_reason": str(row["close_reason"]) if row["close_reason"] is not None else None,
             "entry_price": _optional_float(row["entry_price"]),
             "exit_price": _optional_float(row["exit_price"]),
+            "mae_pct": _optional_float(row["mae_pct"]),
+            "mfe_pct": _optional_float(row["mfe_pct"]),
             "last_mentioned": str(row["last_mentioned"]),
             "source_slug": str(row["source_slug"]),
         }
@@ -1196,6 +1200,59 @@ def stamp_fringe_prices(
             "UPDATE fringe_ideas SET exit_price = ?, updated_at = ?"
             " WHERE id = ? AND exit_price IS NULL",
             [(price, now, idea_id) for idea_id, price in exits],
+        )
+
+
+def fringe_excursions(
+    path: Path,
+    *,
+    symbol: str,
+    direction: str,
+    entry_price: float,
+    opened_date: str,
+    closed_date: str,
+) -> tuple[float | None, float | None]:
+    """Max adverse/favorable excursion (%) over the holding window.
+
+    Computed from cached daily bars: MAE is the worst mark against the
+    position, MFE the best mark in its favor, both signed in the trade's
+    direction. (None, None) when the symbol has no cached daily bars —
+    excursions are analytical, never a gate.
+    """
+    init_db(path)
+    try:
+        end = date.fromisoformat(closed_date) + timedelta(days=1)
+    except ValueError:
+        return None, None
+    with _connect(path) as conn:
+        row = conn.execute(
+            "SELECT MIN(low), MAX(high) FROM bars"
+            " WHERE symbol = ? AND interval = '1d' AND timestamp >= ? AND timestamp < ?",
+            (symbol, opened_date, end.isoformat()),
+        ).fetchone()
+    if row is None or row[0] is None or row[1] is None or entry_price <= 0:
+        return None, None
+    low, high = float(row[0]), float(row[1])
+    if direction == "short":
+        mae = -(high / entry_price - 1.0) * 100.0
+        mfe = -(low / entry_price - 1.0) * 100.0
+    else:
+        mae = (low / entry_price - 1.0) * 100.0
+        mfe = (high / entry_price - 1.0) * 100.0
+    return round(mae, 2), round(mfe, 2)
+
+
+def set_fringe_excursions(
+    path: Path, rows: Sequence[tuple[int, float | None, float | None]]
+) -> None:
+    """Persist computed MAE/MFE per closed idea; written once per row."""
+    if not rows:
+        return
+    init_db(path)
+    with _connect(path) as conn:
+        conn.executemany(
+            "UPDATE fringe_ideas SET mae_pct = ?, mfe_pct = ? WHERE id = ? AND mae_pct IS NULL",
+            [(mae, mfe, idea_id) for idea_id, mae, mfe in rows],
         )
 
 

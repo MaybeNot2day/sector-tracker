@@ -1,0 +1,8 @@
+[Unit]
+Description=Refresh Fringe risk-mode stats in the cron job notepad
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/ds/.local/bin/fringe_stats_notepad.py
