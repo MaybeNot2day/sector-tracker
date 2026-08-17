@@ -86,10 +86,16 @@ def review_bullets(payload: dict[str, Any], today: date) -> list[str]:
     if week:
         best = max(week, key=lambda item: _num(item.get("realized_usd")) or 0.0)
         worst = min(week, key=lambda item: _num(item.get("realized_usd")) or 0.0)
-        bullets.append(
-            f"Best {best.get('ticker')} {signed_usd(_num(best.get('realized_usd')) or 0.0)}; "
-            f"worst {worst.get('ticker')} {signed_usd(_num(worst.get('realized_usd')) or 0.0)}."
-        )
+        if best is worst:
+            bullets.append(
+                f"Only closed trade: {best.get('ticker')} "
+                f"{signed_usd(_num(best.get('realized_usd')) or 0.0)}."
+            )
+        else:
+            bullets.append(
+                f"Best {best.get('ticker')} {signed_usd(_num(best.get('realized_usd')) or 0.0)}; "
+                f"worst {worst.get('ticker')} {signed_usd(_num(worst.get('realized_usd')) or 0.0)}."
+            )
     else:
         bullets.append("No closed trades this week; best/worst not applicable.")
     bullets.append(f"Risk mode {mode}, breaker {breaker}; losing streak {stats['losing_streak']}.")
