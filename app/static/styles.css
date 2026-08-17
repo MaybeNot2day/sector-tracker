@@ -2351,7 +2351,7 @@ a.key-date-row:focus-visible {
 
 .earnings-row {
   display: grid;
-  grid-template-columns: 16px 52px minmax(0, 1fr) 52px 46px 64px;
+  grid-template-columns: 42px 52px minmax(0, 1fr) 52px 46px 64px;
   align-items: center;
   gap: 8px;
   padding: 7px 10px;
@@ -2369,6 +2369,26 @@ a.key-date-row:focus-visible {
   font-size: 9px;
   letter-spacing: 0.06em;
   padding-bottom: 4px;
+}
+
+/* Numeric columns right-align their values; the header labels must sit on
+   the same edge or they read as shifted. */
+.earnings-row.earnings-head span:nth-child(n + 4) {
+  text-align: right;
+}
+
+.earnings-session {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.earnings-session b {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
 }
 
 .earnings-row strong {
@@ -2482,7 +2502,7 @@ a.key-date-row:focus-visible {
   }
 
   .earnings-row {
-    grid-template-columns: 14px 48px minmax(0, 1fr) 48px 60px;
+    grid-template-columns: 42px 48px minmax(0, 1fr) 48px 60px;
   }
 
   .earnings-impl {

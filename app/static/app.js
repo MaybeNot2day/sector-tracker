@@ -895,7 +895,7 @@ function earningsDayMarkup(day) {
     <div class="earnings-date"><strong>${escapeHtml(dayNumber)}</strong><span>${escapeHtml(day.weekday || "")}</span></div>
     <div class="earnings-rows">
       <div class="earnings-row earnings-head" aria-hidden="true">
-        <span></span><span>SYM</span><span></span><span>EST EPS</span><span>IMPL.</span><span>LAST 4Q</span>
+        <span>TIME</span><span>SYM</span><span></span><span>EST EPS</span><span>IMPL.</span><span>LAST 4Q</span>
       </div>
       ${rows}${more}
     </div>
@@ -905,6 +905,7 @@ function earningsDayMarkup(day) {
 function earningsRowMarkup(report) {
   const session = ["bmo", "amc"].includes(report.session) ? report.session : "tns";
   const sessionTitle = { bmo: "Before market open", amc: "After market close", tns: "Time not supplied" }[session];
+  const sessionLabel = { bmo: "BMO", amc: "AMC", tns: "TNS" }[session];
   const eps = typeof report.eps_estimate === "number" ? report.eps_estimate.toFixed(2) : "—";
   const impl =
     typeof report.implied_move_pct === "number" ? `±${report.implied_move_pct.toFixed(1)}%` : "—";
@@ -915,7 +916,7 @@ function earningsRowMarkup(report) {
     return '<i class="unknown" title="No data">—</i>';
   }).join("");
   return `<div class="earnings-row${report.held ? " earnings-held" : ""}">
-    <em class="session-icon session-${session}" title="${sessionTitle}"></em>
+    <span class="earnings-session" title="${sessionTitle}"><em class="session-icon session-${session}" aria-hidden="true"></em><b>${sessionLabel}</b></span>
     <strong>${escapeHtml(report.symbol || "")}</strong>
     <span class="earnings-name">${escapeHtml(report.name || "")}${report.held ? '<b class="held-chip">HELD</b>' : ""}</span>
     <span class="earnings-eps">${escapeHtml(eps)}</span>

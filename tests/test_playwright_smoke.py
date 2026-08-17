@@ -1490,17 +1490,20 @@ def test_earnings_tab_renders_week_calendar_with_ranked_reports(
     expect(held.locator(".earnings-impl")).to_have_text("±4.2%")
     expect(held.locator(".earnings-marks .beat")).to_have_count(3)
     expect(held.locator(".earnings-marks .miss")).to_have_count(1)
+    expect(held.locator(".earnings-session")).to_have_text("BMO")
     expect(held.locator(".session-icon.session-bmo")).to_have_count(1)
 
     fabrinet = rows.nth(1)
     expect(fabrinet.locator(".earnings-impl")).to_have_text("—")
     expect(fabrinet.locator(".earnings-marks .unknown")).to_have_count(1)
+    expect(fabrinet.locator(".earnings-session")).to_have_text("AMC")
     expect(fabrinet.locator(".session-icon.session-amc")).to_have_count(1)
 
     # Untrusted names render as text, never as markup.
     galt = rows.nth(2)
     expect(galt.locator(".earnings-name")).to_contain_text("Galectin Therapeutics <script>")
     expect(galt.locator(".earnings-marks .unknown")).to_have_count(4)
+    expect(galt.locator(".earnings-session")).to_have_text("TNS")
     expect(galt.locator(".session-icon.session-tns")).to_have_count(1)
 
     expect(monday.locator(".earnings-more")).to_have_text("+99 more reports")
