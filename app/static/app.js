@@ -870,9 +870,12 @@ async function renderEarningsView() {
 
 function renderEarningsBoard(payload) {
   const days = Array.isArray(payload?.days) ? payload.days : [];
+  const weekZone = payload?.week_start
+    ? earningsZoneLabel(new Date(`${payload.week_start}T12:00:00Z`))
+    : "";
   earningsWeekLabel.textContent =
     payload?.week_start && payload?.week_end
-      ? `Week ${payload.week_start} – ${payload.week_end} ET${payload.ranking_fallback ? " · ranking fallback" : ""}`
+      ? `Week ${payload.week_start} – ${payload.week_end} ${weekZone}${payload.ranking_fallback ? " · ranking fallback" : ""}`
       : "Week unavailable";
   if (!days.length) {
     earningsBoard.innerHTML = '<div class="empty-state">No reports scheduled this week</div>';
@@ -885,27 +888,58 @@ function earningsDayMarkup(day) {
   const reports = Array.isArray(day.reports) ? day.reports : [];
   const dayNumber = String(day.date || "").slice(8, 10) || "--";
   const rows = reports.length
-    ? reports.map(earningsRowMarkup).join("")
+    ? reports.map((report) => earningsRowMarkup(report, day.date)).join("")
     : '<div class="empty-state small">No reports</div>';
   const more =
     day.more > 0
       ? `<footer class="earnings-more">+${day.more} more report${day.more === 1 ? "" : "s"}</footer>`
       : "";
+  const zone = earningsZoneLabel(new Date(`${day.date || ""}T12:00:00Z`));
   return `<section class="earnings-day">
     <div class="earnings-date"><strong>${escapeHtml(dayNumber)}</strong><span>${escapeHtml(day.weekday || "")}</span></div>
     <div class="earnings-rows">
       <div class="earnings-row earnings-head" aria-hidden="true">
-        <span>TIME</span><span>SYM</span><span></span><span>EST EPS</span><span>IMPL.</span><span>LAST 4Q</span>
+        <span>TIME ${zone}</span><span>SYM</span><span></span><span>EST EPS</span><span>IMPL.</span><span>LAST 4Q</span>
       </div>
       ${rows}${more}
     </div>
   </section>`;
 }
 
-function earningsRowMarkup(report) {
+function earningsZoneLabel(date) {
+  const offset = displayTzOffsetSeconds(date);
+  if (offset === 7200) return "CEST";
+  if (offset === 3600) return "CET";
+  return `GMT${offset >= 0 ? "+" : ""}${offset / 3600}`;
+}
+
+function earningsReleaseDisplay(value, reportDate) {
+  const moment = new Date(value || "");
+  if (Number.isNaN(moment.getTime())) return null;
+  const time = moment.toLocaleTimeString("en-GB", {
+    timeZone: DISPLAY_TIME_ZONE,
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  const localDate = formatLocalDate(moment);
+  const dayPrefix =
+    localDate === reportDate
+      ? ""
+      : `${moment
+          .toLocaleDateString("en-US", { timeZone: DISPLAY_TIME_ZONE, weekday: "short" })
+          .toUpperCase()} `;
+  const zone = earningsZoneLabel(moment);
+  return {
+    label: `${dayPrefix}${time}`,
+    title: `Scheduled / estimated release: ${localDate} ${time} ${zone} · TradingView`,
+  };
+}
+
+function earningsRowMarkup(report, reportDate) {
   const session = ["bmo", "amc"].includes(report.session) ? report.session : "tns";
   const sessionTitle = { bmo: "Before market open", amc: "After market close", tns: "Time not supplied" }[session];
   const sessionLabel = { bmo: "BMO", amc: "AMC", tns: "TNS" }[session];
+  const release = earningsReleaseDisplay(report.release_at, reportDate);
   const eps = typeof report.eps_estimate === "number" ? report.eps_estimate.toFixed(2) : "—";
   const impl =
     typeof report.implied_move_pct === "number" ? `±${report.implied_move_pct.toFixed(1)}%` : "—";
@@ -916,7 +950,7 @@ function earningsRowMarkup(report) {
     return '<i class="unknown" title="No data">—</i>';
   }).join("");
   return `<div class="earnings-row${report.held ? " earnings-held" : ""}">
-    <span class="earnings-session" title="${sessionTitle}"><em class="session-icon session-${session}" aria-hidden="true"></em><b>${sessionLabel}</b></span>
+    <span class="earnings-session" title="${escapeHtml(release ? `${release.title} · ${sessionTitle}` : sessionTitle)}"><em class="session-icon session-${session}" aria-hidden="true"></em><b>${escapeHtml(release?.label || sessionLabel)}</b></span>
     <strong>${escapeHtml(report.symbol || "")}</strong>
     <span class="earnings-name">${escapeHtml(report.name || "")}${report.held ? '<b class="held-chip">HELD</b>' : ""}</span>
     <span class="earnings-eps">${escapeHtml(eps)}</span>

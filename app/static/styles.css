@@ -2351,7 +2351,7 @@ a.key-date-row:focus-visible {
 
 .earnings-row {
   display: grid;
-  grid-template-columns: 42px 52px minmax(0, 1fr) 52px 46px 64px;
+  grid-template-columns: 62px 52px minmax(0, 1fr) 52px 46px 64px;
   align-items: center;
   gap: 8px;
   padding: 7px 10px;
@@ -2381,14 +2381,15 @@ a.key-date-row:focus-visible {
   display: flex;
   align-items: center;
   gap: 4px;
+  white-space: nowrap;
 }
 
 .earnings-session b {
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 8.5px;
+  font-size: 9px;
   font-weight: 600;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.02em;
 }
 
 .earnings-row strong {
@@ -2502,7 +2503,7 @@ a.key-date-row:focus-visible {
   }
 
   .earnings-row {
-    grid-template-columns: 42px 48px minmax(0, 1fr) 48px 60px;
+    grid-template-columns: 62px 48px minmax(0, 1fr) 48px 60px;
   }
 
   .earnings-impl {

@@ -68,13 +68,16 @@ serves the PNGs same-origin through `GET /api/component-image`.
 The Earnings tab shows the trading week's report calendar as Mon–Fri day
 cards (`GET /api/earnings`, optional `?start=` snaps to that date's week).
 Rows come from Nasdaq's public calendar API — every reporting company with
-EPS consensus, report timing (BMO/AMC/TNS), and market cap. Per day the top
-seven names rank board-held symbols first, then market cap, then analyst
-coverage; the rest collapse into a "+N more reports" count. Detailed rows
-carry a last-4-quarters beat/miss strip (Nasdaq earnings-surprise API) and,
-for held symbols only, an options-implied move (ATM IV from MarketData.app
-scaled to the first expiration after the report). Day lists cache 6h and
-surprise histories 24h with stale-on-error fallback.
+EPS consensus, report session (BMO/AMC/TNS), and market cap. A single
+batched TradingView Scanner request adds exact scheduled/estimated release
+timestamps, rendered in CET/CEST; missing or conflicting timestamps fall
+back to the session instead of inventing a time. Per day the top seven
+names rank board-held symbols first, then market cap, then analyst coverage;
+the rest collapse into a "+N more reports" count. Detailed rows carry a
+last-4-quarters beat/miss strip (Nasdaq earnings-surprise API) and, for held
+symbols only, an options-implied move (ATM IV from MarketData.app scaled to
+the first expiration after the report). Day lists and release times cache
+6h and surprise histories 24h with stale-on-error fallback.
 
 ## Tests
 

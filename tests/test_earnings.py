@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -17,6 +17,10 @@ from app.services import earnings as earnings_module
 from app.services.earnings import EarningsCalendarService, week_start
 
 WEEK_MONDAY = date(2026, 8, 17)
+
+
+def _epoch(year: int, month: int, day: int, hour: int, minute: int = 0) -> int:
+    return int(datetime(year, month, day, hour, minute, tzinfo=UTC).timestamp())
 
 
 def _calendar_row(
@@ -57,14 +61,17 @@ class NasdaqAPI:
         self,
         days: dict[str, list[dict[str, str]]],
         surprises: dict[str, list[str]] | None = None,
+        release_times: dict[str, tuple[int, int]] | None = None,
         *,
         fail: bool = False,
     ) -> None:
         self.days = days
         self.surprises = surprises or {}
+        self.release_times = release_times or {}
         self.fail = fail
         self.calendar_requests: list[str] = []
         self.surprise_requests: list[str] = []
+        self.release_time_requests: list[list[str]] = []
 
     def client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=httpx.MockTransport(self._handle))
@@ -73,6 +80,17 @@ class NasdaqAPI:
         if self.fail:
             return httpx.Response(503)
         path = request.url.path
+        if path == "/america/scan":
+            body = json.loads(request.content)
+            tickers = body["symbols"]["tickers"]
+            self.release_time_requests.append(tickers)
+            symbols = {ticker.partition(":")[2] for ticker in tickers}
+            data = [
+                {"s": f"NASDAQ:{symbol}", "d": [symbol, timestamp, timing]}
+                for symbol, (timestamp, timing) in self.release_times.items()
+                if symbol in symbols
+            ]
+            return httpx.Response(200, json={"data": data})
         if path == "/api/calendar/earnings":
             day = request.url.params["date"]
             self.calendar_requests.append(day)
@@ -113,6 +131,12 @@ async def test_week_payload_parses_ranks_and_enriches() -> None:
             ],
         },
         surprises={"WMT": ["1.54", "-6.85", "bad", "2.0"], "BIG": ["3.0"]},
+        release_times={
+            "WMT": (_epoch(2026, 8, 17, 11), -1),
+            "BIG": (_epoch(2026, 8, 17, 20, 5), 1),
+            "ODD": (_epoch(2026, 8, 17, 12), 0),
+            "NEG": (_epoch(2026, 11, 30, 12), -1),
+        },
     )
     service = EarningsCalendarService(client=api.client())
 
@@ -140,19 +164,24 @@ async def test_week_payload_parses_ranks_and_enriches() -> None:
         # Newest-first from Nasdaq, rendered oldest -> newest; junk row is None.
         "last4q": [True, None, False, True],
         "implied_move_pct": None,
+        "release_at": "2026-08-17T11:00:00Z",
     }
     assert big["session"] == "amc"
     assert big["last4q"] == [True]
+    assert big["release_at"] == "2026-08-17T20:05:00Z"
     assert neg["eps_estimate"] == -0.24
     assert neg["market_cap"] is None
     # Unrecognized report-time strings fall back to "time not supplied".
     assert odd["session"] == "tns"
+    assert odd["release_at"] is None
+    assert neg["release_at"] is None
     # A detailed row without a market cap flips the ranking-fallback flag.
     assert payload["ranking_fallback"] is True
     assert monday["more"] == 0
     assert monday["total"] == 4
     # Only detailed rows fetch surprise history.
     assert sorted(api.surprise_requests) == ["BIG", "NEG", "ODD", "WMT"]
+    assert len(api.release_time_requests) == 1
 
 
 @pytest.mark.asyncio
@@ -183,11 +212,13 @@ async def test_caches_serve_repeat_weeks_and_survive_outages(
     first = await service.get_week(WEEK_MONDAY, held=set())
     assert len(api.calendar_requests) == 5
     assert api.surprise_requests == ["WMT"]
+    assert len(api.release_time_requests) == 1
 
     # Warm caches: a second request performs zero HTTP.
     second = await service.get_week(WEEK_MONDAY, held=set())
     assert len(api.calendar_requests) == 5
     assert api.surprise_requests == ["WMT"]
+    assert len(api.release_time_requests) == 1
     assert second["days"] == first["days"]
 
     # Past the TTL with the API down: stale rows keep serving.
@@ -202,6 +233,7 @@ async def test_caches_serve_repeat_weeks_and_survive_outages(
     cooled = await service.get_week(WEEK_MONDAY, held=set())
     assert len(api.calendar_requests) == 5
     assert _days(cooled)[0]["reports"][0]["symbol"] == "WMT"
+    assert len(api.release_time_requests) == 1
 
 
 @pytest.mark.asyncio

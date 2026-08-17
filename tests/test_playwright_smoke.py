@@ -1471,7 +1471,7 @@ def test_earnings_tab_renders_week_calendar_with_ranked_reports(
     page.goto(f"{base_url}/#view=earnings", wait_until="domcontentloaded")
     expect(page.locator("#earnings-view")).to_be_visible()
     expect(page.locator("#earnings-week")).to_have_text(
-        "Week 2026-08-17 – 2026-08-21 ET · ranking fallback"
+        "Week 2026-08-17 – 2026-08-21 CEST · ranking fallback"
     )
 
     days = page.locator(".earnings-day")
@@ -1479,6 +1479,7 @@ def test_earnings_tab_renders_week_calendar_with_ranked_reports(
     monday = days.nth(0)
     expect(monday.locator(".earnings-date strong")).to_have_text("17")
     expect(monday.locator(".earnings-date span")).to_have_text("MON")
+    expect(monday.locator(".earnings-head span").nth(0)).to_have_text("TIME CEST")
 
     rows = monday.locator(".earnings-row:not(.earnings-head)")
     expect(rows).to_have_count(3)
@@ -1490,13 +1491,19 @@ def test_earnings_tab_renders_week_calendar_with_ranked_reports(
     expect(held.locator(".earnings-impl")).to_have_text("±4.2%")
     expect(held.locator(".earnings-marks .beat")).to_have_count(3)
     expect(held.locator(".earnings-marks .miss")).to_have_count(1)
-    expect(held.locator(".earnings-session")).to_have_text("BMO")
+    expect(held.locator(".earnings-session")).to_have_text("12:00")
+    expect(held.locator(".earnings-session")).to_have_attribute(
+        "title", re.compile(r"2026-08-17 12:00 CEST.+Before market open")
+    )
     expect(held.locator(".session-icon.session-bmo")).to_have_count(1)
 
     fabrinet = rows.nth(1)
     expect(fabrinet.locator(".earnings-impl")).to_have_text("—")
     expect(fabrinet.locator(".earnings-marks .unknown")).to_have_count(1)
-    expect(fabrinet.locator(".earnings-session")).to_have_text("AMC")
+    expect(fabrinet.locator(".earnings-session")).to_have_text("TUE 04:00")
+    expect(fabrinet.locator(".earnings-session")).to_have_attribute(
+        "title", re.compile(r"2026-08-18 04:00 CEST.+After market close")
+    )
     expect(fabrinet.locator(".session-icon.session-amc")).to_have_count(1)
 
     # Untrusted names render as text, never as markup.
@@ -1785,6 +1792,7 @@ EARNINGS_PAYLOAD: dict[str, Any] = {
                     "implied_move_pct": 4.2,
                     "last4q": [True, True, False, True],
                     "held": True,
+                    "release_at": "2026-08-17T10:00:00Z",
                 },
                 {
                     "symbol": "FN",
@@ -1794,6 +1802,7 @@ EARNINGS_PAYLOAD: dict[str, Any] = {
                     "implied_move_pct": None,
                     "last4q": [True, None, False, True],
                     "held": False,
+                    "release_at": "2026-08-18T02:00:00Z",
                 },
                 {
                     "symbol": "GALT",
@@ -1803,6 +1812,7 @@ EARNINGS_PAYLOAD: dict[str, Any] = {
                     "implied_move_pct": None,
                     "last4q": [],
                     "held": False,
+                    "release_at": None,
                 },
             ],
             "more": 99,
@@ -1823,6 +1833,7 @@ EARNINGS_PAYLOAD: dict[str, Any] = {
                     "implied_move_pct": None,
                     "last4q": [False, True, True, True],
                     "held": False,
+                    "release_at": "2026-08-21T10:00:00Z",
                 }
             ],
             "more": 1,

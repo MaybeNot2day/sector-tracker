@@ -2,15 +2,16 @@
 
 Nasdaq serves a keyless JSON calendar (the data behind nasdaq.com/market-
 activity/earnings): every reporting company for a date with EPS consensus,
-report timing (pre/after market), market cap, and analyst coverage. A
-second keyless endpoint returns the last quarters' EPS surprises per
-symbol, which drives the beat/miss history chips.
+report session (pre/after market), market cap, and analyst coverage. A
+batched TradingView Scanner request supplies exact scheduled/estimated UTC
+release timestamps; a second Nasdaq endpoint returns the last quarters'
+EPS surprises for the beat/miss history chips.
 
 The service composes a Monday-Friday week view: per day the top rows by
 rank (board-held symbols first, then market cap, then analyst coverage)
-are enriched with surprise history; the rest are counted. Day rows and
-surprise histories cache independently, so watchlist edits re-rank
-instantly without refetching.
+are enriched with exact times and surprise history; the rest are counted.
+The caches are independent, so watchlist edits re-rank instantly without
+refetching.
 
 Implied move (ATM IV scaled to the first expiration after the report) is
 computed only for held symbols through the existing MarketData.app options
@@ -27,6 +28,7 @@ import re
 from datetime import UTC, date, datetime, timedelta
 from time import monotonic
 from typing import Any, Protocol
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -34,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 CALENDAR_URL = "https://api.nasdaq.com/api/calendar/earnings"
 SURPRISE_URL = "https://api.nasdaq.com/api/company/{symbol}/earnings-surprise"
+RELEASE_TIME_URL = "https://scanner.tradingview.com/america/scan"
 REQUEST_TIMEOUT_SECONDS = 15.0
 # api.nasdaq.com rejects requests without a browser-looking UA outright.
 _HEADERS = {
@@ -48,12 +51,19 @@ _HEADERS = {
 # history only changes when a company reports.
 DAY_CACHE_SECONDS = 6 * 3600.0
 SURPRISE_CACHE_SECONDS = 24 * 3600.0
+RELEASE_TIME_CACHE_SECONDS = 6 * 3600.0
 FAILURE_RETRY_SECONDS = 300.0
 SURPRISE_CACHE_MAX = 512
+RELEASE_TIME_CACHE_MAX = 512
 DETAILED_PER_DAY = 7
 LAST_QUARTERS = 4
 # Bounded fan-out for surprise fetches: a week enriches at most ~35 symbols.
 _SURPRISE_CONCURRENCY = 8
+_DISPLAY_TZ = ZoneInfo("Europe/Berlin")
+_TRADINGVIEW_EXCHANGES = ("NASDAQ", "NYSE", "AMEX", "OTC")
+_TRADINGVIEW_EXCHANGE_PRIORITY = {
+    exchange: priority for priority, exchange in enumerate(_TRADINGVIEW_EXCHANGES)
+}
 
 _MONEY = re.compile(r"[^0-9.\-]")
 
@@ -141,6 +151,58 @@ def _parse_surprises(payload: Any) -> list[bool | None]:
     return marks
 
 
+def _parse_release_candidates(payload: Any) -> dict[str, list[tuple[int, int, int]]]:
+    """TradingView symbol -> (UTC epoch, session code, exchange priority)."""
+    raw_rows = payload.get("data") if isinstance(payload, dict) else None
+    candidates: dict[str, list[tuple[int, int, int]]] = {}
+    for raw in raw_rows or []:
+        if not isinstance(raw, dict):
+            continue
+        listing = str(raw.get("s") or "")
+        values = raw.get("d")
+        if not isinstance(values, list) or len(values) < 3:
+            continue
+        symbol = str(values[0] or "").strip().upper()
+        timestamp, timing = values[1:3]
+        if (
+            not symbol
+            or isinstance(timestamp, bool)
+            or not isinstance(timestamp, int | float)
+            or isinstance(timing, bool)
+            or not isinstance(timing, int | float)
+        ):
+            continue
+        exchange = listing.partition(":")[0]
+        priority = _TRADINGVIEW_EXCHANGE_PRIORITY.get(exchange, len(_TRADINGVIEW_EXCHANGES))
+        candidates.setdefault(symbol, []).append((int(timestamp), int(timing), priority))
+    return candidates
+
+
+def _select_release_at(
+    candidates: list[tuple[int, int, int]],
+    report_date: date,
+    session: str,
+) -> str | None:
+    """Choose an exact scheduled timestamp consistent with the Nasdaq row."""
+    expected_timing = {"bmo": -1, "amc": 1}.get(session)
+    valid: list[tuple[int, int, datetime]] = []
+    for timestamp, timing, priority in candidates:
+        # TradingView's zero code means no exact pre/post-market timing.
+        if timing not in {-1, 1} or (expected_timing is not None and timing != expected_timing):
+            continue
+        try:
+            moment = datetime.fromtimestamp(timestamp, UTC)
+        except (OSError, OverflowError, ValueError):
+            continue
+        day_distance = abs((moment.astimezone(_DISPLAY_TZ).date() - report_date).days)
+        if day_distance <= 1:
+            valid.append((day_distance, priority, moment))
+    if not valid:
+        return None
+    moment = min(valid, key=lambda item: (item[0], item[1]))[2]
+    return moment.isoformat().replace("+00:00", "Z")
+
+
 def _rank_key(row: dict[str, Any], held: set[str]) -> tuple[int, float, int]:
     return (
         0 if row["symbol"] in held else 1,
@@ -157,6 +219,8 @@ class EarningsCalendarService:
         self._day_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
         self._day_failed_at: dict[str, float] = {}
         self._surprise_cache: dict[str, tuple[float, list[bool | None]]] = {}
+        self._release_time_cache: dict[tuple[str, str], tuple[float, str | None]] = {}
+        self._release_time_failed_at: float | None = None
         self._lock = asyncio.Lock()
 
     async def get_week(
@@ -187,16 +251,21 @@ class EarningsCalendarService:
                 }
             )
 
+        async with self._lock:
+            release_times = await self._release_times(
+                [(day, row["symbol"], row["session"]) for day, row in detailed]
+            )
+
         surprises = await self._surprise_histories([row["symbol"] for _, row in detailed])
         implied = await self._implied_moves(
             [(day, row["symbol"]) for day, row in detailed if row["symbol"] in held],
             options_service,
         )
-        for _day, row in detailed:
+        for report_day, row in detailed:
             row["held"] = row["symbol"] in held
             row["last4q"] = surprises.get(row["symbol"], [])
             row["implied_move_pct"] = implied.get(row["symbol"])
-
+            row["release_at"] = release_times.get((report_day.isoformat(), row["symbol"]))
         return {
             "as_of": datetime.now(UTC).isoformat(),
             "week_start": start.isoformat(),
@@ -264,6 +333,69 @@ class EarningsCalendarService:
         while len(self._surprise_cache) > SURPRISE_CACHE_MAX:
             del self._surprise_cache[
                 min(self._surprise_cache, key=lambda key: self._surprise_cache[key][0])
+            ]
+        return results
+
+    async def _release_times(
+        self,
+        reports: list[tuple[date, str, str]],
+    ) -> dict[tuple[str, str], str | None]:
+        now = monotonic()
+        wanted = {
+            (report_date.isoformat(), symbol): (report_date, session)
+            for report_date, symbol, session in reports
+        }
+        results: dict[tuple[str, str], str | None] = {}
+        stale: dict[tuple[str, str], str | None] = {}
+        missing: list[tuple[str, str]] = []
+        for key in wanted:
+            cached = self._release_time_cache.get(key)
+            if cached is not None:
+                stale[key] = cached[1]
+            if cached is not None and now - cached[0] < RELEASE_TIME_CACHE_SECONDS:
+                results[key] = cached[1]
+            else:
+                missing.append(key)
+        if not missing:
+            return results
+        if (
+            self._release_time_failed_at is not None
+            and now - self._release_time_failed_at < FAILURE_RETRY_SECONDS
+        ):
+            return stale | results
+
+        symbols = sorted({symbol for _, symbol in missing})
+        tickers = [
+            f"{exchange}:{symbol}" for symbol in symbols for exchange in _TRADINGVIEW_EXCHANGES
+        ]
+        try:
+            response = await self._http().post(
+                RELEASE_TIME_URL,
+                json={
+                    "symbols": {"tickers": tickers, "query": {"types": []}},
+                    "columns": [
+                        "name",
+                        "earnings_release_next_date",
+                        "earnings_release_next_time",
+                    ],
+                },
+            )
+            response.raise_for_status()
+            candidates = _parse_release_candidates(response.json())
+        except Exception:
+            logger.warning("earnings release-time fetch failed", exc_info=True)
+            self._release_time_failed_at = now
+            return stale | results
+
+        for key in missing:
+            report_date, session = wanted[key]
+            release_at = _select_release_at(candidates.get(key[1], []), report_date, session)
+            results[key] = release_at
+            self._release_time_cache[key] = (now, release_at)
+        self._release_time_failed_at = None
+        while len(self._release_time_cache) > RELEASE_TIME_CACHE_MAX:
+            del self._release_time_cache[
+                min(self._release_time_cache, key=lambda key: self._release_time_cache[key][0])
             ]
         return results
 
