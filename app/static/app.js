@@ -19,6 +19,9 @@ const trendsGrid = document.querySelector("#trends-grid");
 const trendsRangeButtons = Array.from(document.querySelectorAll("#trends-range button"));
 const componentsTabs = document.querySelector("#components-tabs");
 const componentsGrid = document.querySelector("#components-grid");
+const earningsView = document.querySelector("#earnings-view");
+const earningsBoard = document.querySelector("#earnings-board");
+const earningsWeekLabel = document.querySelector("#earnings-week");
 const watchView = document.querySelector("#watch-view");
 const watchGrid = document.querySelector("#watch-grid");
 const watchAddInput = document.querySelector("#watch-add");
@@ -127,6 +130,10 @@ const WS_STALE_FRAME_MS = 30000;
 let activeView = "daily";
 const TRENDS_TTL_MS = 5 * 60 * 1000;
 const TRENDS_CATEGORY_ORDER = ["tradfi", "crypto", "commodities"];
+const EARNINGS_TTL_MS = 10 * 60 * 1000;
+let latestEarnings = null;
+let earningsFetchedAt = 0;
+let earningsLoadToken = 0;
 let latestTrends = null;
 let trendsDays = 90;
 let trendsFetchedAt = 0;
@@ -416,7 +423,9 @@ function restoreUrlState() {
   restoringUrlState = true;
   try {
     const view = params.get("view");
-    if (["markets", "fringe", "trends", "watch"].includes(view || "")) selectView(view);
+    if (["markets", "fringe", "trends", "earnings", "watch"].includes(view || "")) {
+      selectView(view);
+    }
     const group = params.get("group");
     if (group) activeGroupFilter = group;
     const query = params.get("q");
@@ -820,6 +829,99 @@ function groupCategory(group) {
   if (assets.some((asset) => isCryptoAsset(asset.type))) return "crypto";
   if (assets.some((asset) => asset.type === "future")) return "commodities";
   return "tradfi";
+}
+
+// --- Earnings view ----------------------------------------------------------
+// Weekly research-desk calendar: Mon-Fri day cards, top reports per day
+// ranked held-first then by market cap, with EPS consensus, options-implied
+// move for held names, and last-4Q beat/miss chips (Nasdaq data).
+
+async function renderEarningsView() {
+  if (latestEarnings && Date.now() - earningsFetchedAt < EARNINGS_TTL_MS) {
+    renderEarningsBoard(latestEarnings);
+    earningsLoadToken += 1; // a late in-flight response must not overwrite
+    return;
+  }
+  const token = ++earningsLoadToken;
+  if (!latestEarnings) {
+    earningsBoard.innerHTML = '<div class="empty-state">Loading earnings calendar</div>';
+  }
+  try {
+    const response = await fetch("/api/earnings");
+    if (!response.ok) throw new Error("earnings_failed");
+    const payload = await response.json();
+    if (token !== earningsLoadToken) return;
+    latestEarnings = payload;
+    earningsFetchedAt = Date.now();
+    renderEarningsBoard(payload);
+  } catch (error) {
+    if (token !== earningsLoadToken) return;
+    if (latestEarnings) {
+      renderEarningsBoard(latestEarnings);
+      earningsBoard.insertAdjacentHTML(
+        "afterbegin",
+        '<div class="trends-note" role="status">Earnings refresh failed — showing cached data</div>'
+      );
+      return;
+    }
+    earningsBoard.innerHTML = '<div class="empty-state">Earnings calendar unavailable</div>';
+  }
+}
+
+function renderEarningsBoard(payload) {
+  const days = Array.isArray(payload?.days) ? payload.days : [];
+  earningsWeekLabel.textContent =
+    payload?.week_start && payload?.week_end
+      ? `Week ${payload.week_start} – ${payload.week_end} ET${payload.ranking_fallback ? " · ranking fallback" : ""}`
+      : "Week unavailable";
+  if (!days.length) {
+    earningsBoard.innerHTML = '<div class="empty-state">No reports scheduled this week</div>';
+    return;
+  }
+  earningsBoard.innerHTML = days.map(earningsDayMarkup).join("");
+}
+
+function earningsDayMarkup(day) {
+  const reports = Array.isArray(day.reports) ? day.reports : [];
+  const dayNumber = String(day.date || "").slice(8, 10) || "--";
+  const rows = reports.length
+    ? reports.map(earningsRowMarkup).join("")
+    : '<div class="empty-state small">No reports</div>';
+  const more =
+    day.more > 0
+      ? `<footer class="earnings-more">+${day.more} more report${day.more === 1 ? "" : "s"}</footer>`
+      : "";
+  return `<section class="earnings-day">
+    <div class="earnings-date"><strong>${escapeHtml(dayNumber)}</strong><span>${escapeHtml(day.weekday || "")}</span></div>
+    <div class="earnings-rows">
+      <div class="earnings-row earnings-head" aria-hidden="true">
+        <span></span><span>SYM</span><span></span><span>EST EPS</span><span>IMPL.</span><span>LAST 4Q</span>
+      </div>
+      ${rows}${more}
+    </div>
+  </section>`;
+}
+
+function earningsRowMarkup(report) {
+  const session = ["bmo", "amc"].includes(report.session) ? report.session : "tns";
+  const sessionTitle = { bmo: "Before market open", amc: "After market close", tns: "Time not supplied" }[session];
+  const eps = typeof report.eps_estimate === "number" ? report.eps_estimate.toFixed(2) : "—";
+  const impl =
+    typeof report.implied_move_pct === "number" ? `±${report.implied_move_pct.toFixed(1)}%` : "—";
+  const marks = Array.from({ length: 4 }, (_, index) => {
+    const mark = (report.last4q || [])[index];
+    if (mark === true) return '<i class="beat" title="Beat">▲</i>';
+    if (mark === false) return '<i class="miss" title="Miss">▼</i>';
+    return '<i class="unknown" title="No data">—</i>';
+  }).join("");
+  return `<div class="earnings-row${report.held ? " earnings-held" : ""}">
+    <em class="session-icon session-${session}" title="${sessionTitle}"></em>
+    <strong>${escapeHtml(report.symbol || "")}</strong>
+    <span class="earnings-name">${escapeHtml(report.name || "")}${report.held ? '<b class="held-chip">HELD</b>' : ""}</span>
+    <span class="earnings-eps">${escapeHtml(eps)}</span>
+    <span class="earnings-impl">${escapeHtml(impl)}</span>
+    <span class="earnings-marks">${marks}</span>
+  </div>`;
 }
 
 // --- Trends view -----------------------------------------------------------
@@ -1297,11 +1399,14 @@ function trendBandSvg(series) {
 }
 
 function selectView(view) {
-  activeView = ["markets", "fringe", "trends", "watch"].includes(view) ? view : "daily";
+  activeView = ["markets", "fringe", "trends", "earnings", "watch"].includes(view)
+    ? view
+    : "daily";
   dailyView.hidden = activeView !== "daily";
   marketsView.hidden = activeView !== "markets";
   fringeView.hidden = activeView !== "fringe";
   trendsView.hidden = activeView !== "trends";
+  earningsView.hidden = activeView !== "earnings";
   watchView.hidden = activeView !== "watch";
   viewButtons.forEach((button) => {
     const selected = button.dataset.view === activeView;
@@ -1311,6 +1416,7 @@ function selectView(view) {
   });
   if (activeView === "fringe") renderFringeView();
   if (activeView === "trends") renderTrendsView();
+  if (activeView === "earnings") renderEarningsView();
   if (activeView === "watch") renderWatchGrid();
   // The treemap sizes itself from board.clientWidth, which is 0 while the
   // markets view is hidden (a refresh landing on Daily still renders the

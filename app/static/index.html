@@ -17,7 +17,7 @@
         }
       } catch {}
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260814-4" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260815-1" />
   </head>
   <body>
     <aside id="news-panel" class="news-panel" aria-label="Live Telegram news" aria-hidden="true" inert>
@@ -95,6 +95,15 @@
           aria-selected="false"
           tabindex="-1"
         >Trends</button>
+        <button
+          id="earnings-tab"
+          type="button"
+          role="tab"
+          data-view="earnings"
+          aria-controls="earnings-view"
+          aria-selected="false"
+          tabindex="-1"
+        >Earnings</button>
         <button
           id="watch-tab"
           type="button"
@@ -299,6 +308,16 @@
         </div>
       </section>
 
+      <section id="earnings-view" class="view-panel" role="tabpanel" aria-labelledby="earnings-tab" hidden>
+        <div class="market-tools earnings-tools">
+          <span id="earnings-week" class="trends-note">Loading week</span>
+          <span class="trends-note earnings-legend"><em class="session-icon session-bmo" aria-hidden="true"></em> BMO · <em class="session-icon session-amc" aria-hidden="true"></em> AMC · <em class="session-icon session-tns" aria-hidden="true"></em> TNS · EST EPS consensus · IMPL. options-implied move (held) · LAST 4Q beat/miss</span>
+        </div>
+        <div id="earnings-board" class="earnings-grid">
+          <div class="empty-state">Loading earnings calendar</div>
+        </div>
+      </section>
+
       <section id="watch-view" class="view-panel" role="tabpanel" aria-labelledby="watch-tab" hidden>
         <div class="market-tools watch-tools">
           <label class="market-search watch-add-label" title="Add a symbol to the watch grid">
@@ -459,6 +478,6 @@
 
     <div id="help-tooltip" class="help-tooltip" role="tooltip" hidden></div>
 
-    <script src="/static/app.js?v=20260814-5" defer></script>
+    <script src="/static/app.js?v=20260815-1" defer></script>
   </body>
 </html>

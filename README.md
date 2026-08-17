@@ -65,6 +65,17 @@ street prices for DRAM/NAND lead the board's MEMORY equity theme. The backend
 scrapes the public gallery lists (`GET /api/component-trends`, cached 6h) and
 serves the PNGs same-origin through `GET /api/component-image`.
 
+The Earnings tab shows the trading week's report calendar as Mon–Fri day
+cards (`GET /api/earnings`, optional `?start=` snaps to that date's week).
+Rows come from Nasdaq's public calendar API — every reporting company with
+EPS consensus, report timing (BMO/AMC/TNS), and market cap. Per day the top
+seven names rank board-held symbols first, then market cap, then analyst
+coverage; the rest collapse into a "+N more reports" count. Detailed rows
+carry a last-4-quarters beat/miss strip (Nasdaq earnings-surprise API) and,
+for held symbols only, an options-implied move (ATM IV from MarketData.app
+scaled to the first expiration after the report). Day lists cache 6h and
+surprise histories 24h with stale-on-error fallback.
+
 ## Tests
 
 ```bash

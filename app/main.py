@@ -64,6 +64,7 @@ from app.services.component_trends import (
 from app.services.component_trends import store_file as component_trends_store
 from app.services.crypto_etf_flows import CryptoEtfFlowService
 from app.services.daily_board import DailyBoardService
+from app.services.earnings import EarningsCalendarService, week_start
 from app.services.econ_calendar import EconCalendarService, key_dates_payload
 from app.services.fringe import FringeService, parse_fringe_actions
 from app.services.history import HistoryService, bars_payload, find_asset
@@ -201,6 +202,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         cache_seconds=settings.econ_calendar_cache_seconds,
         countries=settings.econ_calendar_countries,
     )
+    app.state.earnings_service = EarningsCalendarService()
     app.state.connection_manager = ConnectionManager()
     app.state.watchlist_lock = asyncio.Lock()
     app.state.poll_task = None
@@ -242,6 +244,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.news_service.aclose(),
             app.state.options_service.aclose(),
             app.state.econ_calendar_service.aclose(),
+            app.state.earnings_service.aclose(),
             return_exceptions=True,
         )
 
@@ -751,6 +754,32 @@ async def key_dates(
     return await key_dates_payload(
         app.state.settings.database_path, service, days=days, limit=limit
     )
+
+
+@app.get("/api/earnings")
+async def earnings_calendar(start: str | None = Query(default=None)) -> dict[str, object]:
+    """The weekly earnings calendar: Mon-Fri reporting companies from Nasdaq.
+
+    Defaults to the current trading week (next week from a weekend); `start`
+    accepts any date and snaps back to its Monday. Board-held symbols rank
+    first per day and carry an options-implied move when available.
+    """
+    if start is None:
+        monday = week_start(datetime.now(UTC).date())
+    else:
+        try:
+            monday = week_start(date.fromisoformat(start))
+        except ValueError:
+            raise HTTPException(status_code=422, detail="start_invalid") from None
+        # week_start pushes weekend dates forward; explicit navigation should
+        # land on the week containing the requested date instead.
+        if monday > date.fromisoformat(start):
+            monday -= timedelta(days=7)
+    service: EarningsCalendarService = app.state.earnings_service
+    held = {
+        asset.symbol.upper() for group in getattr(app.state, "groups", []) for asset in group.assets
+    }
+    return await service.get_week(monday, held, getattr(app.state, "options_service", None))
 
 
 @app.get("/api/fringe")

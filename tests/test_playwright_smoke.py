@@ -1464,6 +1464,57 @@ def test_trends_tab_renders_group_bands_and_links_to_markets(page: Page, base_ur
     expect(page.locator("#market-filter-status")).to_contain_text("MAG7")
 
 
+def test_earnings_tab_renders_week_calendar_with_ranked_reports(
+    page: Page,
+    base_url: str,
+) -> None:
+    page.goto(f"{base_url}/#view=earnings", wait_until="domcontentloaded")
+    expect(page.locator("#earnings-view")).to_be_visible()
+    expect(page.locator("#earnings-week")).to_have_text(
+        "Week 2026-08-17 – 2026-08-21 ET · ranking fallback"
+    )
+
+    days = page.locator(".earnings-day")
+    expect(days).to_have_count(5)
+    monday = days.nth(0)
+    expect(monday.locator(".earnings-date strong")).to_have_text("17")
+    expect(monday.locator(".earnings-date span")).to_have_text("MON")
+
+    rows = monday.locator(".earnings-row:not(.earnings-head)")
+    expect(rows).to_have_count(3)
+    held = rows.nth(0)
+    expect(held).to_have_class(re.compile(r"\bearnings-held\b"))
+    expect(held.locator("strong")).to_have_text("WMT")
+    expect(held.locator(".held-chip")).to_have_text("HELD")
+    expect(held.locator(".earnings-eps")).to_have_text("0.75")
+    expect(held.locator(".earnings-impl")).to_have_text("±4.2%")
+    expect(held.locator(".earnings-marks .beat")).to_have_count(3)
+    expect(held.locator(".earnings-marks .miss")).to_have_count(1)
+    expect(held.locator(".session-icon.session-bmo")).to_have_count(1)
+
+    fabrinet = rows.nth(1)
+    expect(fabrinet.locator(".earnings-impl")).to_have_text("—")
+    expect(fabrinet.locator(".earnings-marks .unknown")).to_have_count(1)
+    expect(fabrinet.locator(".session-icon.session-amc")).to_have_count(1)
+
+    # Untrusted names render as text, never as markup.
+    galt = rows.nth(2)
+    expect(galt.locator(".earnings-name")).to_contain_text("Galectin Therapeutics <script>")
+    expect(galt.locator(".earnings-marks .unknown")).to_have_count(4)
+    expect(galt.locator(".session-icon.session-tns")).to_have_count(1)
+
+    expect(monday.locator(".earnings-more")).to_have_text("+99 more reports")
+    expect(days.nth(1).locator(".empty-state")).to_have_text("No reports")
+    expect(days.nth(4).locator(".earnings-more")).to_have_text("+1 more report")
+
+    # The tab is reachable from the top nav as well.
+    page.locator("#daily-tab").click()
+    expect(page.locator("#earnings-view")).to_be_hidden()
+    page.locator("#earnings-tab").click()
+    expect(page.locator("#earnings-view")).to_be_visible()
+    expect(page.locator(".earnings-day")).to_have_count(5)
+
+
 def test_dialog_stack_closes_one_layer_per_escape_and_restores_focus(
     page: Page,
     base_url: str,
@@ -1696,6 +1747,8 @@ def _stub_board_apis(page: Page) -> None:
         elif path == "/api/trends":
             days = int(parse_qs(parsed.query).get("days", ["90"])[0])
             _fulfill_json(route, {**TRENDS_PAYLOAD, "days": days})
+        elif path == "/api/earnings":
+            _fulfill_json(route, EARNINGS_PAYLOAD)
         elif path == "/api/component-trends":
             _fulfill_json(route, COMPONENT_TRENDS_PAYLOAD)
         elif path == "/api/component-image":
@@ -1706,6 +1759,74 @@ def _stub_board_apis(page: Page) -> None:
             route.continue_()
 
     page.route("**/api/**", handle)
+
+
+# Earnings week fixture: a held row with implied move and mixed beat/miss
+# history, a plain row with a data gap, an unknown-session row, an overflow
+# count, and an empty Friday.
+EARNINGS_PAYLOAD: dict[str, Any] = {
+    "as_of": "2026-08-14T15:00:00Z",
+    "week_start": "2026-08-17",
+    "week_end": "2026-08-21",
+    "ranking_fallback": True,
+    "days": [
+        {
+            "date": "2026-08-17",
+            "weekday": "MON",
+            "reports": [
+                {
+                    "symbol": "WMT",
+                    "name": "Walmart Inc.",
+                    "session": "bmo",
+                    "eps_estimate": 0.75,
+                    "implied_move_pct": 4.2,
+                    "last4q": [True, True, False, True],
+                    "held": True,
+                },
+                {
+                    "symbol": "FN",
+                    "name": "Fabrinet",
+                    "session": "amc",
+                    "eps_estimate": 3.93,
+                    "implied_move_pct": None,
+                    "last4q": [True, None, False, True],
+                    "held": False,
+                },
+                {
+                    "symbol": "GALT",
+                    "name": "Galectin Therapeutics <script>",
+                    "session": "tns",
+                    "eps_estimate": -0.09,
+                    "implied_move_pct": None,
+                    "last4q": [],
+                    "held": False,
+                },
+            ],
+            "more": 99,
+            "total": 102,
+        },
+        {"date": "2026-08-18", "weekday": "TUE", "reports": [], "more": 0, "total": 0},
+        {"date": "2026-08-19", "weekday": "WED", "reports": [], "more": 0, "total": 0},
+        {"date": "2026-08-20", "weekday": "THU", "reports": [], "more": 0, "total": 0},
+        {
+            "date": "2026-08-21",
+            "weekday": "FRI",
+            "reports": [
+                {
+                    "symbol": "UI",
+                    "name": "Ubiquiti Inc.",
+                    "session": "bmo",
+                    "eps_estimate": 4.15,
+                    "implied_move_pct": None,
+                    "last4q": [False, True, True, True],
+                    "held": False,
+                }
+            ],
+            "more": 1,
+            "total": 2,
+        },
+    ],
+}
 
 
 # Two-group trends fixture: a tradfi band that finishes +9.5% (avg 109.5 vs

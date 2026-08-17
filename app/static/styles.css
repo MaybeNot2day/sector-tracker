@@ -2299,6 +2299,201 @@ a.key-date-row:focus-visible {
   background: #fff;
 }
 
+/* --- Earnings view ---------------------------------------------------------- */
+.earnings-tools {
+  align-items: center;
+  justify-content: space-between;
+}
+
+.earnings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(430px, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+.earnings-day {
+  display: grid;
+  grid-template-columns: 58px 1fr;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: inset 0 1px 0 var(--panel-top-light), var(--panel-shadow);
+}
+
+.earnings-date {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 14px 6px;
+  border-right: 1px solid var(--line);
+  background: var(--surface-raised);
+}
+
+.earnings-date strong {
+  font-family: var(--font-mono);
+  font-size: 24px;
+  line-height: 1;
+}
+
+.earnings-date span {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+}
+
+.earnings-rows {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.earnings-row {
+  display: grid;
+  grid-template-columns: 16px 52px minmax(0, 1fr) 52px 46px 64px;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 12px;
+}
+
+.earnings-row:last-of-type {
+  border-bottom: 0;
+}
+
+.earnings-row.earnings-head {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  padding-bottom: 4px;
+}
+
+.earnings-row strong {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.02em;
+}
+
+.earnings-row.earnings-held {
+  background: var(--surface-soft);
+  box-shadow: inset 2px 0 0 var(--accent-dim);
+}
+
+.earnings-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--muted-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.held-chip {
+  flex: none;
+  padding: 1px 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--muted-strong);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+
+.earnings-eps,
+.earnings-impl {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.earnings-marks {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  font-size: 10px;
+}
+
+.earnings-marks i {
+  font-style: normal;
+}
+
+.earnings-marks .beat {
+  color: var(--green);
+}
+
+.earnings-marks .miss {
+  color: var(--red);
+}
+
+.earnings-marks .unknown {
+  color: var(--muted);
+}
+
+.earnings-more {
+  padding: 7px 10px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.session-icon {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  font-style: normal;
+}
+
+.session-icon.session-bmo {
+  background: radial-gradient(circle at 50% 100%, #e8b64c 60%, transparent 61%);
+  border-bottom: 1px solid #e8b64c;
+  border-radius: 0;
+  height: 7px;
+  align-self: center;
+}
+
+.session-icon.session-amc {
+  background: transparent;
+  box-shadow: inset -3px -2px 0 0 #8fa9e8;
+}
+
+.session-icon.session-tns {
+  border: 1.5px solid var(--muted);
+}
+
+.earnings-legend .session-icon {
+  vertical-align: middle;
+  margin-right: 2px;
+}
+
+@media (max-width: 700px) {
+  .earnings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .earnings-row {
+    grid-template-columns: 14px 48px minmax(0, 1fr) 48px 60px;
+  }
+
+  .earnings-impl {
+    display: none;
+  }
+
+  .earnings-row.earnings-head span:nth-child(5) {
+    display: none;
+  }
+}
+
 /* --- Watch view ------------------------------------------------------------ */
 .watch-tools {
   align-items: center;
