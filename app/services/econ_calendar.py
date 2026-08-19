@@ -564,6 +564,62 @@ class EconCalendarService:
             self._client = None
 
 
+# Zones agents use interchangeably with the base zone; normalized before
+# comparing two rows' clock times for duplicate detection.
+_ZONE_EQUIVALENTS = {"CEST": "CET", "EST": "ET", "EDT": "ET", "BST": "GMT"}
+
+
+def _normalized_time(value: object) -> str | None:
+    """ "20:00 CEST" -> "20:00 CET": zone-equivalent wall clock for dedup."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    parts = value.split()
+    if len(parts) == 2 and parts[1] in _ZONE_EQUIVALENTS:
+        return f"{parts[0]} {_ZONE_EQUIVALENTS[parts[1]]}"
+    return value
+
+
+def _titles_duplicate(a: frozenset[str], b: frozenset[str]) -> bool:
+    """Same print: equal token sets, or the smaller (2+ tokens) contained."""
+    if not a or not b:
+        return False
+    smaller, bigger = (a, b) if len(a) <= len(b) else (b, a)
+    return len(smaller) >= 2 and smaller <= bigger
+
+
+def _dedupe_key_dates(items: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Collapse fuzzy same-day duplicates (two briefs titling one release).
+
+    Rows merge only when the normalized title token sets match AND the clock
+    times are compatible (equal after zone normalization, or one missing).
+    The enriched row (a matched release) wins; then the one with a time.
+    """
+    kept: list[tuple[dict[str, object], frozenset[str], str | None]] = []
+    for item in items:
+        tokens = _normalize_row_title(str(item.get("title") or ""))
+        stamp = _normalized_time(item.get("time"))
+        hit = None
+        for entry in kept:
+            existing, existing_tokens, existing_stamp = entry
+            if str(existing.get("date")) != str(item.get("date")):
+                continue
+            if not _titles_duplicate(existing_tokens, tokens):
+                continue
+            if existing_stamp is not None and stamp is not None and existing_stamp != stamp:
+                continue
+            hit = entry
+            break
+        if hit is None:
+            kept.append((item, tokens, stamp))
+            continue
+        existing = hit[0]
+        item_enriched = item.get("release") is not None
+        existing_enriched = existing.get("release") is not None
+        if item_enriched and not existing_enriched:
+            kept[kept.index(hit)] = (item, tokens, stamp)
+    return [item for item, _, _ in kept]
+
+
 def _iso_z(moment: datetime) -> str:
     return moment.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
@@ -617,4 +673,5 @@ async def key_dates_payload(
                 if parsed is not None:
                     moment = parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
         item["time_utc"] = moment
+    items = _dedupe_key_dates(items)
     return {"key_dates": items, "as_of": today.isoformat()}

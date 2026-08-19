@@ -34,6 +34,7 @@ from app.services.econ_calendar import (
     HOT_TTL_SECONDS,
     CalendarRow,
     EconCalendarService,
+    _dedupe_key_dates,
     _is_hot,
     any_hot_release,
     format_display,
@@ -669,3 +670,58 @@ def _stored_event_utc() -> str:
         tzinfo=ZoneInfo("America/New_York")
     )
     return local.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_dedupe_collapses_zone_variants_and_prefers_enriched() -> None:
+    items: list[dict[str, object]] = [
+        {
+            "date": "2026-08-19",
+            "time": "20:00 CEST",
+            "title": "US FOMC Minutes (July)",
+            "release": None,
+        },
+        # Same release titled differently by a second brief; CET≡CEST here.
+        {
+            "date": "2026-08-19",
+            "time": "20:00 CET",
+            "title": "FOMC Minutes (July 28–29)",
+            "release": {"actual": "x"},
+        },
+        # Distinct events on the same day survive.
+        {
+            "date": "2026-08-19",
+            "time": "16:30 CET",
+            "title": "US EIA Crude Oil Inventories",
+            "release": None,
+        },
+        # A same-name print at a different clock time is a different event.
+        {
+            "date": "2026-08-19",
+            "time": "09:00 CET",
+            "title": "FOMC Minutes (July)",
+            "release": None,
+        },
+    ]
+    kept = _dedupe_key_dates(items)
+    assert [item["title"] for item in kept] == [
+        "FOMC Minutes (July 28–29)",  # enriched row replaces the bare twin
+        "US EIA Crude Oil Inventories",
+        "FOMC Minutes (July)",
+    ]
+
+
+def test_route_collapses_fuzzy_same_day_duplicates(key_dates_app: Any) -> None:
+    database_path = key_dates_app.settings.database_path
+    db.replace_key_dates(
+        database_path,
+        slug="brief-a",
+        events=[(eastern(1), "20:00 CEST", "US FOMC Minutes (July)", "EVENT")],
+    )
+    db.replace_key_dates(
+        database_path,
+        slug="brief-b",
+        events=[(eastern(1), "20:00 CET", "FOMC Minutes (July 28–29)", "EVENT")],
+    )
+    payload = TestClient(app).get("/api/key-dates").json()
+    titles = [item["title"] for item in payload["key_dates"]]
+    assert titles == ["US Initial Jobless Claims", "US FOMC Minutes (July)"]
