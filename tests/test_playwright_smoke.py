@@ -355,7 +355,7 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
     page.goto(f"{base_url}/#view=ai", wait_until="domcontentloaded")
     expect(page.locator("#ai-view")).to_be_visible()
     expect(page.locator("#ai-tab")).to_have_attribute("aria-selected", "true")
-    page.set_viewport_size({"width": 1568, "height": 900})
+    page.set_viewport_size({"width": 1920, "height": 900})
     header_layout = page.locator(".app-header").evaluate(
         """header => {
           const tabs = header.querySelector('.view-tabs');

@@ -409,7 +409,7 @@ p {
   z-index: 20;
   min-height: 54px;
   display: grid;
-  grid-template-columns: minmax(360px, auto) minmax(280px, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: stretch;
   border-bottom: 1px solid var(--line);
   background: var(--surface);
@@ -417,6 +417,8 @@ p {
 }
 
 .brand {
+  grid-column: 1;
+  grid-row: 1;
   min-width: 0;
   display: flex;
   align-items: center;
@@ -479,15 +481,20 @@ h1 {
 }
 
 .view-tabs {
+  grid-column: 1 / -1;
+  grid-row: 2;
   min-width: 0;
   display: flex;
   align-items: stretch;
   gap: 0;
   padding: 0 6px;
+  border-top: 1px solid var(--line);
 }
 
 .view-tabs button {
-  min-width: 100px;
+  min-width: 0;
+  min-height: 34px;
+  flex: 1;
   border: 0;
   border-bottom: 2px solid transparent;
   background: transparent;
@@ -515,6 +522,8 @@ h1 {
 }
 
 .topbar-actions {
+  grid-column: 2;
+  grid-row: 1;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -4373,43 +4382,13 @@ a.key-date-row:focus-visible {
   }
 }
 
-@media (max-width: 1680px) {
-  .app-header {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-
-  .view-tabs {
-    grid-column: 1 / -1;
-    grid-row: 2;
-    border-top: 1px solid var(--line);
-  }
-
-  .view-tabs button {
-    min-width: 92px;
-    min-height: 34px;
-    flex: 1 0 92px;
-  }
-}
-
 
 @media (max-width: 1050px) {
-  .app-header {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
 
   .topbar-actions .live-badge {
     display: none;
   }
 
-  .view-tabs {
-    grid-column: 1 / -1;
-    grid-row: 2;
-    border-top: 1px solid var(--line);
-  }
-
-  .view-tabs button {
-    min-height: 34px;
-  }
 
   .market-tools {
     flex-wrap: wrap;
@@ -4470,9 +4449,6 @@ a.key-date-row:focus-visible {
 }
 
 @media (max-width: 700px) {
-  .app-header {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
 
   .status-strip,
   .macro-strip {
@@ -4537,10 +4513,6 @@ a.key-date-row:focus-visible {
     white-space: nowrap;
   }
 
-  .view-tabs button {
-    min-width: 0;
-    flex: 1;
-  }
 
   .workspace {
     padding: 10px;
