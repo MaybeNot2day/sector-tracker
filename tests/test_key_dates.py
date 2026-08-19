@@ -121,6 +121,34 @@ def test_bullet_grammar(bullet: str, expected: KeyDate) -> None:
     assert parse_key_dates(f"## Key Dates\n{bullet}\n") == [expected]
 
 
+def test_relative_calendar_bullets_anchor_to_the_report_date() -> None:
+    """Compact bullets with a bare time (no ISO date) feed the panel too."""
+    body = (
+        "## Economic Calendar (CET) [CEST now]\n"
+        "- **07:00 CEST — UK CPI/CPIH (July), already released:** +2.9% y/y "
+        "([ONS](https://www.ons.gov.uk/x))\n"
+        "- **20:00 CEST — US FOMC Minutes (July)** — consensus: none published "
+        "([Fed](https://www.federalreserve.gov/x))\n"
+        "- watch for late headlines\n"
+    )
+    events = parse_key_dates(body, default_date="2026-08-19")
+    assert events == [
+        KeyDate("2026-08-19", "07:00 CEST", "UK CPI/CPIH (July), already released", "EVENT"),
+        KeyDate("2026-08-19", "20:00 CEST", "US FOMC Minutes (July)", "EVENT"),
+    ]
+
+    # Heading zone fills a zone-less bullet time; the bullet's own zone wins.
+    body = "## Economic Calendar (CEST)\n- 14:30 — US PPI\n- 08:30 ET — Jobless Claims\n"
+    events = parse_key_dates(body, default_date="2026-08-19")
+    assert events == [
+        KeyDate("2026-08-19", "14:30 CEST", "US PPI", "EVENT"),
+        KeyDate("2026-08-19", "08:30 ET", "Jobless Claims", "EVENT"),
+    ]
+
+    # Without any anchor a bare-time bullet is dropped, never guessed.
+    assert parse_key_dates("## Economic Calendar\n- 14:30 — US PPI\n") == []
+
+
 @pytest.mark.parametrize(
     "bullet",
     [

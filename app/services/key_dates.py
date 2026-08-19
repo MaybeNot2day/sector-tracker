@@ -62,6 +62,17 @@ _EVENT = re.compile(
     """,
     re.VERBOSE,
 )
+# Compact calendar bullets without an ISO date: "20:00 CEST — FOMC Minutes —
+# consensus ...". The date comes from the section's running anchor (a pinned
+# subheading or the report date), the zone from the bullet or heading.
+_RELATIVE_EVENT = re.compile(
+    r"""
+    ^(?P<time>\d{1,2}:\d{2}(?:\s?[A-Za-z]{2,4})?)     # 08:30, 22:00 ET, 9:45CET
+    \s*(?:[—–]|-(?=\s)|:(?=\s))\s*                # — – " - " ": " separator
+    (?P<rest>.+)$
+    """,
+    re.VERBOSE,
+)
 _ISO_DATE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 _TIME = re.compile(r"\b(\d{1,2}:\d{2})\b")
 # Session tokens legal in when-cells/bullets in place of a clock time.
@@ -170,14 +181,14 @@ def parse_key_dates(body: str, *, default_date: str | None = None) -> list[KeyDa
 def _parse_section_line(line: str, current: date | None, zone: str | None) -> KeyDate | None:
     bullet = _BULLET.match(line)
     if bullet is not None:
-        return _parse_bullet(bullet.group(1))
+        return _parse_bullet(bullet.group(1), current, zone)
     return _parse_table_row(line, current, zone)
 
 
-def _parse_bullet(text: str) -> KeyDate | None:
+def _parse_bullet(text: str, current: date | None, zone: str | None) -> KeyDate | None:
     match = _EVENT.match(text)
     if match is None:
-        return None
+        return _parse_relative_bullet(text, current, zone)
     date_text = match.group("date")
     if _parse_iso(date_text) is None:
         # The regex admits non-calendar dates like 2026-02-31; drop them.
@@ -197,6 +208,36 @@ def _parse_bullet(text: str) -> KeyDate | None:
         time=" ".join(time_text.split())[:_MAX_TIME] if time_text else None,
         title=title,
         category=normalized_category,
+    )
+
+
+def _parse_relative_bullet(text: str, current: date | None, zone: str | None) -> KeyDate | None:
+    """Compact calendar bullet with a bare time; anchored to the section date."""
+    if current is None:
+        return None
+    plain = text.translate(_MD_MARKS).strip()
+    match = _RELATIVE_EVENT.match(plain)
+    if match is None:
+        return None
+    # The title is the first segment; consensus/commentary trails a later
+    # dash or colon (the compact contract writes "**time — Event:** ...").
+    title = _clean_title(re.split(r"\s[—–]\s|:\s", match.group("rest"), maxsplit=1)[0])
+    title = title.rstrip(":").strip()
+    if not title:
+        return None
+    time_text = " ".join(match.group("time").split())
+    time_match = _TIME.search(time_text)
+    if time_match is None:
+        return None
+    # The bullet's own zone wins over the section heading zone.
+    zone_match = _ZONE.search(time_text)
+    time_zone = zone_match.group(1) if zone_match else zone
+    stamp = f"{time_match.group(1)} {time_zone}" if time_zone else time_match.group(1)
+    return KeyDate(
+        date=current.isoformat(),
+        time=stamp[:_MAX_TIME],
+        title=title,
+        category=_infer_category(title, DEFAULT_CATEGORY),
     )
 
 
