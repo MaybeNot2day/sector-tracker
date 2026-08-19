@@ -29,7 +29,7 @@ const aiTokenIndexPanel = document.querySelector("#ai-token-index-panel");
 const aiDataStatus = document.querySelector("#ai-data-status");
 const aiModelSearch = document.querySelector("#ai-model-search");
 const aiModelFilters = document.querySelector("#ai-model-filters");
-const aiModelSort = document.querySelector("#ai-model-sort");
+const aiProviderFilterSelect = document.querySelector("#ai-provider-filter");
 const aiModelsSummary = document.querySelector("#ai-models-summary");
 const aiModelsBoard = document.querySelector("#ai-models-board");
 const aiIndexBoard = document.querySelector("#ai-index-board");
@@ -163,6 +163,8 @@ let aiModelsFetchedAt = 0;
 let aiModelsLoading = false;
 let aiModelQuery = "";
 let aiModelFilter = "all";
+let aiProviderFilter = "all";
+let aiModelSort = { key: "blended", direction: "asc" };
 let latestAiIndex = null;
 let aiIndexFetchedAt = 0;
 let aiIndexLoading = false;
@@ -695,7 +697,14 @@ function init() {
     });
     renderAiModels();
   });
-  aiModelSort.addEventListener("change", renderAiModels);
+  aiProviderFilterSelect.addEventListener("change", () => {
+    aiProviderFilter = aiProviderFilterSelect.value;
+    renderAiModels();
+  });
+  aiModelsBoard.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-ai-sort]");
+    if (button) selectAiModelSort(button.dataset.aiSort || "model");
+  });
   marketSearch.addEventListener("input", scheduleMarketSearch);
   marketSearch.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
@@ -6695,6 +6704,7 @@ async function fetchAiModels(force = false) {
     const response = await fetch("/api/ai/models");
     if (!response.ok) throw new Error(`models_${response.status}`);
     latestAiModels = await response.json();
+    syncAiProviderFilter();
     aiModelsFetchedAt = Date.now();
     renderAiModels();
     aiDataStatus.textContent = `OpenRouter · ${latestAiModels.summary?.models || 0} text models`;
@@ -6710,6 +6720,91 @@ async function fetchAiModels(force = false) {
   } finally {
     aiModelsLoading = false;
   }
+}
+
+function syncAiProviderFilter() {
+  const counts = new Map();
+  for (const model of latestAiModels?.models || []) {
+    const provider = String(model.provider || "Unknown");
+    counts.set(provider, (counts.get(provider) || 0) + 1);
+  }
+  const providers = [...counts.keys()].sort((a, b) => a.localeCompare(b));
+  if (aiProviderFilter !== "all" && !counts.has(aiProviderFilter)) {
+    aiProviderFilter = "all";
+  }
+  const fragment = document.createDocumentFragment();
+  const allOption = document.createElement("option");
+  allOption.value = "all";
+  allOption.textContent = `All providers (${providers.length})`;
+  fragment.append(allOption);
+  for (const provider of providers) {
+    const option = document.createElement("option");
+    option.value = provider;
+    option.textContent = `${provider} (${counts.get(provider)})`;
+    fragment.append(option);
+  }
+  aiProviderFilterSelect.replaceChildren(fragment);
+  aiProviderFilterSelect.value = aiProviderFilter;
+}
+
+function selectAiModelSort(key) {
+  const allowed = new Set([
+    "model",
+    "provider",
+    "input",
+    "output",
+    "blended",
+    "context",
+    "intelligence",
+  ]);
+  if (!allowed.has(key)) return;
+  if (aiModelSort.key === key) {
+    aiModelSort = {
+      key,
+      direction: aiModelSort.direction === "asc" ? "desc" : "asc",
+    };
+  } else {
+    const ascending = ["model", "provider", "input", "output", "blended"].includes(key);
+    aiModelSort = { key, direction: ascending ? "asc" : "desc" };
+  }
+  renderAiModels();
+}
+
+function compareAiModels(left, right) {
+  const fields = {
+    input: "input_price_per_million",
+    output: "output_price_per_million",
+    blended: "blended_price_per_million",
+    context: "context_length",
+    intelligence: "intelligence_index",
+  };
+  let result;
+  if (aiModelSort.key === "model" || aiModelSort.key === "provider") {
+    const field = aiModelSort.key === "model" ? "name" : "provider";
+    result = String(left[field] || "").localeCompare(String(right[field] || ""), undefined, {
+      sensitivity: "base",
+    });
+    if (aiModelSort.direction === "desc") result *= -1;
+  } else {
+    const field = fields[aiModelSort.key] || fields.blended;
+    result = aiSortNumber(left[field], right[field], aiModelSort.direction);
+  }
+  return result || String(left.name).localeCompare(String(right.name));
+}
+
+function aiSortableHeader(label, key) {
+  const active = aiModelSort.key === key;
+  const direction = active ? aiModelSort.direction : null;
+  const ariaSort = direction === "asc" ? "ascending" : direction === "desc" ? "descending" : "none";
+  const indicator = direction === "asc" ? "↑" : direction === "desc" ? "↓" : "↕";
+  return `
+    <th aria-sort="${ariaSort}">
+      <button class="ai-sort-button${active ? " active" : ""}" type="button"
+        data-ai-sort="${key}" aria-label="Sort by ${escapeHtml(label)}">
+        <span>${escapeHtml(label)}</span><i aria-hidden="true">${indicator}</i>
+      </button>
+    </th>
+  `;
 }
 
 function renderAiModels() {
@@ -6730,18 +6825,11 @@ function renderAiModels() {
   let models = latestAiModels.models.filter((model) => {
     if (aiModelFilter === "open" && !model.is_open_weight) return false;
     if (aiModelFilter === "free" && !model.is_free) return false;
+    if (aiProviderFilter !== "all" && model.provider !== aiProviderFilter) return false;
     if (!aiModelQuery) return true;
     return `${model.name} ${model.provider} ${model.id}`.toLowerCase().includes(aiModelQuery);
   });
-  const sort = aiModelSort.value;
-  models = [...models].sort((a, b) => {
-    if (sort === "name") return String(a.name).localeCompare(String(b.name));
-    if (sort === "context") return aiSortNumber(b.context_length, a.context_length);
-    if (sort === "intelligence") {
-      return aiSortNumber(b.intelligence_index, a.intelligence_index);
-    }
-    return aiSortNumber(a.blended_price_per_million, b.blended_price_per_million);
-  });
+  models = [...models].sort(compareAiModels);
 
   if (!models.length) {
     aiModelsBoard.innerHTML =
@@ -6769,8 +6857,13 @@ function renderAiModels() {
     <div class="ai-table-wrap">
       <table class="ai-table">
         <thead><tr>
-          <th>Model</th><th>Provider</th><th>Input / 1M</th><th>Output / 1M</th>
-          <th>Blended 3:1</th><th>Context</th><th>Intelligence</th>
+          ${aiSortableHeader("Model", "model")}
+          ${aiSortableHeader("Provider", "provider")}
+          ${aiSortableHeader("Input / 1M", "input")}
+          ${aiSortableHeader("Output / 1M", "output")}
+          ${aiSortableHeader("Blended 3:1", "blended")}
+          ${aiSortableHeader("Context", "context")}
+          ${aiSortableHeader("Intelligence", "intelligence")}
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
@@ -6874,7 +6967,7 @@ function aiIndexChart(series) {
   const values = rows.flatMap((row) => keys.map((key) => Number(row[key])).filter(Number.isFinite));
   if (!values.length) return '<div class="empty-state">No priced observations</div>';
   const width = 760;
-  const height = 210;
+  const height = 320;
   const pad = { left: 54, right: 14, top: 16, bottom: 27 };
   let min = Math.min(...values);
   let max = Math.max(...values);
@@ -6925,14 +7018,14 @@ function aiMetric(label, value, note) {
   `;
 }
 
-function aiSortNumber(left, right) {
-  if (left === null || left === undefined) return 1;
-  if (right === null || right === undefined) return -1;
-  const leftNumber = Number(left);
-  const rightNumber = Number(right);
-  if (!Number.isFinite(leftNumber)) return 1;
-  if (!Number.isFinite(rightNumber)) return -1;
-  return leftNumber - rightNumber;
+function aiSortNumber(left, right, direction) {
+  const leftMissing = left === null || left === undefined || !Number.isFinite(Number(left));
+  const rightMissing = right === null || right === undefined || !Number.isFinite(Number(right));
+  if (leftMissing && rightMissing) return 0;
+  if (leftMissing) return 1;
+  if (rightMissing) return -1;
+  const result = Number(left) - Number(right);
+  return direction === "desc" ? -result : result;
 }
 
 function formatAiPrice(value) {

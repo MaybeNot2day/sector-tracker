@@ -317,6 +317,21 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
     expect(page.locator("#ai-models-summary .ai-metric")).to_have_count(5)
     expect(page.locator("#ai-models-board tbody tr")).to_have_count(2)
     expect(page.locator("#ai-data-status")).to_contain_text("2 text models")
+    first_model = page.locator("#ai-models-board tbody tr").first
+    expect(first_model).to_contain_text("Model A")
+
+    page.locator("#ai-provider-filter").select_option("Closed Inc")
+    expect(page.locator("#ai-models-board tbody tr")).to_have_count(1)
+    expect(first_model).to_contain_text("Model B")
+    page.locator("#ai-provider-filter").select_option("all")
+
+    context_sort = page.locator('button[data-ai-sort="context"]')
+    context_sort.click()
+    expect(first_model).to_contain_text("Model A")
+    expect(context_sort.locator("xpath=..")).to_have_attribute("aria-sort", "descending")
+    context_sort.click()
+    expect(first_model).to_contain_text("Model B")
+    expect(context_sort.locator("xpath=..")).to_have_attribute("aria-sort", "ascending")
 
     page.locator("#ai-model-search").fill("Closed")
     expect(page.locator("#ai-models-board tbody tr")).to_have_count(1)
@@ -331,12 +346,29 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
     expect(page.locator("#ai-models-panel")).to_be_hidden()
     expect(page.locator("#ai-index-board .ai-metric")).to_have_count(5)
     expect(page.locator("#ai-index-board .series-main")).to_be_visible()
+    chart_box = page.locator("#ai-index-board .ai-index-chart").bounding_box()
+    assert chart_box is not None
+    assert chart_box["height"] >= 300
     expect(page.locator("#ai-index-board tbody tr")).to_have_count(2)
     expect(page.locator("#ai-index-board")).to_contain_text("OpenRouter market proxy")
 
     page.goto(f"{base_url}/#view=ai", wait_until="domcontentloaded")
     expect(page.locator("#ai-view")).to_be_visible()
     expect(page.locator("#ai-tab")).to_have_attribute("aria-selected", "true")
+    page.set_viewport_size({"width": 1568, "height": 900})
+    header_layout = page.locator(".app-header").evaluate(
+        """header => {
+          const tabs = header.querySelector('.view-tabs');
+          const actions = header.querySelector('.topbar-actions');
+          const tabBox = tabs.getBoundingClientRect();
+          const actionBox = actions.getBoundingClientRect();
+          return {
+            separateRows: tabBox.top >= actionBox.bottom - 1,
+            tabsFit: tabs.scrollWidth <= tabs.clientWidth,
+          };
+        }"""
+    )
+    assert header_layout == {"separateRows": True, "tabsFit": True}
 
 
 def test_closed_news_panel_is_inert_until_opened(page: Page, base_url: str) -> None:
