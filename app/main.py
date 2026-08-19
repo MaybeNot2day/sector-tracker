@@ -55,6 +55,7 @@ from app.scheduler import (
     quote_poll_loop,
     stop_task,
 )
+from app.services.ai_data import AIDataError, AIDataService
 from app.services.asset_profile import AssetProfileService
 from app.services.component_trends import (
     component_trends_payload,
@@ -204,6 +205,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         countries=settings.econ_calendar_countries,
     )
     app.state.earnings_service = EarningsCalendarService()
+    app.state.ai_data_service = AIDataService(settings.database_path)
     app.state.connection_manager = ConnectionManager()
     app.state.watchlist_lock = asyncio.Lock()
     app.state.poll_task = None
@@ -253,6 +255,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.options_service.aclose(),
             app.state.econ_calendar_service.aclose(),
             app.state.earnings_service.aclose(),
+            app.state.ai_data_service.aclose(),
             return_exceptions=True,
         )
 
@@ -933,6 +936,26 @@ async def snapshots(days: int = Query(default=30, ge=1, le=365)) -> dict[str, ob
     """Persisted daily-board history: regime, breadth, and theme scores by date."""
     rows = await asyncio.to_thread(db.load_board_snapshots, app.state.settings.database_path, days)
     return {"snapshots": rows}
+
+
+@app.get("/api/ai/models")
+async def ai_models() -> dict[str, object]:
+    """Current text-model catalog and normalized token prices."""
+    try:
+        service = cast(AIDataService, app.state.ai_data_service)
+        return await service.get_models()
+    except AIDataError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/ai/token-index")
+async def ai_token_index() -> dict[str, object]:
+    """Usage-weighted token-price proxy built from public OpenRouter data."""
+    try:
+        service = cast(AIDataService, app.state.ai_data_service)
+        return await service.get_token_index()
+    except AIDataError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 # Trend bands aggregate every cached daily bar on each call; a short TTL

@@ -149,6 +149,37 @@ CREATE TABLE IF NOT EXISTS etf_flow_history (
     flow REAL NOT NULL,
     PRIMARY KEY (asset, flow_date)
 );
+
+CREATE TABLE IF NOT EXISTS ai_model_snapshots (
+    snapshot_date TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    name TEXT NOT NULL,
+    input_price_per_million REAL NOT NULL,
+    output_price_per_million REAL NOT NULL,
+    cache_read_price_per_million REAL,
+    blended_price_per_million REAL NOT NULL,
+    context_length INTEGER,
+    is_open_weight INTEGER NOT NULL,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (snapshot_date, model_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_model_snapshots_model_date
+ON ai_model_snapshots (model_id, snapshot_date DESC);
+
+CREATE TABLE IF NOT EXISTS ai_token_index (
+    index_date TEXT PRIMARY KEY,
+    index_price REAL NOT NULL,
+    open_price REAL,
+    proprietary_price REAL,
+    total_tokens INTEGER NOT NULL,
+    priced_tokens INTEGER NOT NULL,
+    coverage_pct REAL NOT NULL,
+    open_share_pct REAL NOT NULL,
+    model_count INTEGER NOT NULL,
+    fetched_at TEXT NOT NULL
+);
 """
 _initialized_paths: set[Path] = set()
 _init_lock = Lock()
@@ -1294,6 +1325,138 @@ def load_etf_flow_history(path: Path, *, start: str) -> dict[str, list[dict[str,
             {"date": str(row["flow_date"]), "flow": float(row["flow"])}
         )
     return grouped
+
+
+
+# --- AI model pricing and usage-weighted index ---------------------------
+
+
+def save_ai_model_snapshots(
+    path: Path,
+    snapshot_date: str,
+    models: Sequence[dict[str, object]],
+) -> None:
+    """Persist one point-in-time price row per normalized model."""
+    if not models:
+        return
+    init_db(path)
+    fetched_at = datetime.now(UTC).isoformat()
+    rows = [
+        (
+            snapshot_date,
+            str(model["id"]),
+            str(model["provider"]),
+            str(model["name"]),
+            float(cast(float, model["input_price_per_million"])),
+            float(cast(float, model["output_price_per_million"])),
+            model.get("cache_read_price_per_million"),
+            float(cast(float, model["blended_price_per_million"])),
+            model.get("context_length"),
+            int(bool(model["is_open_weight"])),
+            fetched_at,
+        )
+        for model in models
+    ]
+    with _connect(path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO ai_model_snapshots (
+                snapshot_date, model_id, provider, name,
+                input_price_per_million, output_price_per_million,
+                cache_read_price_per_million, blended_price_per_million,
+                context_length, is_open_weight, fetched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(snapshot_date, model_id) DO UPDATE SET
+                provider = excluded.provider,
+                name = excluded.name,
+                input_price_per_million = excluded.input_price_per_million,
+                output_price_per_million = excluded.output_price_per_million,
+                cache_read_price_per_million = excluded.cache_read_price_per_million,
+                blended_price_per_million = excluded.blended_price_per_million,
+                context_length = excluded.context_length,
+                is_open_weight = excluded.is_open_weight,
+                fetched_at = excluded.fetched_at
+            """,
+            rows,
+        )
+
+
+def save_ai_token_index_points(
+    path: Path,
+    points: Sequence[dict[str, object]],
+) -> None:
+    """Upsert daily OpenRouter usage-weighted price-index observations."""
+    if not points:
+        return
+    init_db(path)
+    fetched_at = datetime.now(UTC).isoformat()
+    rows = [
+        (
+            str(point["date"]),
+            float(cast(float, point["index_price"])),
+            point.get("open_price"),
+            point.get("proprietary_price"),
+            int(cast(int, point["total_tokens"])),
+            int(cast(int, point["priced_tokens"])),
+            float(cast(float, point["coverage_pct"])),
+            float(cast(float, point["open_share_pct"])),
+            int(cast(int, point["model_count"])),
+            fetched_at,
+        )
+        for point in points
+    ]
+    with _connect(path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO ai_token_index (
+                index_date, index_price, open_price, proprietary_price,
+                total_tokens, priced_tokens, coverage_pct, open_share_pct,
+                model_count, fetched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(index_date) DO UPDATE SET
+                index_price = excluded.index_price,
+                open_price = excluded.open_price,
+                proprietary_price = excluded.proprietary_price,
+                total_tokens = excluded.total_tokens,
+                priced_tokens = excluded.priced_tokens,
+                coverage_pct = excluded.coverage_pct,
+                open_share_pct = excluded.open_share_pct,
+                model_count = excluded.model_count,
+                fetched_at = excluded.fetched_at
+            """,
+            rows,
+        )
+
+
+def load_ai_token_index_points(path: Path, limit: int) -> list[dict[str, object]]:
+    """Load the newest daily index observations in ascending date order."""
+    init_db(path)
+    with _connect(path) as conn:
+        rows = conn.execute(
+            """
+            SELECT index_date, index_price, open_price, proprietary_price,
+                   total_tokens, priced_tokens, coverage_pct, open_share_pct,
+                   model_count
+            FROM ai_token_index
+            ORDER BY index_date DESC
+            LIMIT ?
+            """,
+            (max(1, limit),),
+        ).fetchall()
+    return [
+        {
+            "date": str(row["index_date"]),
+            "index_price": float(row["index_price"]),
+            "open_price": _optional_float(row["open_price"]),
+            "proprietary_price": _optional_float(row["proprietary_price"]),
+            "total_tokens": int(row["total_tokens"]),
+            "priced_tokens": int(row["priced_tokens"]),
+            "coverage_pct": float(row["coverage_pct"]),
+            "open_share_pct": float(row["open_share_pct"]),
+            "model_count": int(row["model_count"]),
+        }
+        for row in reversed(rows)
+    ]
 
 
 _MD_NOISE = str.maketrans({"#": None, "*": None, "`": None, ">": None, "|": None, "_": None})

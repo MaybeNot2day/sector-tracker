@@ -308,6 +308,37 @@ def test_fringe_tab_renders_portfolio_curve_and_history(page: Page, base_url: st
     expect(page.locator("#fringe-tab")).to_have_attribute("aria-selected", "true")
 
 
+def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: str) -> None:
+    _goto_board(page, base_url)
+
+    page.locator("#ai-tab").click()
+    expect(page.locator("#ai-view")).to_be_visible()
+    expect(page.locator("#daily-view")).to_be_hidden()
+    expect(page.locator("#ai-models-summary .ai-metric")).to_have_count(5)
+    expect(page.locator("#ai-models-board tbody tr")).to_have_count(2)
+    expect(page.locator("#ai-data-status")).to_contain_text("2 text models")
+
+    page.locator("#ai-model-search").fill("Closed")
+    expect(page.locator("#ai-models-board tbody tr")).to_have_count(1)
+    expect(page.locator("#ai-models-board tbody tr")).to_contain_text("Model B")
+    page.locator("#ai-model-search").fill("")
+    page.get_by_role("button", name="Open-weight", exact=True).click()
+    expect(page.locator("#ai-models-board tbody tr")).to_have_count(1)
+    expect(page.locator("#ai-models-board tbody tr")).to_contain_text("Model A")
+
+    page.locator("#ai-token-index-tab").click()
+    expect(page.locator("#ai-token-index-panel")).to_be_visible()
+    expect(page.locator("#ai-models-panel")).to_be_hidden()
+    expect(page.locator("#ai-index-board .ai-metric")).to_have_count(5)
+    expect(page.locator("#ai-index-board .series-main")).to_be_visible()
+    expect(page.locator("#ai-index-board tbody tr")).to_have_count(2)
+    expect(page.locator("#ai-index-board")).to_contain_text("OpenRouter market proxy")
+
+    page.goto(f"{base_url}/#view=ai", wait_until="domcontentloaded")
+    expect(page.locator("#ai-view")).to_be_visible()
+    expect(page.locator("#ai-tab")).to_have_attribute("aria-selected", "true")
+
+
 def test_closed_news_panel_is_inert_until_opened(page: Page, base_url: str) -> None:
     _goto_board(page, base_url)
     panel = page.locator("#news-panel")
@@ -1720,6 +1751,99 @@ def test_untrusted_external_urls_never_become_clickable_links(
     assert unsafe_component.evaluate("(element) => element.tagName") == "DIV"
 
 
+AI_MODELS_PAYLOAD: dict[str, Any] = {
+    "as_of": "2026-08-19T09:00:00Z",
+    "source": {"name": "OpenRouter", "url": "https://openrouter.ai/api/v1/models"},
+    "summary": {
+        "models": 2,
+        "providers": 2,
+        "open_weight": 1,
+        "free": 0,
+        "median_blended_price": 2.0,
+    },
+    "models": [
+        {
+            "id": "open/model-a",
+            "name": "Open Labs: Model A",
+            "provider": "Open Labs",
+            "input_price_per_million": 1.0,
+            "output_price_per_million": 3.0,
+            "blended_price_per_million": 1.5,
+            "context_length": 128000,
+            "intelligence_index": 42.0,
+            "is_open_weight": True,
+            "is_free": False,
+        },
+        {
+            "id": "closed/model-b",
+            "name": "Closed Inc: Model B",
+            "provider": "Closed Inc",
+            "input_price_per_million": 2.0,
+            "output_price_per_million": 4.0,
+            "blended_price_per_million": 2.5,
+            "context_length": 64000,
+            "intelligence_index": None,
+            "is_open_weight": False,
+            "is_free": False,
+        },
+    ],
+}
+
+AI_TOKEN_INDEX_PAYLOAD: dict[str, Any] = {
+    "as_of": "2026-08-18",
+    "source": {
+        "name": "OpenRouter Rankings",
+        "url": "https://openrouter.ai/rankings",
+        "attribution": "Source: OpenRouter (openrouter.ai/rankings), as of 2026-08-18.",
+    },
+    "methodology": {
+        "description": "Observed prompt and completion tokens are priced separately.",
+        "open_weight_proxy": True,
+    },
+    "latest": {
+        "date": "2026-08-18",
+        "index_price": 2.0,
+        "open_price": 1.5,
+        "proprietary_price": 3.0,
+        "total_tokens": 600,
+        "priced_tokens": 600,
+        "coverage_pct": 100.0,
+        "open_share_pct": 66.67,
+        "model_count": 2,
+    },
+    "series": [
+        {
+            "date": "2026-08-17",
+            "index_price": 2.2,
+            "open_price": 1.7,
+            "proprietary_price": 3.1,
+        },
+        {
+            "date": "2026-08-18",
+            "index_price": 2.0,
+            "open_price": 1.5,
+            "proprietary_price": 3.0,
+        },
+    ],
+    "top_models": [
+        {
+            "id": "open/model-a",
+            "name": "Open Labs: Model A",
+            "tokens": 400,
+            "usage_share_pct": 66.67,
+            "effective_price": 1.5,
+        },
+        {
+            "id": "closed/model-b",
+            "name": "Closed Inc: Model B",
+            "tokens": 200,
+            "usage_share_pct": 33.33,
+            "effective_price": 3.0,
+        },
+    ],
+}
+
+
 def _stub_board_apis(page: Page) -> None:
     quote_requests = 0
 
@@ -1773,6 +1897,10 @@ def _stub_board_apis(page: Page) -> None:
             _fulfill_json(route, EARNINGS_PAYLOAD)
         elif path == "/api/component-trends":
             _fulfill_json(route, COMPONENT_TRENDS_PAYLOAD)
+        elif path == "/api/ai/models":
+            _fulfill_json(route, AI_MODELS_PAYLOAD)
+        elif path == "/api/ai/token-index":
+            _fulfill_json(route, AI_TOKEN_INDEX_PAYLOAD)
         elif path == "/api/component-image":
             route.fulfill(status=200, content_type="image/png", body=_PNG_1PX)
         elif path == "/api/reports":

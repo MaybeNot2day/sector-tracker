@@ -22,6 +22,17 @@ const componentsGrid = document.querySelector("#components-grid");
 const earningsView = document.querySelector("#earnings-view");
 const earningsBoard = document.querySelector("#earnings-board");
 const earningsWeekLabel = document.querySelector("#earnings-week");
+const aiView = document.querySelector("#ai-view");
+const aiSectionTabs = document.querySelector("#ai-section-tabs");
+const aiModelsPanel = document.querySelector("#ai-models-panel");
+const aiTokenIndexPanel = document.querySelector("#ai-token-index-panel");
+const aiDataStatus = document.querySelector("#ai-data-status");
+const aiModelSearch = document.querySelector("#ai-model-search");
+const aiModelFilters = document.querySelector("#ai-model-filters");
+const aiModelSort = document.querySelector("#ai-model-sort");
+const aiModelsSummary = document.querySelector("#ai-models-summary");
+const aiModelsBoard = document.querySelector("#ai-models-board");
+const aiIndexBoard = document.querySelector("#ai-index-board");
 const watchView = document.querySelector("#watch-view");
 const watchGrid = document.querySelector("#watch-grid");
 const watchAddInput = document.querySelector("#watch-add");
@@ -145,6 +156,16 @@ let latestComponents = null;
 let componentsCategory = "memory";
 let componentsFetchedAt = 0;
 let componentsLoading = false;
+const AI_DATA_TTL_MS = 15 * 60 * 1000;
+let activeAiSection = "models";
+let latestAiModels = null;
+let aiModelsFetchedAt = 0;
+let aiModelsLoading = false;
+let aiModelQuery = "";
+let aiModelFilter = "all";
+let latestAiIndex = null;
+let aiIndexFetchedAt = 0;
+let aiIndexLoading = false;
 const WATCH_STORAGE_KEY = "watch-symbols-v1";
 const WATCH_INTERVAL_KEY = "watch-interval-v1";
 const WATCH_MAX = 9;
@@ -423,7 +444,7 @@ function restoreUrlState() {
   restoringUrlState = true;
   try {
     const view = params.get("view");
-    if (["markets", "fringe", "trends", "earnings", "watch"].includes(view || "")) {
+    if (["markets", "ai", "fringe", "trends", "earnings", "watch"].includes(view || "")) {
       selectView(view);
     }
     const group = params.get("group");
@@ -647,11 +668,34 @@ function init() {
     fetchKeyDates();
     fetchFringe();
     refreshReportsBadge();
+    if (activeView === "ai" && activeAiSection === "models") fetchAiModels(true);
+    if (activeView === "ai" && activeAiSection === "token-index") fetchAiTokenIndex(true);
   });
   viewButtons.forEach((button) => {
     button.addEventListener("click", () => selectView(button.dataset.view || "daily"));
     button.addEventListener("keydown", handleViewTabKeydown);
   });
+  aiSectionTabs.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-ai-section]");
+    if (button) selectAiSection(button.dataset.aiSection || "models");
+  });
+  aiSectionTabs.addEventListener("keydown", handleAiSectionKeydown);
+  aiModelSearch.addEventListener("input", () => {
+    aiModelQuery = aiModelSearch.value.trim().toLowerCase();
+    renderAiModels();
+  });
+  aiModelFilters.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-ai-filter]");
+    if (!button) return;
+    aiModelFilter = button.dataset.aiFilter || "all";
+    aiModelFilters.querySelectorAll("button").forEach((item) => {
+      const selected = item === button;
+      item.classList.toggle("active", selected);
+      item.setAttribute("aria-pressed", String(selected));
+    });
+    renderAiModels();
+  });
+  aiModelSort.addEventListener("change", renderAiModels);
   marketSearch.addEventListener("input", scheduleMarketSearch);
   marketSearch.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
@@ -1434,12 +1478,13 @@ function trendBandSvg(series) {
 }
 
 function selectView(view) {
-  activeView = ["markets", "fringe", "trends", "earnings", "watch"].includes(view)
+  activeView = ["markets", "ai", "fringe", "trends", "earnings", "watch"].includes(view)
     ? view
     : "daily";
   dailyView.hidden = activeView !== "daily";
   marketsView.hidden = activeView !== "markets";
   fringeView.hidden = activeView !== "fringe";
+  aiView.hidden = activeView !== "ai";
   trendsView.hidden = activeView !== "trends";
   earningsView.hidden = activeView !== "earnings";
   watchView.hidden = activeView !== "watch";
@@ -1449,6 +1494,7 @@ function selectView(view) {
     button.setAttribute("aria-selected", String(selected));
     button.tabIndex = selected ? 0 : -1;
   });
+  if (activeView === "ai") renderAiView();
   if (activeView === "fringe") renderFringeView();
   if (activeView === "trends") renderTrendsView();
   if (activeView === "earnings") renderEarningsView();
@@ -6596,4 +6642,315 @@ function toChartTime(value, interval) {
   // standard fixed-offset display tradeoff.
   const date = new Date(value);
   return Math.floor(date.getTime() / 1000) + displayTzOffsetSeconds(new Date());
+}
+
+// --- AI market intelligence ---------------------------------------------
+
+function renderAiView() {
+  selectAiSection(activeAiSection);
+}
+
+function selectAiSection(section) {
+  activeAiSection = section === "token-index" ? "token-index" : "models";
+  const tokenIndexActive = activeAiSection === "token-index";
+  aiModelsPanel.hidden = tokenIndexActive;
+  aiTokenIndexPanel.hidden = !tokenIndexActive;
+  aiSectionTabs.querySelectorAll("button[data-ai-section]").forEach((button) => {
+    const selected = button.dataset.aiSection === activeAiSection;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-selected", String(selected));
+    button.tabIndex = selected ? 0 : -1;
+  });
+  if (tokenIndexActive) fetchAiTokenIndex();
+  else fetchAiModels();
+}
+
+function handleAiSectionKeydown(event) {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  const buttons = Array.from(aiSectionTabs.querySelectorAll("button[data-ai-section]"));
+  const current = buttons.indexOf(event.target.closest("button[data-ai-section]"));
+  if (current < 0) return;
+  event.preventDefault();
+  let next = current;
+  if (event.key === "ArrowRight") next = (current + 1) % buttons.length;
+  else if (event.key === "ArrowLeft") next = (current - 1 + buttons.length) % buttons.length;
+  else if (event.key === "Home") next = 0;
+  else if (event.key === "End") next = buttons.length - 1;
+  buttons[next].focus();
+  selectAiSection(buttons[next].dataset.aiSection);
+}
+
+async function fetchAiModels(force = false) {
+  if (aiModelsLoading) return;
+  if (!force && latestAiModels && Date.now() - aiModelsFetchedAt < AI_DATA_TTL_MS) {
+    renderAiModels();
+    return;
+  }
+  aiModelsLoading = true;
+  aiDataStatus.textContent = "Loading OpenRouter model catalog";
+  if (!latestAiModels) {
+    aiModelsBoard.innerHTML = '<div class="empty-state">Loading model prices</div>';
+  }
+  try {
+    const response = await fetch("/api/ai/models");
+    if (!response.ok) throw new Error(`models_${response.status}`);
+    latestAiModels = await response.json();
+    aiModelsFetchedAt = Date.now();
+    renderAiModels();
+    aiDataStatus.textContent = `OpenRouter · ${latestAiModels.summary?.models || 0} text models`;
+  } catch (error) {
+    if (latestAiModels) {
+      renderAiModels();
+      aiDataStatus.textContent = "OpenRouter unavailable · showing cached catalog";
+    } else {
+      aiModelsBoard.innerHTML =
+        '<div class="empty-state">Model pricing is temporarily unavailable</div>';
+      aiDataStatus.textContent = "OpenRouter model catalog unavailable";
+    }
+  } finally {
+    aiModelsLoading = false;
+  }
+}
+
+function renderAiModels() {
+  if (!latestAiModels?.models) return;
+  const summary = latestAiModels.summary || {};
+  aiModelsSummary.innerHTML = [
+    aiMetric("Text models", summary.models, "live catalog"),
+    aiMetric("Providers", summary.providers, "normalized"),
+    aiMetric("Open-weight", summary.open_weight, "Hugging Face ID proxy"),
+    aiMetric("Free routes", summary.free, "input + output"),
+    aiMetric(
+      "Median 3:1 price",
+      formatAiPrice(summary.median_blended_price),
+      "USD / 1M tokens",
+    ),
+  ].join("");
+
+  let models = latestAiModels.models.filter((model) => {
+    if (aiModelFilter === "open" && !model.is_open_weight) return false;
+    if (aiModelFilter === "free" && !model.is_free) return false;
+    if (!aiModelQuery) return true;
+    return `${model.name} ${model.provider} ${model.id}`.toLowerCase().includes(aiModelQuery);
+  });
+  const sort = aiModelSort.value;
+  models = [...models].sort((a, b) => {
+    if (sort === "name") return String(a.name).localeCompare(String(b.name));
+    if (sort === "context") return aiSortNumber(b.context_length, a.context_length);
+    if (sort === "intelligence") {
+      return aiSortNumber(b.intelligence_index, a.intelligence_index);
+    }
+    return aiSortNumber(a.blended_price_per_million, b.blended_price_per_million);
+  });
+
+  if (!models.length) {
+    aiModelsBoard.innerHTML =
+      '<div class="empty-state">No models match the current filters</div>';
+    return;
+  }
+  const rows = models.map((model) => {
+    const badges = [
+      model.is_open_weight ? '<span class="ai-badge open">Open</span>' : "",
+      model.is_free ? '<span class="ai-badge free">Free</span>' : "",
+    ].join("");
+    return `
+      <tr>
+        <td><span class="ai-model-name" title="${escapeHtml(model.id)}">${escapeHtml(model.name)}${badges}</span></td>
+        <td class="ai-provider">${escapeHtml(model.provider)}</td>
+        <td>${formatAiPrice(model.input_price_per_million)}</td>
+        <td>${formatAiPrice(model.output_price_per_million)}</td>
+        <td>${formatAiPrice(model.blended_price_per_million)}</td>
+        <td>${formatAiCompact(model.context_length)}</td>
+        <td>${Number.isFinite(model.intelligence_index) ? model.intelligence_index.toFixed(1) : "—"}</td>
+      </tr>
+    `;
+  }).join("");
+  aiModelsBoard.innerHTML = `
+    <div class="ai-table-wrap">
+      <table class="ai-table">
+        <thead><tr>
+          <th>Model</th><th>Provider</th><th>Input / 1M</th><th>Output / 1M</th>
+          <th>Blended 3:1</th><th>Context</th><th>Intelligence</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <div class="ai-result-note">
+      Showing ${models.length} of ${latestAiModels.models.length} text models ·
+      prices are current catalog rates, not completed transaction prices
+    </div>
+  `;
+}
+
+async function fetchAiTokenIndex(force = false) {
+  if (aiIndexLoading) return;
+  if (!force && latestAiIndex && Date.now() - aiIndexFetchedAt < AI_DATA_TTL_MS) {
+    renderAiTokenIndex();
+    return;
+  }
+  aiIndexLoading = true;
+  aiDataStatus.textContent = "Building usage-weighted token index";
+  if (!latestAiIndex) {
+    aiIndexBoard.innerHTML = '<div class="empty-state">Matching usage to model prices</div>';
+  }
+  try {
+    const response = await fetch("/api/ai/token-index");
+    if (!response.ok) throw new Error(`token_index_${response.status}`);
+    latestAiIndex = await response.json();
+    aiIndexFetchedAt = Date.now();
+    renderAiTokenIndex();
+    aiDataStatus.textContent = `OpenRouter rankings · through ${latestAiIndex.as_of}`;
+  } catch (error) {
+    if (latestAiIndex) {
+      renderAiTokenIndex();
+      aiDataStatus.textContent = "Rankings unavailable · showing cached index";
+    } else {
+      aiIndexBoard.innerHTML =
+        '<div class="empty-state">Token index is temporarily unavailable</div>';
+      aiDataStatus.textContent = "OpenRouter rankings unavailable";
+    }
+  } finally {
+    aiIndexLoading = false;
+  }
+}
+
+function renderAiTokenIndex() {
+  if (!latestAiIndex?.latest) return;
+  const latest = latestAiIndex.latest;
+  const metrics = [
+    aiMetric("Token price index", formatAiPrice(latest.index_price), "USD / 1M matched tokens"),
+    aiMetric("Matched usage", formatAiCompact(latest.priced_tokens), "prompt + completion"),
+    aiMetric("Price coverage", `${Number(latest.coverage_pct).toFixed(1)}%`, "of ranked tokens"),
+    aiMetric("Open-weight share", `${Number(latest.open_share_pct).toFixed(1)}%`, "HF ID proxy"),
+    aiMetric("Constituents", latest.model_count, `as of ${latest.date}`),
+  ].join("");
+  const topRows = (latestAiIndex.top_models || []).map((model) => `
+    <tr>
+      <td><span class="ai-model-name">${escapeHtml(model.name)}</span></td>
+      <td>${formatAiCompact(model.tokens)}</td>
+      <td>${Number(model.usage_share_pct).toFixed(1)}%</td>
+      <td>${formatAiPrice(model.effective_price)}</td>
+    </tr>
+  `).join("");
+  aiIndexBoard.innerHTML = `
+    <div class="ai-metrics">${metrics}</div>
+    <div class="ai-index-layout">
+      <section class="ai-index-chart-panel">
+        <div class="ai-index-heading">
+          <h3>Usage-weighted price history</h3>
+          <span>Observed input/output mix</span>
+        </div>
+        <div class="ai-index-chart" role="img" aria-label="Usage-weighted token price history">
+          ${aiIndexChart(latestAiIndex.series || [])}
+        </div>
+        <div class="ai-index-legend">
+          <span><i class="main"></i>Broad</span>
+          <span><i class="open"></i>Open-weight</span>
+          <span><i class="proprietary"></i>Proprietary</span>
+        </div>
+      </section>
+      <section class="ai-index-side">
+        <h3>Top models by observed tokens</h3>
+        <div class="ai-table-wrap">
+          <table class="ai-table">
+            <thead><tr><th>Model</th><th>Tokens</th><th>Share</th><th>Effective $/M</th></tr></thead>
+            <tbody>${topRows}</tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+    <div class="ai-method-note">
+      ${escapeHtml(latestAiIndex.methodology?.description || "")}
+      ${escapeHtml(latestAiIndex.source?.attribution || "")}
+      This is an OpenRouter market proxy, not a replica of Silicon Data's multi-network index.
+    </div>
+  `;
+}
+
+function aiIndexChart(series) {
+  const rows = series.slice(-90);
+  if (!rows.length) return '<div class="empty-state">No index history yet</div>';
+  const keys = ["index_price", "open_price", "proprietary_price"];
+  const values = rows.flatMap((row) => keys.map((key) => Number(row[key])).filter(Number.isFinite));
+  if (!values.length) return '<div class="empty-state">No priced observations</div>';
+  const width = 760;
+  const height = 210;
+  const pad = { left: 54, right: 14, top: 16, bottom: 27 };
+  let min = Math.min(...values);
+  let max = Math.max(...values);
+  const spread = Math.max(max - min, Math.max(Math.abs(max), 1) * 0.08);
+  min = Math.max(0, min - spread * 0.12);
+  max += spread * 0.12;
+  const x = (index) =>
+    pad.left + (index / Math.max(rows.length - 1, 1)) * (width - pad.left - pad.right);
+  const y = (value) =>
+    pad.top + ((max - value) / (max - min)) * (height - pad.top - pad.bottom);
+  const points = (key) => rows
+    .map((row, index) => {
+      const value = Number(row[key]);
+      return Number.isFinite(value) ? `${x(index).toFixed(1)},${y(value).toFixed(1)}` : null;
+    })
+    .filter(Boolean)
+    .join(" ");
+  const firstDate = escapeHtml(rows[0].date);
+  const lastDate = escapeHtml(rows[rows.length - 1].date);
+  const grid = [0, 0.5, 1].map((fraction) => {
+    const gridY = pad.top + fraction * (height - pad.top - pad.bottom);
+    const label = max - fraction * (max - min);
+    return `
+      <line class="grid-line" x1="${pad.left}" y1="${gridY}" x2="${width - pad.right}" y2="${gridY}" />
+      <text x="5" y="${gridY + 3}">$${label.toFixed(2)}</text>
+    `;
+  }).join("");
+  return `
+    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
+      ${grid}
+      <polyline class="series-proprietary" points="${points("proprietary_price")}" />
+      <polyline class="series-open" points="${points("open_price")}" />
+      <polyline class="series-main" points="${points("index_price")}" />
+      <text x="${pad.left}" y="${height - 7}">${firstDate}</text>
+      <text x="${width - pad.right}" y="${height - 7}" text-anchor="end">${lastDate}</text>
+    </svg>
+  `;
+}
+
+function aiMetric(label, value, note) {
+  const renderedValue = value === null || value === undefined ? "—" : value;
+  return `
+    <div class="ai-metric">
+      <span class="ai-metric-label">${escapeHtml(label)}</span>
+      <strong class="ai-metric-value">${escapeHtml(renderedValue)}</strong>
+      <span class="ai-metric-note">${escapeHtml(note)}</span>
+    </div>
+  `;
+}
+
+function aiSortNumber(left, right) {
+  if (left === null || left === undefined) return 1;
+  if (right === null || right === undefined) return -1;
+  const leftNumber = Number(left);
+  const rightNumber = Number(right);
+  if (!Number.isFinite(leftNumber)) return 1;
+  if (!Number.isFinite(rightNumber)) return -1;
+  return leftNumber - rightNumber;
+}
+
+function formatAiPrice(value) {
+  if (value === null || value === undefined) return "—";
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "—";
+  if (number === 0) return "$0.00";
+  if (number < 0.01) return `$${number.toFixed(4)}`;
+  if (number < 1) return `$${number.toFixed(3)}`;
+  return `$${number.toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
+}
+
+function formatAiCompact(value) {
+  if (value === null || value === undefined) return "—";
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "—";
+  return Intl.NumberFormat("en-US", {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(number);
 }

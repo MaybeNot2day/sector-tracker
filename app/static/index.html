@@ -17,7 +17,7 @@
         }
       } catch {}
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260817-2" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260819-1" />
   </head>
   <body>
     <aside id="news-panel" class="news-panel" aria-label="Live Telegram news" aria-hidden="true" inert>
@@ -77,6 +77,15 @@
           aria-selected="false"
           tabindex="-1"
         >Markets</button>
+        <button
+          id="ai-tab"
+          type="button"
+          role="tab"
+          data-view="ai"
+          aria-controls="ai-view"
+          aria-selected="false"
+          tabindex="-1"
+        >AI</button>
         <button
           id="fringe-tab"
           type="button"
@@ -280,6 +289,58 @@
         <div id="crypto-tape" class="crypto-tape" hidden></div>
       </section>
 
+
+      <section id="ai-view" class="view-panel" role="tabpanel" aria-labelledby="ai-tab" hidden>
+        <div class="ai-shell">
+          <header class="ai-header">
+            <div>
+              <p class="ai-kicker">AI Market Intelligence</p>
+              <h2>Models, usage and infrastructure economics</h2>
+            </div>
+            <a class="ai-source-link" href="https://openrouter.ai/rankings" target="_blank" rel="noopener noreferrer">OpenRouter source</a>
+          </header>
+          <div class="ai-toolbar">
+            <div id="ai-section-tabs" class="category-tabs ai-section-tabs" role="tablist" aria-label="AI data section">
+              <button id="ai-models-tab" type="button" role="tab" data-ai-section="models" aria-controls="ai-models-panel" aria-selected="true" class="active">Models</button>
+              <button id="ai-token-index-tab" type="button" role="tab" data-ai-section="token-index" aria-controls="ai-token-index-panel" aria-selected="false" tabindex="-1">Token Index</button>
+            </div>
+            <span id="ai-data-status" class="ai-data-status" aria-live="polite">Public data · lazy loaded</span>
+          </div>
+
+          <section id="ai-models-panel" class="ai-subpanel" role="tabpanel" aria-labelledby="ai-models-tab">
+            <div class="ai-model-tools">
+              <label class="market-search">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                <input id="ai-model-search" type="search" autocomplete="off" placeholder="Search model or provider" aria-label="Search AI models" />
+              </label>
+              <div id="ai-model-filters" class="category-tabs" role="group" aria-label="AI model filter">
+                <button type="button" data-ai-filter="all" class="active" aria-pressed="true">All</button>
+                <button type="button" data-ai-filter="open" aria-pressed="false">Open-weight</button>
+                <button type="button" data-ai-filter="free" aria-pressed="false">Free</button>
+              </div>
+              <label class="ai-sort-label">Sort
+                <select id="ai-model-sort" aria-label="Sort AI models">
+                  <option value="price">Blended price</option>
+                  <option value="context">Context window</option>
+                  <option value="intelligence">Intelligence</option>
+                  <option value="name">Name</option>
+                </select>
+              </label>
+            </div>
+            <div id="ai-models-summary" class="ai-metrics" aria-live="polite"></div>
+            <div id="ai-models-board" class="ai-board">
+              <div class="empty-state">Open this tab to load model pricing</div>
+            </div>
+          </section>
+
+          <section id="ai-token-index-panel" class="ai-subpanel" role="tabpanel" aria-labelledby="ai-token-index-tab" hidden>
+            <div id="ai-index-board" class="ai-board">
+              <div class="empty-state">Open this tab to build the usage-weighted token index</div>
+            </div>
+          </section>
+        </div>
+      </section>
+
       <section id="fringe-view" class="view-panel" role="tabpanel" aria-labelledby="fringe-tab" hidden>
         <div id="fringe-board" class="daily-board">
           <div class="empty-state">Loading Fringe book</div>
@@ -478,6 +539,6 @@
 
     <div id="help-tooltip" class="help-tooltip" role="tooltip" hidden></div>
 
-    <script src="/static/app.js?v=20260817-2" defer></script>
+    <script src="/static/app.js?v=20260819-3" defer></script>
   </body>
 </html>
