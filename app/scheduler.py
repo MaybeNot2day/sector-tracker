@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import logging
 from contextlib import suppress
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -11,6 +12,7 @@ from fastapi import WebSocket
 
 from app.providers.hyperliquid import HyperliquidProvider
 from app.services.daily_board import crypto_breadth_metrics
+from app.services.earnings import week_start
 from app.services.econ_calendar import any_hot_release, key_dates_payload
 from app.services.macro import MACRO_TAPE_GROUP_NAME, macro_payload, with_macro_group
 from app.services.quotes import grouped_quotes_payload
@@ -92,6 +94,32 @@ async def quote_poll_loop(app_state: Any) -> None:
         except Exception:
             logger.exception("quote poll cycle failed")
         await asyncio.sleep(app_state.settings.quote_poll_seconds)
+
+
+# The earnings week payload costs ~35 Nasdaq surprise fetches on a cold
+# compose; keep it perpetually warm so the tab never waits on one.
+EARNINGS_WARM_SECONDS = 30 * 60  # matches the service payload TTL
+
+
+async def earnings_warm_loop(app_state: Any) -> None:
+    await asyncio.sleep(3)
+    while True:
+        try:
+            held = {
+                asset.symbol.upper()
+                for group in getattr(app_state, "groups", [])
+                for asset in group.assets
+            }
+            await app_state.earnings_service.get_week_cached(
+                week_start(datetime.now(UTC).date()),
+                held,
+                getattr(app_state, "options_service", None),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("earnings warm cycle failed")
+        await asyncio.sleep(EARNINGS_WARM_SECONDS)
 
 
 async def history_refresh_loop(app_state: Any) -> None:

@@ -15,7 +15,9 @@ SELF_HEAL_COOLDOWN_SECONDS = 3600.0
 SELF_HEAL_NO_PROGRESS_COOLDOWN_SECONDS = 6 * 3600.0
 SELF_HEAL_BATCH = 4
 HISTORY_CACHE_SECONDS = 300.0
-INTRADAY_CACHE_SECONDS = 15.0
+# 60s matches the watch-tile refresh cadence; 15m candles do not visibly
+# change inside a minute, and every tile reload used to pay a provider fetch.
+INTRADAY_CACHE_SECONDS = 60.0
 HISTORY_FAILURE_CACHE_SECONDS = 15.0
 HISTORY_CACHE_MAX = 256
 

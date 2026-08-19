@@ -2,6 +2,7 @@ import asyncio
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -278,6 +279,54 @@ def test_quote_payload_exposes_display_fields() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stale_while_revalidate_serves_snapshot_and_refreshes_in_background(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    groups = [
+        GroupConfig(
+            name="TEST",
+            assets=[AssetConfig(symbol="AAPL", type="equity", source="yahoo")],
+        )
+    ]
+    provider = CountingProvider()
+    service = QuoteService(
+        tmp_path / "board.sqlite3",
+        {"yahoo": provider},
+        min_refresh_seconds=60,
+    )
+    clock = [1_000.0]
+    monkeypatch.setattr("app.services.quotes.monotonic", lambda: clock[0])
+
+    first = await service.get_board_quotes(groups)
+    assert provider.calls == 1
+
+    # Past the refresh window: the stale snapshot answers instantly...
+    clock[0] += 61.0
+    second = await service.get_board_quotes(groups, allow_stale=True)
+    assert second is first
+    assert provider.calls == 1
+    # ...and a background refresh repopulates the cache.
+    for _ in range(100):
+        if provider.calls == 2:
+            break
+        await asyncio.sleep(0.01)
+    assert provider.calls == 2
+    third = await service.get_board_quotes(groups)
+    assert third is not first  # refreshed snapshot now serves from cache
+    assert provider.calls == 2
+
+    # Without the flag the caller pays for a synchronous refresh (serverless).
+    clock[0] += 61.0
+    await service.get_board_quotes(groups)
+    assert provider.calls == 3
+
+    # Beyond the stale cap even allow_stale waits for fresh data.
+    clock[0] += 121.0
+    await service.get_board_quotes(groups, allow_stale=True)
+    assert provider.calls == 4
+
+
+@pytest.mark.asyncio
 async def test_quotes_route_schedules_history_heal_without_waiting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -285,7 +334,9 @@ async def test_quotes_route_schedules_history_heal_without_waiting(
     release = asyncio.Event()
 
     class RouteQuoteService:
-        async def get_board_quotes(self, groups: list[GroupConfig]) -> dict[str, list[Quote]]:
+        async def get_board_quotes(
+            self, groups: list[GroupConfig], *, allow_stale: bool = False
+        ) -> dict[str, list[Quote]]:
             return {}
 
     class BlockingHistoryService:
@@ -301,6 +352,12 @@ async def test_quotes_route_schedules_history_heal_without_waiting(
         return {"status": "ok"}
 
     monkeypatch.setattr(main_module.app.state, "groups", [], raising=False)
+    monkeypatch.setattr(
+        main_module.app.state,
+        "settings",
+        SimpleNamespace(enable_background_tasks=False),
+        raising=False,
+    )
     monkeypatch.setattr(
         main_module.app.state,
         "quote_service",

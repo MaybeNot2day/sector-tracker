@@ -17,6 +17,10 @@ logger = logging.getLogger(__name__)
 
 GroupsCacheKey: TypeAlias = tuple[tuple[str, tuple[tuple[str, str, str], ...]], ...]
 
+# With a live poll loop the last snapshot is served instantly while a refresh
+# runs in the background; beyond this age the data is too old to serve blind.
+STALE_WHILE_REVALIDATE_SECONDS = 120.0
+
 
 class QuoteService:
     def __init__(
@@ -34,47 +38,78 @@ class QuoteService:
         self._cached_grouped: dict[str, list[Quote]] | None = None
         self._refresh_lock = asyncio.Lock()
 
-    async def get_board_quotes(self, groups: list[GroupConfig]) -> dict[str, list[Quote]]:
+    async def get_board_quotes(
+        self, groups: list[GroupConfig], *, allow_stale: bool = False
+    ) -> dict[str, list[Quote]]:
         cache_key = _groups_cache_key(groups)
         cached = self._cached_quotes(cache_key)
         if cached is not None:
             return cached
-
+        if (
+            allow_stale
+            and self._cached_grouped is not None
+            and self._cache_key == cache_key
+            and monotonic() - self._cache_time < STALE_WHILE_REVALIDATE_SECONDS
+        ):
+            # Serve the last snapshot instantly and refresh in the background.
+            # Gated on allow_stale: serverless deployments have no poll loop,
+            # so the synchronous fetch below is their only refresh path.
+            self._schedule_refresh(groups, cache_key)
+            return self._cached_grouped
         async with self._refresh_lock:
             cached = self._cached_quotes(cache_key)
             if cached is not None:
                 return cached
+            return await self._refresh(groups, cache_key)
 
-            requested_symbols = sorted({asset.symbol for group in groups for asset in group.assets})
-            cached_by_symbol = await asyncio.to_thread(
-                db.load_latest_quotes, self.database_path, requested_symbols
-            )
-            matching_cached_symbols = {
-                asset.symbol
-                for group in groups
-                for asset in group.assets
-                if (cached_quote := cached_by_symbol.get(asset.symbol.upper())) is not None
-                and _cached_quote_matches(asset, cached_quote)
-            }
-            fresh_by_symbol = await self._fetch_fresh_quotes(groups, matching_cached_symbols)
-            await asyncio.to_thread(
-                db.save_quotes, self.database_path, list(fresh_by_symbol.values())
-            )
+    def _schedule_refresh(self, groups: list[GroupConfig], cache_key: GroupsCacheKey) -> None:
+        if self._refresh_lock.locked():
+            return  # a refresh is already in flight
+        task = asyncio.create_task(self._refresh_locked(groups, cache_key))
+        task.add_done_callback(self._log_refresh_failure)
 
-            result: dict[str, list[Quote]] = {}
-            for group in groups:
-                quotes: list[Quote] = []
-                for asset in group.assets:
-                    quote = fresh_by_symbol.get(asset.symbol)
-                    if quote is None:
-                        quote = self._stale_or_error(asset, cached_by_symbol)
-                    quotes.append(quote)
-                result[group.name] = quotes
+    async def _refresh_locked(self, groups: list[GroupConfig], cache_key: GroupsCacheKey) -> None:
+        async with self._refresh_lock:
+            if self._cached_quotes(cache_key) is not None:
+                return  # the waiter's refresh already covered us
+            await self._refresh(groups, cache_key)
 
-            self._cache_key = cache_key
-            self._cache_time = monotonic()
-            self._cached_grouped = result
-            return result
+    @staticmethod
+    def _log_refresh_failure(task: asyncio.Task[None]) -> None:
+        if not task.cancelled() and (exc := task.exception()) is not None:
+            logger.error("background quote refresh failed", exc_info=exc)
+
+    async def _refresh(
+        self, groups: list[GroupConfig], cache_key: GroupsCacheKey
+    ) -> dict[str, list[Quote]]:
+        requested_symbols = sorted({asset.symbol for group in groups for asset in group.assets})
+        cached_by_symbol = await asyncio.to_thread(
+            db.load_latest_quotes, self.database_path, requested_symbols
+        )
+        matching_cached_symbols = {
+            asset.symbol
+            for group in groups
+            for asset in group.assets
+            if (cached_quote := cached_by_symbol.get(asset.symbol.upper())) is not None
+            and _cached_quote_matches(asset, cached_quote)
+        }
+        fresh_by_symbol = await self._fetch_fresh_quotes(groups, matching_cached_symbols)
+        await asyncio.to_thread(db.save_quotes, self.database_path, list(fresh_by_symbol.values()))
+
+        result: dict[str, list[Quote]] = {}
+        for group in groups:
+            quotes: list[Quote] = []
+            for asset in group.assets:
+                quote = fresh_by_symbol.get(asset.symbol)
+                if quote is None:
+                    quote = self._stale_or_error(asset, cached_by_symbol)
+                quotes.append(quote)
+            result[group.name] = quotes
+
+        self._cache_key = cache_key
+        self._cache_time = monotonic()
+        self._cached_grouped = result
+        return result
 
     def _cached_quotes(self, cache_key: GroupsCacheKey) -> dict[str, list[Quote]] | None:
         if self.min_refresh_seconds <= 0 or self._cached_grouped is None:

@@ -287,6 +287,29 @@ async def test_options_failures_leave_implied_move_empty() -> None:
     assert _days(payload)[0]["reports"][0]["implied_move_pct"] is None
 
 
+@pytest.mark.asyncio
+async def test_payload_cache_serves_repeat_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    api = NasdaqAPI(days={"2026-08-17": [_calendar_row("WMT")]})
+    service = EarningsCalendarService(client=api.client())
+    clock = [10_000.0]
+    monkeypatch.setattr(earnings_module, "monotonic", lambda: clock[0])
+
+    first = await service.get_week_cached(WEEK_MONDAY, held=set())
+    assert len(api.calendar_requests) == 5
+
+    # Inside the TTL the composed payload answers with zero provider work —
+    # even for a different held set (re-ranking waits for the warm loop).
+    second = await service.get_week_cached(WEEK_MONDAY, held={"WMT"})
+    assert second is first
+    assert len(api.calendar_requests) == 5
+
+    clock[0] += earnings_module.PAYLOAD_CACHE_SECONDS + 1
+    third = await service.get_week_cached(WEEK_MONDAY, held=set())
+    assert third is not first
+    # The recompute rides the still-warm day caches — zero new HTTP.
+    assert len(api.calendar_requests) == 5
+
+
 # --- /api/earnings route ----------------------------------------------------
 
 
@@ -294,7 +317,7 @@ class RecordingService:
     def __init__(self) -> None:
         self.calls: list[tuple[date, set[str], object]] = []
 
-    async def get_week(
+    async def get_week_cached(
         self, start: date, held: set[str], options_service: object = None
     ) -> dict[str, object]:
         self.calls.append((start, held, options_service))

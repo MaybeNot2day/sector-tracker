@@ -48,6 +48,7 @@ from app.providers.yahoo import YahooProvider
 from app.scheduler import (
     ConnectionManager,
     board_payload_async,
+    earnings_warm_loop,
     econ_calendar_loop,
     history_refresh_loop,
     news_poll_loop,
@@ -209,6 +210,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.history_task = None
     app.state.news_task = None
     app.state.econ_calendar_task = None
+    app.state.earnings_task = None
     if settings.enable_background_tasks:
         app.state.poll_task = asyncio.create_task(
             quote_poll_loop(app.state), name="quote_poll_loop"
@@ -220,11 +222,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.econ_calendar_task = asyncio.create_task(
             econ_calendar_loop(app.state), name="econ_calendar_loop"
         )
+        app.state.earnings_task = asyncio.create_task(
+            earnings_warm_loop(app.state), name="earnings_warm_loop"
+        )
         for task in (
             app.state.poll_task,
             app.state.history_task,
             app.state.news_task,
             app.state.econ_calendar_task,
+            app.state.earnings_task,
         ):
             task.add_done_callback(_log_loop_crash)
 
@@ -239,6 +245,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await stop_task(app.state.news_task)
         if app.state.econ_calendar_task is not None:
             await stop_task(app.state.econ_calendar_task)
+        if app.state.earnings_task is not None:
+            await stop_task(app.state.earnings_task)
         await asyncio.gather(
             *(provider.aclose() for provider in providers.values()),
             app.state.news_service.aclose(),
@@ -564,7 +572,10 @@ async def quotes() -> dict[str, object]:
     # One snapshot: an edit landing mid-request must not rebuild the payload
     # from swapped groups zipped against old quotes.
     groups = app.state.groups
-    grouped = await app.state.quote_service.get_board_quotes(with_macro_group(groups))
+    grouped = await app.state.quote_service.get_board_quotes(
+        with_macro_group(groups),
+        allow_stale=app.state.settings.enable_background_tasks,
+    )
     _schedule_history_heal()
     return await board_payload_async(app.state, groups, grouped)
 
@@ -779,7 +790,7 @@ async def earnings_calendar(start: str | None = Query(default=None)) -> dict[str
     held = {
         asset.symbol.upper() for group in getattr(app.state, "groups", []) for asset in group.assets
     }
-    return await service.get_week(monday, held, getattr(app.state, "options_service", None))
+    return await service.get_week_cached(monday, held, getattr(app.state, "options_service", None))
 
 
 @app.get("/api/fringe")
@@ -1058,7 +1069,10 @@ async def quotes_ws(websocket: WebSocket) -> None:
     await manager.connect(websocket)
     try:
         groups = app.state.groups
-        grouped = await app.state.quote_service.get_board_quotes(with_macro_group(groups))
+        grouped = await app.state.quote_service.get_board_quotes(
+            with_macro_group(groups),
+            allow_stale=app.state.settings.enable_background_tasks,
+        )
         await websocket.send_json(
             {"type": "quotes", "data": await board_payload_async(app.state, groups, grouped)}
         )

@@ -52,6 +52,10 @@ _HEADERS = {
 DAY_CACHE_SECONDS = 6 * 3600.0
 SURPRISE_CACHE_SECONDS = 24 * 3600.0
 RELEASE_TIME_CACHE_SECONDS = 6 * 3600.0
+# The composed week payload: a warm copy must answer every read instantly;
+# a cold compose costs ~35 surprise fetches (~5s).
+PAYLOAD_CACHE_SECONDS = 30 * 60.0
+PAYLOAD_CACHE_MAX = 8
 FAILURE_RETRY_SECONDS = 300.0
 SURPRISE_CACHE_MAX = 512
 RELEASE_TIME_CACHE_MAX = 512
@@ -221,7 +225,29 @@ class EarningsCalendarService:
         self._surprise_cache: dict[str, tuple[float, list[bool | None]]] = {}
         self._release_time_cache: dict[tuple[str, str], tuple[float, str | None]] = {}
         self._release_time_failed_at: float | None = None
+        self._payload_cache: dict[str, tuple[float, dict[str, object]]] = {}
         self._lock = asyncio.Lock()
+
+    async def get_week_cached(
+        self,
+        start: date,
+        held: set[str],
+        options_service: OptionsSnapshotService | None = None,
+    ) -> dict[str, object]:
+        """Composed week from the payload cache; recomputes only past the TTL.
+
+        The scheduler's warm loop refreshes ahead of expiry, so user requests
+        never pay the cold-compose cost of a fresh week.
+        """
+        key = start.isoformat()
+        cached = self._payload_cache.get(key)
+        if cached is not None and monotonic() - cached[0] < PAYLOAD_CACHE_SECONDS:
+            return cached[1]
+        payload = await self.get_week(start, held, options_service)
+        self._payload_cache[key] = (monotonic(), payload)
+        while len(self._payload_cache) > PAYLOAD_CACHE_MAX:
+            del self._payload_cache[min(self._payload_cache)]
+        return payload
 
     async def get_week(
         self,
