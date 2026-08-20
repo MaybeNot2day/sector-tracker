@@ -17,7 +17,7 @@
         }
       } catch {}
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260819-7" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260820-2" />
   </head>
   <body>
     <aside id="news-panel" class="news-panel" aria-label="Live Telegram news" aria-hidden="true" inert>
@@ -348,6 +348,19 @@
             <div id="ai-hardware-board" class="ai-board">
               <div class="empty-state">Open this tab to load cloud GPU rental prices</div>
             </div>
+            <section class="ai-hardware-components" aria-labelledby="hardware-components-heading">
+              <div class="ai-index-heading ai-hardware-components-heading">
+                <h3 id="hardware-components-heading">PC component price trends</h3>
+                <span>Daily street-price charts · <a class="ai-table-link" href="https://pcpartpicker.com/trends/" target="_blank" rel="noopener noreferrer">PCPartPicker source</a></span>
+              </div>
+              <div class="components-tools">
+                <div class="category-tabs" id="components-tabs" role="group" aria-label="PC component category"></div>
+                <span class="trends-note">Memory, CPUs, video cards, storage, power supplies and monitors</span>
+              </div>
+              <div id="components-grid" class="components-grid">
+                <div class="empty-state">Open this tab to load component prices</div>
+              </div>
+            </section>
           </section>
         </div>
       </section>
@@ -370,13 +383,6 @@
         </div>
         <div id="trends-grid" class="trends-grid">
           <div class="empty-state">Loading trends</div>
-        </div>
-        <div class="market-tools trends-tools components-tools">
-          <div class="category-tabs" id="components-tabs" role="group" aria-label="Component category"></div>
-          <span class="trends-note">PC component street prices · daily charts by <a href="https://pcpartpicker.com/trends/" target="_blank" rel="noopener noreferrer">PCPartPicker</a></span>
-        </div>
-        <div id="components-grid" class="trends-grid components-grid">
-          <div class="empty-state">Loading component prices</div>
         </div>
       </section>
 
@@ -550,6 +556,6 @@
 
     <div id="help-tooltip" class="help-tooltip" role="tooltip" hidden></div>
 
-    <script src="/static/app.js?v=20260819-7" defer></script>
+    <script src="/static/app.js?v=20260820-2" defer></script>
   </body>
 </html>

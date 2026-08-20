@@ -1033,7 +1033,6 @@ function earningsRowMarkup(report, reportDate) {
 // the window start, shaded min–max envelope, equal-weight average line.
 
 async function renderTrendsView() {
-  loadComponentTrends();
   if (
     latestTrends &&
     latestTrends.days === trendsDays &&
@@ -1084,9 +1083,9 @@ function selectTrendsRange(days) {
   renderTrendsView();
 }
 
-// --- PCPartPicker component prices ------------------------------------------
+// --- PCPartPicker component prices (Hardware panel) -------------------------
 // The source publishes daily-regenerated PNG charts (no data API); the
-// backend scrapes each category's gallery and we hotlink the CDN images.
+// backend scrapes each category gallery and proxies its CDN images.
 async function loadComponentTrends() {
   if (latestComponents && Date.now() - componentsFetchedAt < COMPONENTS_TTL_MS) return;
   if (componentsLoading) return;
@@ -6703,7 +6702,10 @@ function selectAiSection(section) {
   });
   if (activeAiSection === "token-index") fetchAiTokenIndex();
   else if (capexActive) fetchAiCapex();
-  else if (hardwareActive) fetchAiHardware();
+  else if (hardwareActive) {
+    fetchAiHardware();
+    loadComponentTrends();
+  }
   else fetchAiModels();
 }
 

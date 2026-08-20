@@ -29,8 +29,8 @@ hyperscalers and chip suppliers from Yahoo Finance company statements, including
 changes, trailing-four-quarter spend, and capex/revenue intensity. Reported total capex is an
 AI-infrastructure proxy because issuers do not consistently isolate AI-only spend. Hardware
 compares normalized cloud GPU rental rates, provider offers, and workload cost estimates from
-ComputePrices. Catalog, index, capex, and GPU observations accrue in SQLite
-(`ai_model_snapshots`, `ai_token_index`, `ai_capex_history`,
+ComputePrices, alongside PCPartPicker component street-price trends. Catalog, index, capex, and
+GPU observations accrue in SQLite (`ai_model_snapshots`, `ai_token_index`, `ai_capex_history`,
 `ai_gpu_compute_snapshots`) instead of treating today's upstream response as historical truth.
 The token index is explicitly an OpenRouter market proxy, not a replica of Silicon Data's
 multi-network benchmark.
@@ -73,9 +73,10 @@ The Trends tab draws PCPartPicker-style performance bands for every watchlist
 group from the cached daily bars: each member is indexed to 100 at the window
 start, the shaded envelope spans the min–max member, and the line is the
 equal-weight average (1M/3M/6M/1Y windows via `GET /api/trends?days=`). Cards
-cross-link into the Markets view filtered to that group. Below the bands, the
-tab embeds [PCPartPicker's](https://pcpartpicker.com/trends/) daily component
-price-trend charts (memory, CPUs, video cards, storage, PSUs, monitors) —
+cross-link into the Markets view filtered to that group.
+
+The Hardware panel embeds [PCPartPicker's](https://pcpartpicker.com/trends/) daily
+component price-trend charts (memory, CPUs, video cards, storage, PSUs, monitors);
 street prices for DRAM/NAND lead the board's MEMORY equity theme. The backend
 scrapes the public gallery lists (`GET /api/component-trends`, cached 6h) and
 serves the PNGs same-origin through `GET /api/component-image`.
@@ -448,7 +449,7 @@ browsers call `/api/options/{symbol}` and never receive credentials. The integra
 optional `mode` parameter, so MarketData.app applies the account default: paid accounts default
 to live mode, while free and trial accounts receive delayed data.
 
-Hardware uses the authenticated ComputePrices v1 API when `COMPUTEPRICES_API_KEY` is set.
+Hardware's cloud GPU board uses the authenticated ComputePrices v1 API when `COMPUTEPRICES_API_KEY` is set.
 Without a key, it reads the public GPU comparison and top-model provider pages; this keyless
 mode has the same current-price semantics but fewer detailed models. The browser never receives
 the API key.

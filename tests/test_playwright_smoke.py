@@ -380,6 +380,22 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
     expect(page.locator("#ai-hardware-cost")).to_have_text("$720")
     expect(page.locator("#ai-source-link")).to_have_text("ComputePrices source")
 
+    # PCPartPicker street-price charts now live with the other hardware data.
+    # Images stay same-origin and category selection updates the visible cards.
+    chips = page.locator("#ai-hardware-panel #components-tabs button")
+    expect(chips).to_have_count(2)
+    expect(chips.first).to_have_text("Memory")
+    memory_cards = page.locator("#ai-hardware-panel .component-card")
+    expect(memory_cards).to_have_count(2)
+    expect(memory_cards.first.locator("strong")).to_have_text("DDR5-6000 2x32GB")
+    image_src = memory_cards.first.locator("img").get_attribute("src")
+    assert image_src is not None and image_src.startswith("/api/component-image?src=")
+    chips.nth(1).click()
+    expect(page.locator("#ai-hardware-panel .component-card")).to_have_count(1)
+    expect(page.locator("#ai-hardware-panel .component-card strong")).to_have_text(
+        "Ryzen 7 Zen 4 (AM5)"
+    )
+
     page.goto(f"{base_url}/#view=ai", wait_until="domcontentloaded")
     expect(page.locator("#ai-view")).to_be_visible()
     expect(page.locator("#ai-tab")).to_have_attribute("aria-selected", "true")
@@ -1526,6 +1542,9 @@ def test_watch_tab_builds_persistent_interactive_chart_wall(page: Page, base_url
 def test_trends_tab_renders_group_bands_and_links_to_markets(page: Page, base_url: str) -> None:
     page.goto(f"{base_url}/#view=trends", wait_until="domcontentloaded")
     expect(page.locator("#trends-view")).to_be_visible()
+    # Component-price charts belong exclusively to AI > Hardware.
+    expect(page.locator("#trends-view #components-grid")).to_have_count(0)
+    expect(page.locator("#trends-view .component-card")).to_have_count(0)
 
     cards = page.locator(".trend-card")
     expect(cards).to_have_count(2)
@@ -1547,19 +1566,6 @@ def test_trends_tab_renders_group_bands_and_links_to_markets(page: Page, base_ur
     )
     expect(page.locator(".trend-card")).to_have_count(2)
 
-    # PCPartPicker component prices: category chips render, memory is the
-    # default, images route through the same-origin proxy, chips switch.
-    chips = page.locator("#components-tabs button")
-    expect(chips).to_have_count(2)
-    expect(chips.first).to_have_text("Memory")
-    memory_cards = page.locator(".component-card")
-    expect(memory_cards).to_have_count(2)
-    expect(memory_cards.first.locator("strong")).to_have_text("DDR5-6000 2x32GB")
-    image_src = memory_cards.first.locator("img").get_attribute("src")
-    assert image_src is not None and image_src.startswith("/api/component-image?src=")
-    chips.nth(1).click()
-    expect(page.locator(".component-card")).to_have_count(1)
-    expect(page.locator(".component-card strong")).to_have_text("Ryzen 7 Zen 4 (AM5)")
 
     # A card is a cross-link: it opens Markets filtered to the group.
     page.locator(".trend-card").first.click()
@@ -1805,8 +1811,9 @@ def test_untrusted_external_urls_never_become_clickable_links(
     expect(unsafe_news).to_be_visible()
     assert unsafe_news.get_attribute("href") == "#"
 
-    page.locator("#trends-tab").click()
-    unsafe_component = page.locator("#components-grid .component-card").first
+    page.locator("#ai-tab").click()
+    page.locator("#ai-hardware-tab").click()
+    unsafe_component = page.locator("#ai-hardware-panel .component-card").first
     expect(unsafe_component).to_be_visible()
     assert unsafe_component.evaluate("(element) => element.tagName") == "DIV"
 
