@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
@@ -198,6 +198,20 @@ CREATE TABLE IF NOT EXISTS ai_gpu_compute_snapshots (
     fetched_at TEXT NOT NULL,
     payload TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS hyperliquid_listings (
+    market_kind TEXT NOT NULL CHECK (market_kind IN ('crypto', 'xyz')),
+    symbol TEXT NOT NULL,
+    coin TEXT NOT NULL,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    auto_added INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (market_kind, symbol)
+);
+
+CREATE INDEX IF NOT EXISTS idx_hyperliquid_listings_active_seen
+ON hyperliquid_listings (market_kind, auto_added, is_active, first_seen_at DESC);
 """
 _initialized_paths: set[Path] = set()
 _init_lock = Lock()
@@ -260,6 +274,112 @@ def init_db(path: Path) -> None:
             _seed_key_date_sources(conn)
             _quarantine_invalid_bars(conn)
         _initialized_paths.add(resolved)
+
+
+def sync_hyperliquid_listings(
+    path: Path,
+    market_kind: str,
+    listings: Mapping[str, str],
+    observed_at: str,
+) -> dict[str, int | bool]:
+    """Persist one complete live universe and identify post-baseline listings."""
+    if market_kind not in {"crypto", "xyz"}:
+        raise ValueError(f"unsupported Hyperliquid market kind: {market_kind}")
+    normalized = {
+        str(symbol).strip().upper(): str(coin).strip()
+        for symbol, coin in listings.items()
+        if str(symbol).strip() and str(coin).strip()
+    }
+    if not normalized:
+        return {"baseline": False, "added": 0, "deactivated": 0, "reactivated": 0}
+
+    init_db(path)
+    with _connect(path) as conn:
+        rows = conn.execute(
+            """
+            SELECT symbol, auto_added, is_active
+            FROM hyperliquid_listings
+            WHERE market_kind = ?
+            """,
+            (market_kind,),
+        ).fetchall()
+        existing = {
+            str(row["symbol"]): (bool(row["auto_added"]), bool(row["is_active"])) for row in rows
+        }
+        baseline = not existing
+        added = 0
+        reactivated = 0
+        for symbol, coin in sorted(normalized.items()):
+            previous = existing.get(symbol)
+            if previous is None:
+                auto_added = int(not baseline)
+                conn.execute(
+                    """
+                    INSERT INTO hyperliquid_listings (
+                        market_kind, symbol, coin, first_seen_at, last_seen_at,
+                        is_active, auto_added
+                    ) VALUES (?, ?, ?, ?, ?, 1, ?)
+                    """,
+                    (market_kind, symbol, coin, observed_at, observed_at, auto_added),
+                )
+                added += auto_added
+                continue
+            was_auto_added, was_active = previous
+            conn.execute(
+                """
+                UPDATE hyperliquid_listings
+                SET coin = ?, last_seen_at = ?, is_active = 1
+                WHERE market_kind = ? AND symbol = ?
+                """,
+                (coin, observed_at, market_kind, symbol),
+            )
+            if was_auto_added and not was_active:
+                reactivated += 1
+
+        missing = {
+            symbol
+            for symbol, (_, is_active) in existing.items()
+            if is_active and symbol not in normalized
+        }
+        deactivated = sum(1 for symbol in missing if existing[symbol][0])
+        conn.executemany(
+            """
+            UPDATE hyperliquid_listings
+            SET is_active = 0
+            WHERE market_kind = ? AND symbol = ?
+            """,
+            [(market_kind, symbol) for symbol in sorted(missing)],
+        )
+    return {
+        "baseline": baseline,
+        "added": added,
+        "deactivated": deactivated,
+        "reactivated": reactivated,
+    }
+
+
+def load_auto_hyperliquid_listings(path: Path) -> list[dict[str, object]]:
+    """Active listings discovered after each dex's persisted first baseline."""
+    init_db(path)
+    with _connect(path) as conn:
+        rows = conn.execute(
+            """
+            SELECT market_kind, symbol, coin, first_seen_at, last_seen_at
+            FROM hyperliquid_listings
+            WHERE auto_added = 1 AND is_active = 1
+            ORDER BY first_seen_at DESC, market_kind, symbol
+            """
+        ).fetchall()
+    return [
+        {
+            "market_kind": str(row["market_kind"]),
+            "symbol": str(row["symbol"]),
+            "coin": str(row["coin"]),
+            "first_seen_at": str(row["first_seen_at"]),
+            "last_seen_at": str(row["last_seen_at"]),
+        }
+        for row in rows
+    ]
 
 
 def _seed_key_date_sources(conn: sqlite3.Connection) -> None:

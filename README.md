@@ -430,6 +430,8 @@ WATCHLIST_SEED_PATH=./config/watchlists.yaml
 QUOTE_POLL_SECONDS=10
 HISTORY_REFRESH_SECONDS=3600
 CRYPTO_ETF_FLOW_CACHE_SECONDS=900
+HYPERLIQUID_DISCOVERY_SECONDS=300      # scan cadence for new crypto + xyz listings
+HYPERLIQUID_DISCOVERY_GROUP_LIMIT=25   # latest active discoveries kept per auto group
 MARKETDATA_TOKEN=                                  # server-side API token; leave empty to disable options snapshots
 MARKETDATA_BASE_URL=https://api.marketdata.app     # MarketData.app REST API origin
 OPTIONS_CACHE_SECONDS=60                           # chain snapshot cache, 15-900 seconds
@@ -439,6 +441,12 @@ ECON_CALENDAR_COUNTRIES=US,EU,DE,GB,JP,CN
 NEWS_TELEGRAM_CHANNELS=marketfeed,RetardFrens,tradehaven,AGGRNEWSWIRE,WalterBloomberg   # public t.me handles; each gets a mute chip in the drawer
 NEWS_POLL_SECONDS=15
 ```
+
+Hyperliquid discovery persists the first successful crypto and xyz universes as
+baselines. Later listings automatically appear in read-only
+`HYPERLIQUID_NEW_CRYPTO` and `HYPERLIQUID_NEW_XYZ` runtime groups. The groups are
+backed by SQLite, survive deploys, skip symbols already present in curated
+watchlists, and remove listings from the live group while they are delisted.
 
 Crypto ETF flow data uses public Farside tables via a text-rendered fetch route and is cached by
 `CRYPTO_ETF_FLOW_CACHE_SECONDS`.

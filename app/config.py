@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     quote_poll_seconds: int = Field(default=10, ge=5)
     history_refresh_seconds: int = Field(default=3600, ge=300)
     crypto_etf_flow_cache_seconds: int = Field(default=900, ge=60)
+    hyperliquid_discovery_seconds: int = Field(default=300, ge=60, le=86_400)
+    hyperliquid_discovery_group_limit: int = Field(default=25, ge=1, le=100)
     marketdata_token: str = ""
     marketdata_base_url: str = "https://api.marketdata.app"
     options_cache_seconds: int = Field(default=60, ge=15, le=900)

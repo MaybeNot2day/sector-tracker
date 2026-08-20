@@ -167,6 +167,26 @@ def seeded_provider(
 
 
 @pytest.mark.asyncio
+async def test_discovery_universe_returns_only_fresh_complete_dex_maps() -> None:
+    provider, _ = live_api()
+
+    snapshot = await provider.discovery_universe()
+
+    assert snapshot == {
+        "crypto": {"BTC": "BTC", "KPEPE": "kPEPE", "REKT": "REKT"},
+        "xyz": {"AAPL": "xyz:AAPL", "SPY": "xyz:SPY"},
+    }
+
+    # A stale dex is omitted, not emitted as an empty universe that callers
+    # could mistake for a mass delisting.
+    provider._markets_time = monotonic()
+    provider._crypto_time = 0.0
+    snapshot = await provider.discovery_universe()
+    assert "crypto" not in snapshot
+    assert snapshot["xyz"] == {"AAPL": "xyz:AAPL", "SPY": "xyz:SPY"}
+
+
+@pytest.mark.asyncio
 async def test_get_quotes_maps_perp_ctx_with_funding_oi_and_volume() -> None:
     provider, _ = live_api()
 

@@ -1344,6 +1344,16 @@ def test_tablet_market_toolbar_and_category_group_fit_viewport(
 ) -> None:
     page.set_viewport_size({"width": 800, "height": 900})
     _goto_board(page, base_url)
+    assert (
+        page.evaluate(
+            """() => assetSessionKey({
+              type: "equity",
+              exchange: "HYPERLIQUID",
+              quote: { provider: "hyperliquid" },
+            })"""
+        )
+        == "crypto"
+    )
     page.locator("#markets-tab").click()
 
     category_group = page.get_by_role("group", name="Market category")

@@ -134,6 +134,23 @@ class HyperliquidProvider(QuoteProvider):
         wanted = symbol.upper()
         return wanted in self._crypto or wanted in self._tradfi
 
+    async def discovery_universe(self) -> dict[str, dict[str, str]]:
+        """Fresh complete universes for persistent new-listing detection.
+
+        A missing key means that dex is stale or unavailable; callers must
+        leave its persisted state untouched rather than treating an outage as
+        a mass delisting.
+        """
+        await self._refresh_markets()
+        result: dict[str, dict[str, str]] = {}
+        if self._map_fresh(self._crypto_time):
+            result["crypto"] = {
+                symbol: str(market["coin"]) for symbol, market in self._crypto.items()
+            }
+        if self._map_fresh(self._tradfi_time):
+            result["xyz"] = {symbol: str(market["coin"]) for symbol, market in self._tradfi.items()}
+        return result
+
     async def live_prices(self, symbols: set[str]) -> dict[str, float]:
         """Mark prices for symbols the xyz dex lists as TradFi synthetics.
 

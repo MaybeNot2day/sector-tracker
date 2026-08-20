@@ -366,8 +366,14 @@ function sessionState(sessionKey) {
   return { key: sessionKey, label: def.label, state: "closed" };
 }
 
+function isContinuousHyperliquidAsset(asset) {
+  const provider = asset?.quote?.provider || asset?.provider || asset?.source || "";
+  return provider === "hyperliquid";
+}
+
+
 function assetSessionKey(asset) {
-  if (isCryptoAsset(asset.type)) return "crypto";
+  if (isCryptoAsset(asset.type) || isContinuousHyperliquidAsset(asset)) return "crypto";
   return EXCHANGE_SESSIONS[String(asset.exchange || "").toUpperCase()] || "us";
 }
 
@@ -5425,9 +5431,11 @@ function openChart(asset, options = {}) {
 }
 
 function updateIntradayAvailability(assetType) {
-  const crypto = isCryptoAsset(assetType);
-  const session = crypto ? null : sessionState(EXCHANGE_SESSIONS[String(activeAsset?.exchange || "").toUpperCase()] || "us");
-  const closed = !crypto && session && session.state !== "open";
+  const continuous = isCryptoAsset(assetType) || isContinuousHyperliquidAsset(activeAsset);
+  const session = continuous
+    ? null
+    : sessionState(EXCHANGE_SESSIONS[String(activeAsset?.exchange || "").toUpperCase()] || "us");
+  const closed = !continuous && session && session.state !== "open";
   intervalButtons.forEach((button) => {
     if (!("intraday" in button.dataset)) return;
     button.classList.toggle("session-closed", Boolean(closed));

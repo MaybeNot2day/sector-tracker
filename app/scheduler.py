@@ -14,6 +14,7 @@ from app.providers.hyperliquid import HyperliquidProvider
 from app.services.daily_board import crypto_breadth_metrics
 from app.services.earnings import week_start
 from app.services.econ_calendar import any_hot_release, key_dates_payload
+from app.services.hyperliquid_discovery import HyperliquidDiscoveryService
 from app.services.macro import MACRO_TAPE_GROUP_NAME, macro_payload, with_macro_group
 from app.services.quotes import grouped_quotes_payload
 
@@ -94,6 +95,40 @@ async def quote_poll_loop(app_state: Any) -> None:
         except Exception:
             logger.exception("quote poll cycle failed")
         await asyncio.sleep(app_state.settings.quote_poll_seconds)
+
+
+HYPERLIQUID_DISCOVERY_INITIAL_DELAY_SECONDS = 10
+
+
+async def refresh_hyperliquid_discovery(app_state: Any) -> bool:
+    """Scan fresh universes and atomically refresh the runtime-only groups."""
+    provider = app_state.providers.get("hyperliquid")
+    service = getattr(app_state, "hyperliquid_discovery_service", None)
+    if not isinstance(provider, HyperliquidProvider) or not isinstance(
+        service, HyperliquidDiscoveryService
+    ):
+        return False
+    changed = await service.scan(provider)
+    if changed:
+        async with app_state.watchlist_lock:
+            base_groups = getattr(app_state, "base_groups", app_state.groups)
+            app_state.groups = service.merge_groups(base_groups)
+            app_state.trends_revision = int(getattr(app_state, "trends_revision", 0)) + 1
+    return changed
+
+
+async def hyperliquid_discovery_loop(app_state: Any) -> None:
+    await asyncio.sleep(HYPERLIQUID_DISCOVERY_INITIAL_DELAY_SECONDS)
+    while True:
+        try:
+            changed = await refresh_hyperliquid_discovery(app_state)
+            if changed:
+                logger.info("Hyperliquid discovery groups refreshed")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Hyperliquid discovery cycle failed")
+        await asyncio.sleep(app_state.settings.hyperliquid_discovery_seconds)
 
 
 # The earnings week payload costs ~35 Nasdaq surprise fetches on a cold

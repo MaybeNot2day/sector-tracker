@@ -28,7 +28,7 @@ class CloseProbe:
 
     async def aclose(self) -> None:
         # Network resources must not close until every background user stopped.
-        assert self.tracker.stopped_tasks == 6
+        assert self.tracker.stopped_tasks == 7
         self.tracker.started.append(self.name)
         if len(self.tracker.started) == 10:
             self.tracker.all_started.set()
@@ -63,6 +63,8 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
         database_seed_path=tmp_path / "seed.db",
         quote_poll_seconds=15,
         crypto_etf_flow_cache_seconds=300,
+        hyperliquid_discovery_seconds=300,
+        hyperliquid_discovery_group_limit=25,
         marketdata_token="token",
         marketdata_base_url="https://marketdata.test",
         options_cache_seconds=60,
@@ -98,6 +100,11 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
     monkeypatch.setattr(main_module, "CryptoEtfFlowService", lambda *args, **kwargs: object())
     monkeypatch.setattr(main_module, "AssetProfileService", lambda *args, **kwargs: object())
     monkeypatch.setattr(
+        main_module,
+        "HyperliquidDiscoveryService",
+        lambda *args, **kwargs: SimpleNamespace(merge_groups=lambda groups: groups),
+    )
+    monkeypatch.setattr(
         main_module, "MarketDataOptionsService", lambda *args, **kwargs: probes["options"]
     )
     monkeypatch.setattr(main_module, "ConnectionManager", lambda: object())
@@ -107,6 +114,7 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
     monkeypatch.setattr(main_module, "econ_calendar_loop", idle_loop)
     monkeypatch.setattr(main_module, "earnings_warm_loop", idle_loop)
     monkeypatch.setattr(main_module, "ai_data_warm_loop", idle_loop)
+    monkeypatch.setattr(main_module, "hyperliquid_discovery_loop", idle_loop)
     monkeypatch.setattr(main_module, "EconCalendarService", lambda *args, **kwargs: probes["econ"])
     monkeypatch.setattr(
         main_module, "EarningsCalendarService", lambda *args, **kwargs: probes["earnings"]
@@ -123,7 +131,7 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
 
     await asyncio.wait_for(run_lifespan(), timeout=1.0)
 
-    assert tracker.stopped_tasks == 6
+    assert tracker.stopped_tasks == 7
     assert set(tracker.started) == {
         "yahoo",
         "hyperliquid",

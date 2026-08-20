@@ -52,6 +52,7 @@ from app.scheduler import (
     earnings_warm_loop,
     econ_calendar_loop,
     history_refresh_loop,
+    hyperliquid_discovery_loop,
     news_poll_loop,
     quote_poll_loop,
     stop_task,
@@ -73,6 +74,7 @@ from app.services.econ_calendar import EconCalendarService, key_dates_payload
 from app.services.fringe import FringeService, parse_fringe_actions
 from app.services.gpu_compute import GPUComputeError, GPUComputeService
 from app.services.history import HistoryService, bars_payload, find_asset
+from app.services.hyperliquid_discovery import HyperliquidDiscoveryService
 from app.services.key_dates import parse_key_dates
 from app.services.macro import MACRO_TAPE_GROUP_NAME, with_macro_group
 from app.services.market_context import market_context_payload
@@ -169,8 +171,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = Settings()
     ensure_runtime_watchlist(settings)
     ensure_runtime_database(settings)
-    groups = load_watchlists(settings.watchlist_path)
+    base_groups = load_watchlists(settings.watchlist_path)
     db.init_db(settings.database_path)
+    hyperliquid_discovery_service = HyperliquidDiscoveryService(
+        settings.database_path,
+        group_limit=settings.hyperliquid_discovery_group_limit,
+    )
+    groups = hyperliquid_discovery_service.merge_groups(base_groups)
 
     providers: dict[ProviderName, QuoteProvider] = {
         "yahoo": YahooProvider(),
@@ -179,8 +186,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     }
 
     app.state.settings = settings
+    app.state.base_groups = base_groups
     app.state.groups = groups
     app.state.providers = providers
+    app.state.hyperliquid_discovery_service = hyperliquid_discovery_service
     app.state.quote_service = QuoteService(
         settings.database_path,
         providers,
@@ -216,12 +225,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.connection_manager = ConnectionManager()
     app.state.watchlist_lock = asyncio.Lock()
+    app.state.trends_revision = 0
     app.state.poll_task = None
     app.state.history_task = None
     app.state.news_task = None
     app.state.econ_calendar_task = None
     app.state.earnings_task = None
     app.state.ai_data_task = None
+    app.state.hyperliquid_discovery_task = None
     if settings.enable_background_tasks:
         app.state.poll_task = asyncio.create_task(
             quote_poll_loop(app.state), name="quote_poll_loop"
@@ -239,6 +250,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.ai_data_task = asyncio.create_task(
             ai_data_warm_loop(app.state), name="ai_data_warm_loop"
         )
+        app.state.hyperliquid_discovery_task = asyncio.create_task(
+            hyperliquid_discovery_loop(app.state),
+            name="hyperliquid_discovery_loop",
+        )
         for task in (
             app.state.poll_task,
             app.state.history_task,
@@ -246,6 +261,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.econ_calendar_task,
             app.state.earnings_task,
             app.state.ai_data_task,
+            app.state.hyperliquid_discovery_task,
         ):
             task.add_done_callback(_log_loop_crash)
 
@@ -264,6 +280,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await stop_task(app.state.earnings_task)
         if app.state.ai_data_task is not None:
             await stop_task(app.state.ai_data_task)
+        if app.state.hyperliquid_discovery_task is not None:
+            await stop_task(app.state.hyperliquid_discovery_task)
         await asyncio.gather(
             *(provider.aclose() for provider in providers.values()),
             app.state.news_service.aclose(),
@@ -404,7 +422,20 @@ def health() -> dict[str, object]:
 
 @app.get("/api/groups")
 def groups() -> dict[str, object]:
-    return groups_payload(app.state.groups)
+    return groups_payload(getattr(app.state, "base_groups", app.state.groups))
+
+
+def _set_base_groups(base_groups: list[GroupConfig]) -> None:
+    """Install curated groups and re-append persisted read-only discovery groups."""
+    app.state.base_groups = base_groups
+    discovery = getattr(app.state, "hyperliquid_discovery_service", None)
+    app.state.groups = (
+        discovery.merge_groups(base_groups)
+        if isinstance(discovery, HyperliquidDiscoveryService)
+        else base_groups
+    )
+    app.state.trends_revision = int(getattr(app.state, "trends_revision", 0)) + 1
+    _trends_cache.clear()
 
 
 def require_edit_token(
@@ -437,13 +468,11 @@ async def create_group(request: GroupRequest) -> dict[str, object]:
             raise HTTPException(status_code=409, detail="group_already_exists")
         groups_current.append(GroupConfig(name=name.upper(), assets=[]))
         await asyncio.to_thread(save_watchlists, app.state.settings.watchlist_path, groups_current)
-        app.state.groups = await asyncio.to_thread(
-            load_watchlists, app.state.settings.watchlist_path
-        )
+        _set_base_groups(groups_current)
         # Trend bands are keyed by the watchlist shape; a cached payload would
         # keep serving the pre-edit groups for up to 5 minutes.
         _trends_cache.clear()
-    return groups_payload(app.state.groups)
+    return groups_payload(app.state.base_groups)
 
 
 @app.delete("/api/groups/{group_name}", dependencies=[Depends(require_edit_token)])
@@ -455,11 +484,9 @@ async def delete_group(group_name: str) -> dict[str, object]:
             raise HTTPException(status_code=404, detail="group_not_found")
         groups_current = [item for item in groups_current if item is not group]
         await asyncio.to_thread(save_watchlists, app.state.settings.watchlist_path, groups_current)
-        app.state.groups = await asyncio.to_thread(
-            load_watchlists, app.state.settings.watchlist_path
-        )
+        _set_base_groups(groups_current)
         _trends_cache.clear()
-    return groups_payload(app.state.groups)
+    return groups_payload(app.state.base_groups)
 
 
 @app.post("/api/groups/{group_name}/assets", dependencies=[Depends(require_edit_token)])
@@ -496,11 +523,9 @@ async def create_asset(group_name: str, request: AssetRequest) -> dict[str, obje
                 detail="symbol_configuration_conflict",
             ) from exc
         await asyncio.to_thread(save_watchlists, app.state.settings.watchlist_path, groups_current)
-        app.state.groups = await asyncio.to_thread(
-            load_watchlists, app.state.settings.watchlist_path
-        )
+        _set_base_groups(groups_current)
         _trends_cache.clear()
-    return groups_payload(app.state.groups)
+    return groups_payload(app.state.base_groups)
 
 
 async def validate_symbol_exists(asset: AssetConfig) -> None:
@@ -542,11 +567,9 @@ async def delete_asset(group_name: str, symbol: str) -> dict[str, object]:
             for item in groups_current
         ]
         await asyncio.to_thread(save_watchlists, app.state.settings.watchlist_path, groups_current)
-        app.state.groups = await asyncio.to_thread(
-            load_watchlists, app.state.settings.watchlist_path
-        )
+        _set_base_groups(groups_current)
         _trends_cache.clear()
-    return groups_payload(app.state.groups)
+    return groups_payload(app.state.base_groups)
 
 
 def groups_payload(groups: list[GroupConfig]) -> dict[str, object]:
@@ -907,16 +930,15 @@ def _report_slug(value: str) -> str:
 
 @app.get("/api/hyperliquid-status", dependencies=[Depends(require_edit_token)])
 def hyperliquid_status() -> dict[str, object]:
-    """Hyperliquid feed diagnostics: cache freshness and active 429 cooldowns.
-
-    Serverless deployments share egress IPs with other tenants, so secondary
-    feeds (funding, tokenlist) can starve while quotes keep flowing; this
-    shows which feed is failing on the running instance.
-    """
+    """Hyperliquid feed and automatic-listing discovery diagnostics."""
     hyperliquid = app.state.providers.get("hyperliquid")
     if not isinstance(hyperliquid, HyperliquidProvider):
         return {"status": "unavailable"}
-    return {"status": "ok", **hyperliquid.status()}
+    payload: dict[str, object] = {"status": "ok", **hyperliquid.status()}
+    discovery = getattr(app.state, "hyperliquid_discovery_service", None)
+    if isinstance(discovery, HyperliquidDiscoveryService):
+        payload["discovery"] = discovery.status()
+    return payload
 
 
 @app.get("/api/yahoo-status", dependencies=[Depends(require_edit_token)])
@@ -995,7 +1017,7 @@ async def ai_hardware() -> dict[str, object]:
 
 # Trend bands aggregate every cached daily bar on each call; a short TTL
 # keeps tab switches and range flips from re-scanning SQLite.
-_trends_cache: dict[int, tuple[float, dict[str, object]]] = {}
+_trends_cache: dict[int, tuple[float, int, dict[str, object]]] = {}
 _TRENDS_CACHE_SECONDS = 300.0
 _TRENDS_CACHE_MAX = 8
 
@@ -1004,12 +1026,17 @@ _TRENDS_CACHE_MAX = 8
 async def trends(days: int = Query(default=90, ge=14, le=365)) -> dict[str, object]:
     """Per-group normalized performance bands (min/avg/max, indexed to 100)."""
     cached = _trends_cache.get(days)
-    if cached is not None and monotonic() - cached[0] < _TRENDS_CACHE_SECONDS:
-        return cached[1]
+    revision = int(getattr(app.state, "trends_revision", 0))
+    if (
+        cached is not None
+        and cached[1] == revision
+        and monotonic() - cached[0] < _TRENDS_CACHE_SECONDS
+    ):
+        return cached[2]
     payload = await asyncio.to_thread(
         group_trends_payload, app.state.settings.database_path, app.state.groups, days
     )
-    _trends_cache[days] = (monotonic(), payload)
+    _trends_cache[days] = (monotonic(), revision, payload)
     # days spans 14-365; without a cap a scanner could hold 350 payloads.
     if len(_trends_cache) > _TRENDS_CACHE_MAX:
         del _trends_cache[min(_trends_cache, key=lambda key: _trends_cache[key][0])]
