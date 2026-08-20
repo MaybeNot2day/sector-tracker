@@ -17,7 +17,7 @@
         }
       } catch {}
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260819-6" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260819-7" />
   </head>
   <body>
     <aside id="news-panel" class="news-panel" aria-label="Live Telegram news" aria-hidden="true" inert>
@@ -304,6 +304,7 @@
               <button id="ai-models-tab" type="button" role="tab" data-ai-section="models" aria-controls="ai-models-panel" aria-selected="true" class="active">Models</button>
               <button id="ai-token-index-tab" type="button" role="tab" data-ai-section="token-index" aria-controls="ai-token-index-panel" aria-selected="false" tabindex="-1">Token Index</button>
               <button id="ai-capex-tab" type="button" role="tab" data-ai-section="capex" aria-controls="ai-capex-panel" aria-selected="false" tabindex="-1">AI Capex</button>
+              <button id="ai-hardware-tab" type="button" role="tab" data-ai-section="hardware" aria-controls="ai-hardware-panel" aria-selected="false" tabindex="-1">Hardware</button>
             </div>
             <span id="ai-data-status" class="ai-data-status" aria-live="polite">Public data · lazy loaded</span>
           </div>
@@ -340,6 +341,12 @@
           <section id="ai-capex-panel" class="ai-subpanel" role="tabpanel" aria-labelledby="ai-capex-tab" hidden>
             <div id="ai-capex-board" class="ai-board">
               <div class="empty-state">Open this tab to load reported infrastructure capex</div>
+            </div>
+          </section>
+
+          <section id="ai-hardware-panel" class="ai-subpanel" role="tabpanel" aria-labelledby="ai-hardware-tab" hidden>
+            <div id="ai-hardware-board" class="ai-board">
+              <div class="empty-state">Open this tab to load cloud GPU rental prices</div>
             </div>
           </section>
         </div>
@@ -543,6 +550,6 @@
 
     <div id="help-tooltip" class="help-tooltip" role="tooltip" hidden></div>
 
-    <script src="/static/app.js?v=20260819-6" defer></script>
+    <script src="/static/app.js?v=20260819-7" defer></script>
   </body>
 </html>

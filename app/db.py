@@ -192,6 +192,12 @@ CREATE TABLE IF NOT EXISTS ai_capex_history (
 
 CREATE INDEX IF NOT EXISTS idx_ai_capex_history_symbol_date
 ON ai_capex_history (symbol, period_end DESC);
+
+CREATE TABLE IF NOT EXISTS ai_gpu_compute_snapshots (
+    snapshot_date TEXT PRIMARY KEY,
+    fetched_at TEXT NOT NULL,
+    payload TEXT NOT NULL
+);
 """
 _initialized_paths: set[Path] = set()
 _init_lock = Lock()
@@ -1525,6 +1531,42 @@ def load_ai_capex_history(path: Path) -> dict[str, list[dict[str, object]]]:
             }
         )
     return grouped
+
+
+def save_ai_gpu_compute_snapshot(path: Path, payload: dict[str, object]) -> None:
+    """Store one normalized GPU compute payload per UTC day."""
+    init_db(path)
+    snapshot_date = str(payload.get("as_of") or datetime.now(UTC).date().isoformat())[:10]
+    fetched_at = datetime.now(UTC).isoformat()
+    with _connect(path) as conn:
+        conn.execute(
+            """
+            INSERT INTO ai_gpu_compute_snapshots (snapshot_date, fetched_at, payload)
+            VALUES (?, ?, ?)
+            ON CONFLICT(snapshot_date) DO UPDATE SET
+                fetched_at = excluded.fetched_at,
+                payload = excluded.payload
+            """,
+            (snapshot_date, fetched_at, json.dumps(payload, separators=(",", ":"))),
+        )
+
+
+def load_latest_ai_gpu_compute_snapshot(path: Path) -> dict[str, object] | None:
+    """Load the newest persisted GPU compute payload for stale-cache fallback."""
+    init_db(path)
+    with _connect(path) as conn:
+        row = conn.execute(
+            """
+            SELECT payload
+            FROM ai_gpu_compute_snapshots
+            ORDER BY snapshot_date DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    if row is None:
+        return None
+    payload = json.loads(str(row["payload"]))
+    return cast(dict[str, object], payload) if isinstance(payload, dict) else None
 
 
 _MD_NOISE = str.maketrans({"#": None, "*": None, "`": None, ">": None, "|": None, "_": None})

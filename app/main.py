@@ -71,6 +71,7 @@ from app.services.daily_board import DailyBoardService
 from app.services.earnings import EarningsCalendarService, week_start
 from app.services.econ_calendar import EconCalendarService, key_dates_payload
 from app.services.fringe import FringeService, parse_fringe_actions
+from app.services.gpu_compute import GPUComputeError, GPUComputeService
 from app.services.history import HistoryService, bars_payload, find_asset
 from app.services.key_dates import parse_key_dates
 from app.services.macro import MACRO_TAPE_GROUP_NAME, with_macro_group
@@ -209,6 +210,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.earnings_service = EarningsCalendarService()
     app.state.ai_data_service = AIDataService(settings.database_path)
     app.state.ai_capex_service = AICapexService(settings.database_path)
+    app.state.gpu_compute_service = GPUComputeService(
+        settings.database_path,
+        api_key=settings.computeprices_api_key,
+    )
     app.state.connection_manager = ConnectionManager()
     app.state.watchlist_lock = asyncio.Lock()
     app.state.poll_task = None
@@ -266,6 +271,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.econ_calendar_service.aclose(),
             app.state.earnings_service.aclose(),
             app.state.ai_data_service.aclose(),
+            app.state.ai_capex_service.aclose(),
+            app.state.gpu_compute_service.aclose(),
             return_exceptions=True,
         )
 
@@ -975,6 +982,16 @@ async def ai_capex() -> dict[str, object]:
         service = cast(AICapexService, app.state.ai_capex_service)
         return await service.get_capex()
     except AICapexError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/ai/hardware")
+async def ai_hardware() -> dict[str, object]:
+    """Current normalized cloud GPU rental prices and provider offers."""
+    try:
+        service = cast(GPUComputeService, app.state.gpu_compute_service)
+        return await service.get_hardware()
+    except GPUComputeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 

@@ -234,6 +234,10 @@ async def test_ai_data_warm_loop_refreshes_every_ai_dataset(
         async def get_capex(self) -> None:
             calls.append("capex")
 
+    class GPUComputeProbe:
+        async def get_hardware(self) -> None:
+            calls.append("hardware")
+
     sleeps = 0
 
     async def fake_sleep(seconds: float) -> None:
@@ -243,12 +247,16 @@ async def test_ai_data_warm_loop_refreshes_every_ai_dataset(
             raise asyncio.CancelledError
 
     monkeypatch.setattr("app.scheduler.asyncio.sleep", fake_sleep)
-    state = SimpleNamespace(ai_data_service=AIDataProbe(), ai_capex_service=CapexProbe())
+    state = SimpleNamespace(
+        ai_data_service=AIDataProbe(),
+        ai_capex_service=CapexProbe(),
+        gpu_compute_service=GPUComputeProbe(),
+    )
 
     with pytest.raises(asyncio.CancelledError):
         await scheduler.ai_data_warm_loop(state)
 
-    assert calls == ["models", "token-index", "capex"]
+    assert calls == ["models", "token-index", "capex", "hardware"]
 
 
 @pytest.mark.asyncio

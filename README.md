@@ -20,18 +20,20 @@ A toggleable full-height news drawer streams public Telegram channels (scraped f
 t.me previews, no API key): the server polls every 15 seconds and pushes new posts to the
 browser over the WebSocket, and each channel gets a per-browser mute chip.
 
-The AI view starts the infrastructure-data buildout with three live panels. Models normalizes
-the public OpenRouter catalog into comparable input, output, cache, and 3:1 blended prices
-with provider, context, open-weight, and intelligence metadata. Token Index prices the
-observed prompt/completion mix from OpenRouter's public rankings and splits the result into
-broad, open-weight-proxy, and proprietary series. AI Capex tracks reported quarterly capital
-expenditure for eight hyperscalers and chip suppliers from Yahoo Finance company statements,
-including QoQ/YoY changes, trailing-four-quarter spend, and capex/revenue intensity. Reported
-total capex is an AI-infrastructure proxy because issuers do not consistently isolate AI-only
-spend. Catalog, index, and capex observations accrue in SQLite (`ai_model_snapshots`,
-`ai_token_index`, `ai_capex_history`) instead of treating today's upstream response as
-historical truth. The token index is explicitly an OpenRouter market proxy, not a replica of
-Silicon Data's multi-network benchmark.
+The AI view has four live panels. Models normalizes the public OpenRouter catalog into
+comparable input, output, cache, and 3:1 blended prices with provider, context, open-weight,
+and intelligence metadata. Token Index prices the observed prompt/completion mix from
+OpenRouter's public rankings and splits the result into broad, open-weight-proxy, and
+proprietary series. AI Capex tracks reported quarterly capital expenditure for eight
+hyperscalers and chip suppliers from Yahoo Finance company statements, including QoQ/YoY
+changes, trailing-four-quarter spend, and capex/revenue intensity. Reported total capex is an
+AI-infrastructure proxy because issuers do not consistently isolate AI-only spend. Hardware
+compares normalized cloud GPU rental rates, provider offers, and workload cost estimates from
+ComputePrices. Catalog, index, capex, and GPU observations accrue in SQLite
+(`ai_model_snapshots`, `ai_token_index`, `ai_capex_history`,
+`ai_gpu_compute_snapshots`) instead of treating today's upstream response as historical truth.
+The token index is explicitly an OpenRouter market proxy, not a replica of Silicon Data's
+multi-network benchmark.
 
 Market data blends two worlds. Hyperliquid drives crypto perps end to end (quotes, candles,
 funding, OI) and overlays live 24/7 prices onto the equities/ETFs its xyz dex lists as synthetic
@@ -429,6 +431,7 @@ CRYPTO_ETF_FLOW_CACHE_SECONDS=900
 MARKETDATA_TOKEN=                                  # server-side API token; leave empty to disable options snapshots
 MARKETDATA_BASE_URL=https://api.marketdata.app     # MarketData.app REST API origin
 OPTIONS_CACHE_SECONDS=60                           # chain snapshot cache, 15-900 seconds
+COMPUTEPRICES_API_KEY=                  # optional free key; public GPU pages are the keyless fallback
 ECON_CALENDAR_CACHE_SECONDS=300         # key-dates enrichment cache; auto-drops to 20s around releases
 ECON_CALENDAR_COUNTRIES=US,EU,DE,GB,JP,CN
 NEWS_TELEGRAM_CHANNELS=marketfeed,RetardFrens,tradehaven,AGGRNEWSWIRE,WalterBloomberg   # public t.me handles; each gets a mute chip in the drawer
@@ -444,6 +447,11 @@ token in the [MarketData.app dashboard](https://dashboard.marketdata.app/), set
 browsers call `/api/options/{symbol}` and never receive credentials. The integration omits the
 optional `mode` parameter, so MarketData.app applies the account default: paid accounts default
 to live mode, while free and trial accounts receive delayed data.
+
+Hardware uses the authenticated ComputePrices v1 API when `COMPUTEPRICES_API_KEY` is set.
+Without a key, it reads the public GPU comparison and top-model provider pages; this keyless
+mode has the same current-price semantics but fewer detailed models. The browser never receives
+the API key.
 
 ## Smoke Tests
 

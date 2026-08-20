@@ -27,6 +27,7 @@ const aiSectionTabs = document.querySelector("#ai-section-tabs");
 const aiModelsPanel = document.querySelector("#ai-models-panel");
 const aiTokenIndexPanel = document.querySelector("#ai-token-index-panel");
 const aiCapexPanel = document.querySelector("#ai-capex-panel");
+const aiHardwarePanel = document.querySelector("#ai-hardware-panel");
 const aiSourceLink = document.querySelector("#ai-source-link");
 const aiDataStatus = document.querySelector("#ai-data-status");
 const aiModelSearch = document.querySelector("#ai-model-search");
@@ -36,6 +37,7 @@ const aiModelsSummary = document.querySelector("#ai-models-summary");
 const aiModelsBoard = document.querySelector("#ai-models-board");
 const aiIndexBoard = document.querySelector("#ai-index-board");
 const aiCapexBoard = document.querySelector("#ai-capex-board");
+const aiHardwareBoard = document.querySelector("#ai-hardware-board");
 const watchView = document.querySelector("#watch-view");
 const watchGrid = document.querySelector("#watch-grid");
 const watchAddInput = document.querySelector("#watch-add");
@@ -174,6 +176,13 @@ let aiIndexLoading = false;
 let latestAiCapex = null;
 let aiCapexFetchedAt = 0;
 let aiCapexLoading = false;
+let latestAiHardware = null;
+let aiHardwareFetchedAt = 0;
+let aiHardwareLoading = false;
+let selectedAiHardwareSlug = "";
+let aiHardwareGpuCount = 8;
+let aiHardwareHoursPerDay = 24;
+let aiHardwareDays = 30;
 const WATCH_STORAGE_KEY = "watch-symbols-v1";
 const WATCH_INTERVAL_KEY = "watch-interval-v1";
 const WATCH_MAX = 9;
@@ -6667,13 +6676,25 @@ function renderAiView() {
 }
 
 function selectAiSection(section) {
-  activeAiSection = ["models", "token-index", "capex"].includes(section) ? section : "models";
+  activeAiSection = ["models", "token-index", "capex", "hardware"].includes(section)
+    ? section
+    : "models";
   aiModelsPanel.hidden = activeAiSection !== "models";
   aiTokenIndexPanel.hidden = activeAiSection !== "token-index";
   aiCapexPanel.hidden = activeAiSection !== "capex";
+  aiHardwarePanel.hidden = activeAiSection !== "hardware";
   const capexActive = activeAiSection === "capex";
-  aiSourceLink.href = capexActive ? "https://finance.yahoo.com/" : "https://openrouter.ai/rankings";
-  aiSourceLink.textContent = capexActive ? "Yahoo Finance source" : "OpenRouter source";
+  const hardwareActive = activeAiSection === "hardware";
+  if (hardwareActive) {
+    aiSourceLink.href = "https://computeprices.com/gpu";
+    aiSourceLink.textContent = "ComputePrices source";
+  } else if (capexActive) {
+    aiSourceLink.href = "https://finance.yahoo.com/";
+    aiSourceLink.textContent = "Yahoo Finance source";
+  } else {
+    aiSourceLink.href = "https://openrouter.ai/rankings";
+    aiSourceLink.textContent = "OpenRouter source";
+  }
   aiSectionTabs.querySelectorAll("button[data-ai-section]").forEach((button) => {
     const selected = button.dataset.aiSection === activeAiSection;
     button.classList.toggle("active", selected);
@@ -6682,6 +6703,7 @@ function selectAiSection(section) {
   });
   if (activeAiSection === "token-index") fetchAiTokenIndex();
   else if (capexActive) fetchAiCapex();
+  else if (hardwareActive) fetchAiHardware();
   else fetchAiModels();
 }
 
@@ -7111,6 +7133,188 @@ function renderAiCapex() {
       coverage until every issuer reports.
     </div>
   `;
+}
+
+async function fetchAiHardware(force = false) {
+  if (aiHardwareLoading) return;
+  if (!force && latestAiHardware && Date.now() - aiHardwareFetchedAt < AI_DATA_TTL_MS) {
+    renderAiHardware();
+    return;
+  }
+  aiHardwareLoading = true;
+  aiDataStatus.textContent = "Loading cloud GPU rental prices";
+  if (!latestAiHardware) {
+    aiHardwareBoard.innerHTML = '<div class="empty-state">Loading GPU models and providers</div>';
+  }
+  try {
+    const response = await fetch("/api/ai/hardware");
+    if (!response.ok) throw new Error(`ai_hardware_${response.status}`);
+    latestAiHardware = await response.json();
+    aiHardwareFetchedAt = Date.now();
+    renderAiHardware();
+    const prefix = latestAiHardware.stale ? "Cached ComputePrices data" : "ComputePrices";
+    aiDataStatus.textContent = `${prefix} · through ${latestAiHardware.as_of}`;
+  } catch (error) {
+    if (latestAiHardware) {
+      renderAiHardware();
+      aiDataStatus.textContent = "ComputePrices unavailable · showing cached GPU prices";
+    } else {
+      aiHardwareBoard.innerHTML =
+        '<div class="empty-state">Cloud GPU prices are temporarily unavailable</div>';
+      aiDataStatus.textContent = "ComputePrices unavailable";
+    }
+  } finally {
+    aiHardwareLoading = false;
+  }
+}
+
+function renderAiHardware() {
+  if (!latestAiHardware?.models) return;
+  const summary = latestAiHardware.summary || {};
+  const detailedModels = latestAiHardware.models.filter((model) => model.offers?.length);
+  if (!detailedModels.length) {
+    aiHardwareBoard.innerHTML =
+      '<div class="empty-state">No detailed cloud GPU offers are available</div>';
+    return;
+  }
+  if (!detailedModels.some((model) => model.slug === selectedAiHardwareSlug)) {
+    selectedAiHardwareSlug = detailedModels[0].slug;
+  }
+  const selected = detailedModels.find((model) => model.slug === selectedAiHardwareSlug);
+  const offers = [...(selected?.offers || [])].sort(
+    (left, right) => Number(left.price_per_hour_usd) - Number(right.price_per_hour_usd),
+  );
+  const lowestRate = Number(offers[0]?.price_per_hour_usd ?? selected?.min_price);
+  const metrics = [
+    aiMetric("GPU models", summary.models, `${summary.detailed_models} with provider detail`),
+    aiMetric("Providers", summary.providers, "normalized cloud offers"),
+    aiMetric("Price records", summary.offers, "current detailed offers"),
+    aiMetric("Lowest rate", formatAiPrice(summary.lowest_price), "USD / GPU-hour"),
+  ].join("");
+  const options = detailedModels.map((model) => `
+    <option value="${escapeHtml(model.slug)}" ${model.slug === selectedAiHardwareSlug ? "selected" : ""}>
+      ${escapeHtml(model.name)}${model.vram_gb ? ` · ${model.vram_gb} GB` : ""}
+    </option>
+  `).join("");
+  const maxBarPrice = Math.max(...offers.slice(0, 8).map((offer) => Number(offer.price_per_hour_usd)), 1);
+  const bars = offers.slice(0, 8).map((offer) => {
+    const price = Number(offer.price_per_hour_usd);
+    const width = Math.max(8, (price / maxBarPrice) * 100);
+    return `
+      <div class="ai-hardware-bar-row">
+        <span>${escapeHtml(offer.provider)}</span>
+        <i><b style="width:${width.toFixed(1)}%"></b></i>
+        <strong>${formatAiPrice(price)}</strong>
+      </div>
+    `;
+  }).join("");
+  const rows = offers.slice(0, 30).map((offer) => {
+    const safeSource = /^https?:\/\//i.test(offer.source_url || "") ? offer.source_url : "";
+    const commitment = offer.commitment_months ? `${offer.commitment_months} mo` : "—";
+    return `
+      <tr>
+        <td><span class="ai-model-name">${escapeHtml(offer.provider)}</span></td>
+        <td>${formatAiPrice(offer.price_per_hour_usd)}</td>
+        <td>${escapeHtml(offer.pricing_type || "on_demand")}</td>
+        <td>${commitment}</td>
+        <td>${escapeHtml(offer.config || `${offer.gpu_count || 1}×`)}</td>
+        <td>${escapeHtml(offer.updated_at || "—")}</td>
+        <td>${safeSource ? `<a class="ai-table-link" href="${escapeHtml(safeSource)}" target="_blank" rel="noopener noreferrer">Open</a>` : "—"}</td>
+      </tr>
+    `;
+  }).join("");
+  aiHardwareBoard.innerHTML = `
+    <div class="ai-metrics">${metrics}</div>
+    <div class="ai-hardware-layout">
+      <section class="ai-hardware-panel">
+        <div class="ai-index-heading">
+          <h3>Provider price comparison</h3>
+          <span>USD per GPU-hour · lowest offers first</span>
+        </div>
+        <label class="ai-select-label ai-hardware-model-label">GPU model
+          <select id="ai-hardware-gpu" aria-label="Select cloud GPU model">${options}</select>
+        </label>
+        <div class="ai-hardware-bars" aria-label="Lowest provider rates for ${escapeHtml(selected?.name || "")}">
+          ${bars}
+        </div>
+      </section>
+      <section class="ai-hardware-panel ai-hardware-calculator">
+        <div class="ai-index-heading">
+          <h3>Rental cost calculator</h3>
+          <span>Uses the current cheapest listed rate</span>
+        </div>
+        <div class="ai-hardware-inputs">
+          <label>GPUs
+            <input id="ai-hardware-count" type="number" min="1" max="1024" step="1" value="${aiHardwareGpuCount}" />
+          </label>
+          <label>Hours / day
+            <input id="ai-hardware-hours" type="number" min="1" max="24" step="1" value="${aiHardwareHoursPerDay}" />
+          </label>
+          <label>Days
+            <input id="ai-hardware-days" type="number" min="1" max="366" step="1" value="${aiHardwareDays}" />
+          </label>
+        </div>
+        <div class="ai-hardware-estimate">
+          <span>Estimated compute rental</span>
+          <strong id="ai-hardware-cost">—</strong>
+          <small id="ai-hardware-cost-note"></small>
+        </div>
+      </section>
+    </div>
+    <section class="ai-hardware-offers">
+      <div class="ai-index-heading">
+        <h3>${escapeHtml(selected?.name || "GPU")} provider offers</h3>
+        <span>${offers.length} normalized price records · ${selected?.provider_count || 0} providers tracked</span>
+      </div>
+      <div class="ai-table-wrap">
+        <table class="ai-table">
+          <thead><tr><th>Provider</th><th>$/GPU hr</th><th>Pricing</th><th>Commitment</th><th>Config</th><th>Updated</th><th>Source</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </section>
+    <div class="ai-method-note">
+      ${escapeHtml(latestAiHardware.source?.attribution || "")}
+      Calculator excludes storage, networking, taxes and capacity availability.
+      ${latestAiHardware.warning ? `Upstream note: ${escapeHtml(latestAiHardware.warning)}` : ""}
+    </div>
+  `;
+  aiHardwareBoard.querySelector("#ai-hardware-gpu")?.addEventListener("change", (event) => {
+    selectedAiHardwareSlug = event.target.value;
+    renderAiHardware();
+  });
+  [
+    ["#ai-hardware-count", "count", 1, 1024],
+    ["#ai-hardware-hours", "hours", 1, 24],
+    ["#ai-hardware-days", "days", 1, 366],
+  ].forEach(([selector, field, min, max]) => {
+    aiHardwareBoard.querySelector(selector)?.addEventListener("input", (event) => {
+      const value = Math.max(min, Math.min(max, Number(event.target.value) || min));
+      if (field === "count") aiHardwareGpuCount = value;
+      else if (field === "hours") aiHardwareHoursPerDay = value;
+      else aiHardwareDays = value;
+      updateAiHardwareEstimate();
+    });
+  });
+  updateAiHardwareEstimate(lowestRate, selected?.name);
+}
+
+function updateAiHardwareEstimate(rateOverride = null, nameOverride = null) {
+  const selected = latestAiHardware?.models?.find(
+    (model) => model.slug === selectedAiHardwareSlug,
+  );
+  const offers = selected?.offers || [];
+  const rate = Number(
+    rateOverride ?? offers[0]?.price_per_hour_usd ?? selected?.min_price,
+  );
+  const cost = rate * aiHardwareGpuCount * aiHardwareHoursPerDay * aiHardwareDays;
+  const output = aiHardwareBoard.querySelector("#ai-hardware-cost");
+  const note = aiHardwareBoard.querySelector("#ai-hardware-cost-note");
+  if (output) output.textContent = Number.isFinite(cost) ? formatAiPrice(cost) : "—";
+  if (note) {
+    const name = nameOverride || selected?.name || "GPU";
+    note.textContent = `${aiHardwareGpuCount} × ${name} · ${aiHardwareHoursPerDay}h/day × ${aiHardwareDays} days · ${formatAiPrice(rate)}/hr`;
+  }
 }
 
 function aiCapexChart(series) {

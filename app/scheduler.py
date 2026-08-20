@@ -128,13 +128,14 @@ AI_DATA_WARM_SECONDS = 6 * 60 * 60
 
 
 async def ai_data_warm_loop(app_state: Any) -> None:
-    """Accrue AI catalog, token-index, and infrastructure history unattended."""
+    """Accrue AI catalog, token-index, capex, and cloud-GPU pricing unattended."""
     await asyncio.sleep(5)
     while True:
         loaders = (
             app_state.ai_data_service.get_models,
             app_state.ai_data_service.get_token_index,
             app_state.ai_capex_service.get_capex,
+            app_state.gpu_compute_service.get_hardware,
         )
         results = await asyncio.gather(*(loader() for loader in loaders), return_exceptions=True)
         for loader, result in zip(loaders, results, strict=True):

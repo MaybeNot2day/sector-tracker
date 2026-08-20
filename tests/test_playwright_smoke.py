@@ -368,6 +368,18 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
     expect(page.locator("#ai-capex-board")).to_contain_text("AI infrastructure proxy")
     expect(page.locator("#ai-source-link")).to_have_text("Yahoo Finance source")
 
+    page.locator("#ai-hardware-tab").click()
+    expect(page.locator("#ai-hardware-panel")).to_be_visible()
+    expect(page.locator("#ai-capex-panel")).to_be_hidden()
+    expect(page.locator("#ai-hardware-board .ai-metric")).to_have_count(4)
+    expect(page.locator("#ai-hardware-board tbody tr")).to_have_count(2)
+    expect(page.locator("#ai-hardware-cost")).to_have_text("$8,640")
+    page.locator("#ai-hardware-count").fill("4")
+    page.locator("#ai-hardware-hours").fill("12")
+    page.locator("#ai-hardware-days").fill("10")
+    expect(page.locator("#ai-hardware-cost")).to_have_text("$720")
+    expect(page.locator("#ai-source-link")).to_have_text("ComputePrices source")
+
     page.goto(f"{base_url}/#view=ai", wait_until="domcontentloaded")
     expect(page.locator("#ai-view")).to_be_visible()
     expect(page.locator("#ai-tab")).to_have_attribute("aria-selected", "true")
@@ -1936,6 +1948,66 @@ AI_CAPEX_PAYLOAD: dict[str, Any] = {
 }
 
 
+AI_HARDWARE_PAYLOAD: dict[str, Any] = {
+    "as_of": "2026-08-20",
+    "source": {
+        "name": "ComputePrices public GPU pages",
+        "url": "https://computeprices.com/gpu",
+        "mode": "public_page",
+        "attribution": "Cloud GPU prices normalized to USD per GPU-hour by ComputePrices.",
+    },
+    "summary": {
+        "models": 1,
+        "detailed_models": 1,
+        "offers": 2,
+        "providers": 2,
+        "lowest_price": 1.5,
+    },
+    "models": [
+        {
+            "slug": "h100",
+            "name": "H100 SXM",
+            "vram_gb": 80,
+            "architecture": "Hopper",
+            "average_price": 2.0,
+            "min_price": 1.5,
+            "max_price": 2.5,
+            "provider_count": 2,
+            "offers": [
+                {
+                    "provider": "Lambda",
+                    "provider_slug": "lambda",
+                    "gpu": "H100 SXM",
+                    "gpu_slug": "h100",
+                    "gpu_count": 1,
+                    "price_per_hour_usd": 1.5,
+                    "total_hourly_usd": 1.5,
+                    "pricing_type": "on_demand",
+                    "commitment_months": None,
+                    "config": "1×",
+                    "source_url": "https://lambda.test/pricing",
+                    "updated_at": "2026-08-20",
+                },
+                {
+                    "provider": "Runpod",
+                    "provider_slug": "runpod",
+                    "gpu": "H100 SXM",
+                    "gpu_slug": "h100",
+                    "gpu_count": 1,
+                    "price_per_hour_usd": 2.5,
+                    "total_hourly_usd": 2.5,
+                    "pricing_type": "reserved",
+                    "commitment_months": 12,
+                    "config": "8×",
+                    "source_url": "https://runpod.test/pricing",
+                    "updated_at": "2026-08-19",
+                },
+            ],
+        }
+    ],
+}
+
+
 def _stub_board_apis(page: Page) -> None:
     quote_requests = 0
 
@@ -1995,6 +2067,8 @@ def _stub_board_apis(page: Page) -> None:
             _fulfill_json(route, AI_TOKEN_INDEX_PAYLOAD)
         elif path == "/api/ai/capex":
             _fulfill_json(route, AI_CAPEX_PAYLOAD)
+        elif path == "/api/ai/hardware":
+            _fulfill_json(route, AI_HARDWARE_PAYLOAD)
         elif path == "/api/component-image":
             route.fulfill(status=200, content_type="image/png", body=_PNG_1PX)
         elif path == "/api/reports":
