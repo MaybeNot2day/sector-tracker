@@ -47,6 +47,7 @@ from app.providers.stooq import StooqProvider
 from app.providers.yahoo import YahooProvider
 from app.scheduler import (
     ConnectionManager,
+    ai_data_warm_loop,
     board_payload_async,
     earnings_warm_loop,
     econ_calendar_loop,
@@ -55,6 +56,7 @@ from app.scheduler import (
     quote_poll_loop,
     stop_task,
 )
+from app.services.ai_capex import AICapexError, AICapexService
 from app.services.ai_data import AIDataError, AIDataService
 from app.services.asset_profile import AssetProfileService
 from app.services.component_trends import (
@@ -206,6 +208,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.earnings_service = EarningsCalendarService()
     app.state.ai_data_service = AIDataService(settings.database_path)
+    app.state.ai_capex_service = AICapexService(settings.database_path)
     app.state.connection_manager = ConnectionManager()
     app.state.watchlist_lock = asyncio.Lock()
     app.state.poll_task = None
@@ -213,6 +216,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.news_task = None
     app.state.econ_calendar_task = None
     app.state.earnings_task = None
+    app.state.ai_data_task = None
     if settings.enable_background_tasks:
         app.state.poll_task = asyncio.create_task(
             quote_poll_loop(app.state), name="quote_poll_loop"
@@ -227,12 +231,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.earnings_task = asyncio.create_task(
             earnings_warm_loop(app.state), name="earnings_warm_loop"
         )
+        app.state.ai_data_task = asyncio.create_task(
+            ai_data_warm_loop(app.state), name="ai_data_warm_loop"
+        )
         for task in (
             app.state.poll_task,
             app.state.history_task,
             app.state.news_task,
             app.state.econ_calendar_task,
             app.state.earnings_task,
+            app.state.ai_data_task,
         ):
             task.add_done_callback(_log_loop_crash)
 
@@ -249,6 +257,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await stop_task(app.state.econ_calendar_task)
         if app.state.earnings_task is not None:
             await stop_task(app.state.earnings_task)
+        if app.state.ai_data_task is not None:
+            await stop_task(app.state.ai_data_task)
         await asyncio.gather(
             *(provider.aclose() for provider in providers.values()),
             app.state.news_service.aclose(),
@@ -955,6 +965,16 @@ async def ai_token_index() -> dict[str, object]:
         service = cast(AIDataService, app.state.ai_data_service)
         return await service.get_token_index()
     except AIDataError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/ai/capex")
+async def ai_capex() -> dict[str, object]:
+    """Reported hyperscaler capex used as an AI infrastructure proxy."""
+    try:
+        service = cast(AICapexService, app.state.ai_capex_service)
+        return await service.get_capex()
+    except AICapexError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 

@@ -99,9 +99,7 @@ class AIDataService:
             self._get_rankings_raw(),
         )
         normalized = [
-            (raw, model)
-            for raw in raw_models
-            if (model := _normalize_model(raw)) is not None
+            (raw, model) for raw in raw_models if (model := _normalize_model(raw)) is not None
         ]
         models_by_key: dict[str, dict[str, object]] = {}
         for raw, model in normalized:
@@ -174,9 +172,7 @@ class AIDataService:
         latest_date = str(latest_live["date"])
         latest_details = detail_rows.get(latest_date, [])
         priced_tokens = _finite_number(latest_live["priced_tokens"]) or 0.0
-        total_cost = sum(
-            _finite_number(item.get("cost_usd")) or 0.0 for item in latest_details
-        )
+        total_cost = sum(_finite_number(item.get("cost_usd")) or 0.0 for item in latest_details)
         for item in latest_details:
             tokens = _finite_number(item.get("tokens")) or 0.0
             cost = _finite_number(item.get("cost_usd")) or 0.0
@@ -200,8 +196,17 @@ class AIDataService:
                 "label": "OpenRouter usage-weighted token price",
                 "description": (
                     "Observed prompt and completion tokens are priced separately, then "
-                    "divided by matched tokens. Open-weight is a proxy based on a published "
-                    "Hugging Face ID."
+                    "divided by matched tokens. Token counts use each upstream provider's "
+                    "tokenizer and are not standardized across providers. Open-weight is a "
+                    "proxy based on a published Hugging Face ID."
+                ),
+                "formula": (
+                    "sum(prompt_tokens * input_price + completion_tokens * output_price) "
+                    "/ sum(prompt_tokens + completion_tokens) * 1,000,000"
+                ),
+                "constituent_rule": (
+                    "Every ranked model with an exact current OpenRouter catalog slug and "
+                    "text pricing joins automatically on refresh."
                 ),
                 "open_weight_proxy": True,
             },

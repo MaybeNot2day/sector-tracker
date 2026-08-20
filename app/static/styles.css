@@ -5549,6 +5549,21 @@ a.key-date-row:focus-visible {
   color: var(--muted);
 }
 
+.ai-capex-symbol {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font: 9px var(--font-mono);
+}
+
+.ai-table td.positive {
+  color: var(--green);
+}
+
+.ai-table td.negative {
+  color: var(--red);
+}
+
 .ai-badge {
   display: inline-block;
   margin-left: 5px;
@@ -5584,6 +5599,10 @@ a.key-date-row:focus-visible {
 .ai-index-layout {
   display: grid;
   grid-template-columns: minmax(0, 1.45fr) minmax(330px, 0.75fr);
+}
+
+.ai-capex-layout {
+  grid-template-columns: minmax(340px, 0.8fr) minmax(0, 1.2fr);
 }
 
 .ai-index-chart-panel {

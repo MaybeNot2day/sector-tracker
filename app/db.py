@@ -180,6 +180,18 @@ CREATE TABLE IF NOT EXISTS ai_token_index (
     model_count INTEGER NOT NULL,
     fetched_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS ai_capex_history (
+    symbol TEXT NOT NULL,
+    period_end TEXT NOT NULL,
+    capex REAL NOT NULL,
+    revenue REAL,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (symbol, period_end)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_capex_history_symbol_date
+ON ai_capex_history (symbol, period_end DESC);
 """
 _initialized_paths: set[Path] = set()
 _init_lock = Lock()
@@ -1327,7 +1339,6 @@ def load_etf_flow_history(path: Path, *, start: str) -> dict[str, list[dict[str,
     return grouped
 
 
-
 # --- AI model pricing and usage-weighted index ---------------------------
 
 
@@ -1457,6 +1468,63 @@ def load_ai_token_index_points(path: Path, limit: int) -> list[dict[str, object]
         }
         for row in reversed(rows)
     ]
+
+
+def save_ai_capex_history(
+    path: Path,
+    rows: Sequence[dict[str, object]],
+) -> None:
+    """Accrue reported quarterly capex and revenue observations."""
+    if not rows:
+        return
+    init_db(path)
+    fetched_at = datetime.now(UTC).isoformat()
+    values = [
+        (
+            str(row["symbol"]),
+            str(row["period_end"]),
+            float(cast(float, row["capex"])),
+            row.get("revenue"),
+            fetched_at,
+        )
+        for row in rows
+    ]
+    with _connect(path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO ai_capex_history (
+                symbol, period_end, capex, revenue, fetched_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(symbol, period_end) DO UPDATE SET
+                capex = excluded.capex,
+                revenue = excluded.revenue,
+                fetched_at = excluded.fetched_at
+            """,
+            values,
+        )
+
+
+def load_ai_capex_history(path: Path) -> dict[str, list[dict[str, object]]]:
+    """Load persisted quarterly capex series, oldest first per company."""
+    init_db(path)
+    with _connect(path) as conn:
+        rows = conn.execute(
+            """
+            SELECT symbol, period_end, capex, revenue
+            FROM ai_capex_history
+            ORDER BY symbol, period_end
+            """
+        ).fetchall()
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row["symbol"]), []).append(
+            {
+                "period_end": str(row["period_end"]),
+                "capex": float(row["capex"]),
+                "revenue": _optional_float(row["revenue"]),
+            }
+        )
+    return grouped
 
 
 _MD_NOISE = str.maketrans({"#": None, "*": None, "`": None, ">": None, "|": None, "_": None})

@@ -28,9 +28,9 @@ class CloseProbe:
 
     async def aclose(self) -> None:
         # Network resources must not close until every background user stopped.
-        assert self.tracker.stopped_tasks == 5
+        assert self.tracker.stopped_tasks == 6
         self.tracker.started.append(self.name)
-        if len(self.tracker.started) == 7:
+        if len(self.tracker.started) == 8:
             self.tracker.all_started.set()
         await self.tracker.all_started.wait()
         if self.fail:
@@ -52,6 +52,7 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
         "econ": CloseProbe("econ", tracker),
         "options": CloseProbe("options", tracker),
         "earnings": CloseProbe("earnings", tracker),
+        "ai": CloseProbe("ai", tracker),
     }
     settings = SimpleNamespace(
         watchlist_path=tmp_path / "watchlists.yaml",
@@ -102,10 +103,13 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
     monkeypatch.setattr(main_module, "news_poll_loop", idle_loop)
     monkeypatch.setattr(main_module, "econ_calendar_loop", idle_loop)
     monkeypatch.setattr(main_module, "earnings_warm_loop", idle_loop)
+    monkeypatch.setattr(main_module, "ai_data_warm_loop", idle_loop)
     monkeypatch.setattr(main_module, "EconCalendarService", lambda *args, **kwargs: probes["econ"])
     monkeypatch.setattr(
         main_module, "EarningsCalendarService", lambda *args, **kwargs: probes["earnings"]
     )
+    monkeypatch.setattr(main_module, "AIDataService", lambda *args, **kwargs: probes["ai"])
+    monkeypatch.setattr(main_module, "AICapexService", lambda *args, **kwargs: object())
     monkeypatch.setattr(main_module, "stop_task", fake_stop_task)
     test_app = SimpleNamespace(state=SimpleNamespace())
 
@@ -115,7 +119,7 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
 
     await asyncio.wait_for(run_lifespan(), timeout=1.0)
 
-    assert tracker.stopped_tasks == 5
+    assert tracker.stopped_tasks == 6
     assert set(tracker.started) == {
         "yahoo",
         "hyperliquid",
@@ -124,9 +128,18 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
         "options",
         "econ",
         "earnings",
+        "ai",
     }
     # Hyperliquid's close failure is isolated; every other resource still closes.
-    assert set(tracker.completed) == {"yahoo", "stooq", "news", "options", "econ", "earnings"}
+    assert set(tracker.completed) == {
+        "yahoo",
+        "stooq",
+        "news",
+        "options",
+        "econ",
+        "earnings",
+        "ai",
+    }
 
 
 @pytest.mark.asyncio

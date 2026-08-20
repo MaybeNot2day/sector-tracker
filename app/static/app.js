@@ -26,6 +26,8 @@ const aiView = document.querySelector("#ai-view");
 const aiSectionTabs = document.querySelector("#ai-section-tabs");
 const aiModelsPanel = document.querySelector("#ai-models-panel");
 const aiTokenIndexPanel = document.querySelector("#ai-token-index-panel");
+const aiCapexPanel = document.querySelector("#ai-capex-panel");
+const aiSourceLink = document.querySelector("#ai-source-link");
 const aiDataStatus = document.querySelector("#ai-data-status");
 const aiModelSearch = document.querySelector("#ai-model-search");
 const aiModelFilters = document.querySelector("#ai-model-filters");
@@ -33,6 +35,7 @@ const aiProviderFilterSelect = document.querySelector("#ai-provider-filter");
 const aiModelsSummary = document.querySelector("#ai-models-summary");
 const aiModelsBoard = document.querySelector("#ai-models-board");
 const aiIndexBoard = document.querySelector("#ai-index-board");
+const aiCapexBoard = document.querySelector("#ai-capex-board");
 const watchView = document.querySelector("#watch-view");
 const watchGrid = document.querySelector("#watch-grid");
 const watchAddInput = document.querySelector("#watch-add");
@@ -168,6 +171,9 @@ let aiModelSort = { key: "blended", direction: "asc" };
 let latestAiIndex = null;
 let aiIndexFetchedAt = 0;
 let aiIndexLoading = false;
+let latestAiCapex = null;
+let aiCapexFetchedAt = 0;
+let aiCapexLoading = false;
 const WATCH_STORAGE_KEY = "watch-symbols-v1";
 const WATCH_INTERVAL_KEY = "watch-interval-v1";
 const WATCH_MAX = 9;
@@ -672,6 +678,7 @@ function init() {
     refreshReportsBadge();
     if (activeView === "ai" && activeAiSection === "models") fetchAiModels(true);
     if (activeView === "ai" && activeAiSection === "token-index") fetchAiTokenIndex(true);
+    if (activeView === "ai" && activeAiSection === "capex") fetchAiCapex(true);
   });
   viewButtons.forEach((button) => {
     button.addEventListener("click", () => selectView(button.dataset.view || "daily"));
@@ -6660,17 +6667,21 @@ function renderAiView() {
 }
 
 function selectAiSection(section) {
-  activeAiSection = section === "token-index" ? "token-index" : "models";
-  const tokenIndexActive = activeAiSection === "token-index";
-  aiModelsPanel.hidden = tokenIndexActive;
-  aiTokenIndexPanel.hidden = !tokenIndexActive;
+  activeAiSection = ["models", "token-index", "capex"].includes(section) ? section : "models";
+  aiModelsPanel.hidden = activeAiSection !== "models";
+  aiTokenIndexPanel.hidden = activeAiSection !== "token-index";
+  aiCapexPanel.hidden = activeAiSection !== "capex";
+  const capexActive = activeAiSection === "capex";
+  aiSourceLink.href = capexActive ? "https://finance.yahoo.com/" : "https://openrouter.ai/rankings";
+  aiSourceLink.textContent = capexActive ? "Yahoo Finance source" : "OpenRouter source";
   aiSectionTabs.querySelectorAll("button[data-ai-section]").forEach((button) => {
     const selected = button.dataset.aiSection === activeAiSection;
     button.classList.toggle("active", selected);
     button.setAttribute("aria-selected", String(selected));
     button.tabIndex = selected ? 0 : -1;
   });
-  if (tokenIndexActive) fetchAiTokenIndex();
+  if (activeAiSection === "token-index") fetchAiTokenIndex();
+  else if (capexActive) fetchAiCapex();
   else fetchAiModels();
 }
 
@@ -7005,6 +7016,149 @@ function aiIndexChart(series) {
       <text x="${width - pad.right}" y="${height - 7}" text-anchor="end">${lastDate}</text>
     </svg>
   `;
+}
+
+async function fetchAiCapex(force = false) {
+  if (aiCapexLoading) return;
+  if (!force && latestAiCapex && Date.now() - aiCapexFetchedAt < AI_DATA_TTL_MS) {
+    renderAiCapex();
+    return;
+  }
+  aiCapexLoading = true;
+  aiDataStatus.textContent = "Loading reported infrastructure capex";
+  if (!latestAiCapex) {
+    aiCapexBoard.innerHTML = '<div class="empty-state">Loading company cash-flow statements</div>';
+  }
+  try {
+    const response = await fetch("/api/ai/capex");
+    if (!response.ok) throw new Error(`ai_capex_${response.status}`);
+    latestAiCapex = await response.json();
+    aiCapexFetchedAt = Date.now();
+    renderAiCapex();
+    aiDataStatus.textContent = `Company statements · through ${latestAiCapex.as_of}`;
+  } catch (error) {
+    if (latestAiCapex) {
+      renderAiCapex();
+      aiDataStatus.textContent = "Statements unavailable · showing cached capex";
+    } else {
+      aiCapexBoard.innerHTML =
+        '<div class="empty-state">Reported capex is temporarily unavailable</div>';
+      aiDataStatus.textContent = "Company capex unavailable";
+    }
+  } finally {
+    aiCapexLoading = false;
+  }
+}
+
+function renderAiCapex() {
+  if (!latestAiCapex?.companies) return;
+  const summary = latestAiCapex.summary || {};
+  const metrics = [
+    aiMetric("Tracked issuers", summary.companies, "hyperscalers + chip suppliers"),
+    aiMetric("Latest reported sum", formatAiBillions(summary.latest_reported_capex), "latest quarter per issuer"),
+    aiMetric("Trailing 4Q capex", formatAiBillions(summary.ttm_capex), "reported total capex"),
+    aiMetric("Statements through", summary.latest_period, "most recent period end"),
+  ].join("");
+  const rows = latestAiCapex.companies.map((company) => `
+    <tr>
+      <td>
+        <span class="ai-model-name">${escapeHtml(company.name)}</span>
+        <span class="ai-capex-symbol">${escapeHtml(company.symbol)}</span>
+      </td>
+      <td>${escapeHtml(company.period_end)}</td>
+      <td>${formatAiBillions(company.latest_capex)}</td>
+      <td class="${aiChangeClass(company.qoq_pct)}">${formatAiPct(company.qoq_pct)}</td>
+      <td class="${aiChangeClass(company.yoy_pct)}">${formatAiPct(company.yoy_pct)}</td>
+      <td>${formatAiBillions(company.ttm_capex)}</td>
+      <td>${formatAiPct(company.capex_to_revenue_pct, false)}</td>
+    </tr>
+  `).join("");
+  const latestSeries = latestAiCapex.series?.at(-1);
+  aiCapexBoard.innerHTML = `
+    <div class="ai-metrics">${metrics}</div>
+    <div class="ai-index-layout ai-capex-layout">
+      <section class="ai-index-chart-panel">
+        <div class="ai-index-heading">
+          <h3>Calendar-quarter reported capex</h3>
+          <span>USD · public company statements</span>
+        </div>
+        <div class="ai-index-chart" role="img" aria-label="Aggregate quarterly reported capital expenditure">
+          ${aiCapexChart(latestAiCapex.series || [])}
+        </div>
+        <div class="ai-index-legend">
+          <span><i class="main"></i>Aggregate capex</span>
+          <span>${latestSeries?.company_count || 0} issuers in latest calendar quarter</span>
+        </div>
+      </section>
+      <section class="ai-index-side ai-capex-side">
+        <h3>Issuer detail</h3>
+        <div class="ai-table-wrap">
+          <table class="ai-table">
+            <thead><tr><th>Company</th><th>Period</th><th>Capex</th><th>QoQ</th><th>YoY</th><th>TTM</th><th>Capex / rev.</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+    <div class="ai-method-note">
+      ${escapeHtml(latestAiCapex.methodology?.description || "")}
+      Source: Yahoo Finance company statements. Calendar-quarter aggregates may have partial
+      coverage until every issuer reports.
+    </div>
+  `;
+}
+
+function aiCapexChart(series) {
+  const rows = series.slice(-12);
+  const values = rows.map((row) => Number(row.total_capex) / 1e9).filter(Number.isFinite);
+  if (!values.length) return '<div class="empty-state">No capex history yet</div>';
+  const width = 760;
+  const height = 320;
+  const pad = { left: 54, right: 14, top: 16, bottom: 27 };
+  const max = Math.max(...values, 1) * 1.08;
+  const x = (index) =>
+    pad.left + (index / Math.max(rows.length - 1, 1)) * (width - pad.left - pad.right);
+  const y = (value) =>
+    pad.top + ((max - value) / max) * (height - pad.top - pad.bottom);
+  const points = rows.map((row, index) =>
+    `${x(index).toFixed(1)},${y(Number(row.total_capex) / 1e9).toFixed(1)}`,
+  ).join(" ");
+  const grid = [0, 0.5, 1].map((fraction) => {
+    const gridY = pad.top + fraction * (height - pad.top - pad.bottom);
+    return `
+      <line class="grid-line" x1="${pad.left}" y1="${gridY}" x2="${width - pad.right}" y2="${gridY}" />
+      <text x="5" y="${gridY + 3}">$${(max * (1 - fraction)).toFixed(0)}B</text>
+    `;
+  }).join("");
+  return `
+    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
+      ${grid}
+      <polyline class="series-main" points="${points}" />
+      <text x="${pad.left}" y="${height - 7}">${escapeHtml(rows[0].period)}</text>
+      <text x="${width - pad.right}" y="${height - 7}" text-anchor="end">${escapeHtml(rows.at(-1).period)}</text>
+    </svg>
+  `;
+}
+
+function formatAiBillions(value) {
+  if (value === null || value === undefined) return "—";
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "—";
+  return `$${(number / 1e9).toLocaleString("en-US", { maximumFractionDigits: 1 })}B`;
+}
+
+function formatAiPct(value, signed = true) {
+  if (value === null || value === undefined) return "—";
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "—";
+  const prefix = signed && number > 0 ? "+" : "";
+  return `${prefix}${number.toFixed(1)}%`;
+}
+
+function aiChangeClass(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number === 0) return "";
+  return number > 0 ? "positive" : "negative";
 }
 
 function aiMetric(label, value, note) {

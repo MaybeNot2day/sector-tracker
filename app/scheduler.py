@@ -122,6 +122,29 @@ async def earnings_warm_loop(app_state: Any) -> None:
         await asyncio.sleep(EARNINGS_WARM_SECONDS)
 
 
+# Six-hour cadence catches catalog and statement updates promptly while keeping
+# the public OpenRouter and Yahoo sources at a conservative request rate.
+AI_DATA_WARM_SECONDS = 6 * 60 * 60
+
+
+async def ai_data_warm_loop(app_state: Any) -> None:
+    """Accrue AI catalog, token-index, and infrastructure history unattended."""
+    await asyncio.sleep(5)
+    while True:
+        loaders = (
+            app_state.ai_data_service.get_models,
+            app_state.ai_data_service.get_token_index,
+            app_state.ai_capex_service.get_capex,
+        )
+        results = await asyncio.gather(*(loader() for loader in loaders), return_exceptions=True)
+        for loader, result in zip(loaders, results, strict=True):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            if isinstance(result, BaseException):
+                logger.warning("AI data warm loader %s failed: %s", loader.__name__, result)
+        await asyncio.sleep(AI_DATA_WARM_SECONDS)
+
+
 async def history_refresh_loop(app_state: Any) -> None:
     await asyncio.sleep(2)
     while True:

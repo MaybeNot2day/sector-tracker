@@ -352,6 +352,15 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
     expect(page.locator("#ai-index-board tbody tr")).to_have_count(2)
     expect(page.locator("#ai-index-board")).to_contain_text("OpenRouter market proxy")
 
+    page.locator("#ai-capex-tab").click()
+    expect(page.locator("#ai-capex-panel")).to_be_visible()
+    expect(page.locator("#ai-token-index-panel")).to_be_hidden()
+    expect(page.locator("#ai-capex-board .ai-metric")).to_have_count(4)
+    expect(page.locator("#ai-capex-board .series-main")).to_be_visible()
+    expect(page.locator("#ai-capex-board tbody tr")).to_have_count(2)
+    expect(page.locator("#ai-capex-board")).to_contain_text("AI infrastructure proxy")
+    expect(page.locator("#ai-source-link")).to_have_text("Yahoo Finance source")
+
     page.goto(f"{base_url}/#view=ai", wait_until="domcontentloaded")
     expect(page.locator("#ai-view")).to_be_visible()
     expect(page.locator("#ai-tab")).to_have_attribute("aria-selected", "true")
@@ -1876,6 +1885,50 @@ AI_TOKEN_INDEX_PAYLOAD: dict[str, Any] = {
 }
 
 
+AI_CAPEX_PAYLOAD: dict[str, Any] = {
+    "as_of": "2026-06-30",
+    "source": {"name": "Yahoo Finance company statements", "url": "https://finance.yahoo.com/"},
+    "methodology": {
+        "description": (
+            "Quarterly capital expenditure from company cash-flow statements. "
+            "This is an AI infrastructure proxy."
+        )
+    },
+    "summary": {
+        "companies": 2,
+        "latest_reported_capex": 55_000_000_000,
+        "ttm_capex": 180_000_000_000,
+        "latest_period": "2026-06-30",
+    },
+    "series": [
+        {"period": "2026-Q1", "total_capex": 48_000_000_000, "company_count": 2},
+        {"period": "2026-Q2", "total_capex": 55_000_000_000, "company_count": 2},
+    ],
+    "companies": [
+        {
+            "symbol": "MSFT",
+            "name": "Microsoft",
+            "period_end": "2026-06-30",
+            "latest_capex": 35_000_000_000,
+            "ttm_capex": 110_000_000_000,
+            "qoq_pct": 12.5,
+            "yoy_pct": 42.0,
+            "capex_to_revenue_pct": 30.0,
+        },
+        {
+            "symbol": "AMZN",
+            "name": "Amazon",
+            "period_end": "2026-06-30",
+            "latest_capex": 20_000_000_000,
+            "ttm_capex": 70_000_000_000,
+            "qoq_pct": -3.2,
+            "yoy_pct": 18.0,
+            "capex_to_revenue_pct": 14.0,
+        },
+    ],
+}
+
+
 def _stub_board_apis(page: Page) -> None:
     quote_requests = 0
 
@@ -1933,6 +1986,8 @@ def _stub_board_apis(page: Page) -> None:
             _fulfill_json(route, AI_MODELS_PAYLOAD)
         elif path == "/api/ai/token-index":
             _fulfill_json(route, AI_TOKEN_INDEX_PAYLOAD)
+        elif path == "/api/ai/capex":
+            _fulfill_json(route, AI_CAPEX_PAYLOAD)
         elif path == "/api/component-image":
             route.fulfill(status=200, content_type="image/png", body=_PNG_1PX)
         elif path == "/api/reports":

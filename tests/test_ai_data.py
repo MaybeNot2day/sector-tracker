@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import httpx
 import pytest
 
+from app import scheduler
 from app.services.ai_data import AIDataService
 
 MODELS = [
@@ -142,6 +145,108 @@ async def test_token_index_prices_observed_mix_and_persists_history(tmp_path: Pa
         assert conn.execute("SELECT COUNT(*) FROM ai_token_index").fetchone() == (2,)
 
     await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_new_catalog_model_automatically_joins_next_index_refresh(
+    tmp_path: Path,
+) -> None:
+    state: dict[str, list[dict[str, Any]]] = {
+        "models": cast(list[dict[str, Any]], list(MODELS)),
+        "rankings": list(RANKINGS),
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/models":
+            return httpx.Response(200, json={"data": state["models"]})
+        if request.url.path == "/api/frontend/v1/rankings/models":
+            return httpx.Response(200, json={"data": state["rankings"]})
+        return httpx.Response(404)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = AIDataService(tmp_path / "board.sqlite3", cache_seconds=0, client=client)
+    before = await service.get_token_index()
+
+    state["models"].append(
+        {
+            "id": "new/model-c",
+            "canonical_slug": "new/model-c",
+            "name": "New Co: Model C",
+            "context_length": 256_000,
+            "architecture": {
+                "modality": "text->text",
+                "output_modalities": ["text"],
+            },
+            "pricing": {"prompt": "0.000005", "completion": "0.000005"},
+        }
+    )
+    state["rankings"].append(
+        {
+            "date": "2026-08-18 00:00:00",
+            "model_permaslug": "new/model-c",
+            "variant_permaslug": "new/model-c",
+            "total_prompt_tokens": 300,
+            "total_completion_tokens": 300,
+        }
+    )
+
+    after = await service.get_token_index()
+    catalog = await service.get_models()
+
+    before_latest = cast(dict[str, Any], before["latest"])
+    after_latest = cast(dict[str, Any], after["latest"])
+    catalog_models = cast(list[dict[str, Any]], catalog["models"])
+    top_models = cast(list[dict[str, Any]], after["top_models"])
+
+    assert before_latest["model_count"] == 2
+    assert after_latest == {
+        "date": "2026-08-18",
+        "index_price": 3.5,
+        "open_price": 1.5,
+        "proprietary_price": 4.5,
+        "total_tokens": 1200,
+        "priced_tokens": 1200,
+        "coverage_pct": 100.0,
+        "open_share_pct": 33.33,
+        "model_count": 3,
+    }
+    assert any(model["id"] == "new/model-c" for model in catalog_models)
+    assert any(model["id"] == "new/model-c" for model in top_models)
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ai_data_warm_loop_refreshes_every_ai_dataset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class AIDataProbe:
+        async def get_models(self) -> None:
+            calls.append("models")
+
+        async def get_token_index(self) -> None:
+            calls.append("token-index")
+
+    class CapexProbe:
+        async def get_capex(self) -> None:
+            calls.append("capex")
+
+    sleeps = 0
+
+    async def fake_sleep(seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr("app.scheduler.asyncio.sleep", fake_sleep)
+    state = SimpleNamespace(ai_data_service=AIDataProbe(), ai_capex_service=CapexProbe())
+
+    with pytest.raises(asyncio.CancelledError):
+        await scheduler.ai_data_warm_loop(state)
+
+    assert calls == ["models", "token-index", "capex"]
 
 
 @pytest.mark.asyncio

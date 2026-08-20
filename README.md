@@ -20,14 +20,18 @@ A toggleable full-height news drawer streams public Telegram channels (scraped f
 t.me previews, no API key): the server polls every 15 seconds and pushes new posts to the
 browser over the WebSocket, and each channel gets a per-browser mute chip.
 
-The AI view starts the infrastructure-data buildout with two live OpenRouter-backed panels.
-Models normalizes the public catalog into comparable input, output, cache, and 3:1 blended
-prices with provider, context, open-weight, and intelligence metadata. Token Index prices the
+The AI view starts the infrastructure-data buildout with three live panels. Models normalizes
+the public OpenRouter catalog into comparable input, output, cache, and 3:1 blended prices
+with provider, context, open-weight, and intelligence metadata. Token Index prices the
 observed prompt/completion mix from OpenRouter's public rankings and splits the result into
-broad, open-weight-proxy, and proprietary series. Daily catalog and index observations accrue
-in SQLite (`ai_model_snapshots`, `ai_token_index`) so the board builds point-in-time history
-instead of treating today's catalog as historical truth. The token index is explicitly an
-OpenRouter market proxy, not a replica of Silicon Data's multi-network benchmark.
+broad, open-weight-proxy, and proprietary series. AI Capex tracks reported quarterly capital
+expenditure for eight hyperscalers and chip suppliers from Yahoo Finance company statements,
+including QoQ/YoY changes, trailing-four-quarter spend, and capex/revenue intensity. Reported
+total capex is an AI-infrastructure proxy because issuers do not consistently isolate AI-only
+spend. Catalog, index, and capex observations accrue in SQLite (`ai_model_snapshots`,
+`ai_token_index`, `ai_capex_history`) instead of treating today's upstream response as
+historical truth. The token index is explicitly an OpenRouter market proxy, not a replica of
+Silicon Data's multi-network benchmark.
 
 Market data blends two worlds. Hyperliquid drives crypto perps end to end (quotes, candles,
 funding, OI) and overlays live 24/7 prices onto the equities/ETFs its xyz dex lists as synthetic

@@ -17,7 +17,7 @@
         }
       } catch {}
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260819-3" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260819-4" />
   </head>
   <body>
     <aside id="news-panel" class="news-panel" aria-label="Live Telegram news" aria-hidden="true" inert>
@@ -297,12 +297,13 @@
               <p class="ai-kicker">AI Market Intelligence</p>
               <h2>Models, usage and infrastructure economics</h2>
             </div>
-            <a class="ai-source-link" href="https://openrouter.ai/rankings" target="_blank" rel="noopener noreferrer">OpenRouter source</a>
+            <a id="ai-source-link" class="ai-source-link" href="https://openrouter.ai/rankings" target="_blank" rel="noopener noreferrer">OpenRouter source</a>
           </header>
           <div class="ai-toolbar">
             <div id="ai-section-tabs" class="category-tabs ai-section-tabs" role="tablist" aria-label="AI data section">
               <button id="ai-models-tab" type="button" role="tab" data-ai-section="models" aria-controls="ai-models-panel" aria-selected="true" class="active">Models</button>
               <button id="ai-token-index-tab" type="button" role="tab" data-ai-section="token-index" aria-controls="ai-token-index-panel" aria-selected="false" tabindex="-1">Token Index</button>
+              <button id="ai-capex-tab" type="button" role="tab" data-ai-section="capex" aria-controls="ai-capex-panel" aria-selected="false" tabindex="-1">AI Capex</button>
             </div>
             <span id="ai-data-status" class="ai-data-status" aria-live="polite">Public data · lazy loaded</span>
           </div>
@@ -333,6 +334,12 @@
           <section id="ai-token-index-panel" class="ai-subpanel" role="tabpanel" aria-labelledby="ai-token-index-tab" hidden>
             <div id="ai-index-board" class="ai-board">
               <div class="empty-state">Open this tab to build the usage-weighted token index</div>
+            </div>
+          </section>
+
+          <section id="ai-capex-panel" class="ai-subpanel" role="tabpanel" aria-labelledby="ai-capex-tab" hidden>
+            <div id="ai-capex-board" class="ai-board">
+              <div class="empty-state">Open this tab to load reported infrastructure capex</div>
             </div>
           </section>
         </div>
@@ -536,6 +543,6 @@
 
     <div id="help-tooltip" class="help-tooltip" role="tooltip" hidden></div>
 
-    <script src="/static/app.js?v=20260819-4" defer></script>
+    <script src="/static/app.js?v=20260819-5" defer></script>
   </body>
 </html>
