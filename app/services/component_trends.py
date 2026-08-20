@@ -52,8 +52,8 @@ CATEGORIES: tuple[tuple[str, str], ...] = (
 # One gallery entry in the page's inline JS:  src: "//cdna...png", ...
 # title: "DDR4\u002D3200 2x8GB". src repeats as thumb; parse src+title pairs.
 _IMAGE_ENTRY = re.compile(
-    r"src:\s*\"(//cdna\.pcpartpicker\.com/[^\"]+/images/trends/[^\"]+\.png)\"[^{}]*?"
-    r"title:\s*\"([^\"]+)\"",
+    r'src:\s*"(//cdna\.pcpartpicker\.com/[^"]+/images/trends/[^"]+\.png)"[^{}]*?'
+    r'title:\s*"((?:\\.|[^"\\])*)"',
     re.DOTALL,
 )
 
@@ -65,6 +65,15 @@ _cache: dict[str, Any] = {"at": 0.0, "payload": None, "failed_at": None}
 _lock = asyncio.Lock()
 
 
+def _decode_js_string(value: str) -> str:
+    """Decode JSON-compatible JS escapes without corrupting literal Unicode."""
+    try:
+        decoded = json.loads(f'"{value}"')
+    except json.JSONDecodeError:
+        return value.strip()
+    return decoded.strip() if isinstance(decoded, str) else value.strip()
+
+
 def parse_trend_charts(html: str) -> list[dict[str, str]]:
     """Gallery image list from one trends page; dedupes repeated srcs."""
     charts: list[dict[str, str]] = []
@@ -73,8 +82,7 @@ def parse_trend_charts(html: str) -> list[dict[str, str]]:
         if src in seen:
             continue
         seen.add(src)
-        # JS string escapes like \u002D arrive literally; decode them.
-        title = raw_title.encode("utf-8").decode("unicode_escape").strip()
+        title = _decode_js_string(raw_title)
         charts.append({"title": title, "image": f"https:{src}"})
     return charts
 
@@ -229,7 +237,9 @@ def _now_iso() -> str:
 # frontend loads chart PNGs same-origin through /api/component-image. Only
 # the trends CDN prefix is fetchable — this is not an open proxy.
 IMAGE_PREFIX = "https://cdna.pcpartpicker.com/static/forever/images/trends/"
+IMAGE_MAX_BYTES = 5 * 1024 * 1024
 _IMAGE_CACHE_MAX = 200
+_IMAGE_CACHE_MAX_BYTES = 50 * 1024 * 1024
 _image_cache: dict[str, tuple[float, bytes, str]] = {}
 
 
@@ -241,18 +251,37 @@ async def fetch_trend_image(src: str) -> tuple[bytes, str] | None:
         return cached[1], cached[2]
     try:
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
-            response = await client.get(src, headers=_HEADERS)
-            response.raise_for_status()
+            async with client.stream("GET", src, headers=_HEADERS) as response:
+                response.raise_for_status()
+                content_type = response.headers.get("content-type", "image/png")
+                if not content_type.startswith("image/"):
+                    return None
+                content_length = response.headers.get("content-length")
+                if content_length is not None:
+                    try:
+                        if int(content_length) > IMAGE_MAX_BYTES:
+                            return None
+                    except ValueError:
+                        pass
+                chunks: list[bytes] = []
+                size = 0
+                async for chunk in response.aiter_bytes():
+                    size += len(chunk)
+                    if size > IMAGE_MAX_BYTES:
+                        return None
+                    chunks.append(chunk)
     except httpx.HTTPError:
         logger.warning("component trend image fetch failed")
         if cached is not None:
             return cached[1], cached[2]
         return None
-    content_type = response.headers.get("content-type", "image/png")
-    if not content_type.startswith("image/"):
-        return None
-    if len(_image_cache) >= _IMAGE_CACHE_MAX:
+    content = b"".join(chunks)
+    while _image_cache and (
+        len(_image_cache) >= _IMAGE_CACHE_MAX
+        or sum(len(entry[1]) for entry in _image_cache.values()) + len(content)
+        > _IMAGE_CACHE_MAX_BYTES
+    ):
         oldest = min(_image_cache, key=lambda key: _image_cache[key][0])
         del _image_cache[oldest]
-    _image_cache[src] = (monotonic(), response.content, content_type)
-    return response.content, content_type
+    _image_cache[src] = (monotonic(), content, content_type)
+    return content, content_type

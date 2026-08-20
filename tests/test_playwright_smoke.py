@@ -373,12 +373,25 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
     expect(page.locator("#ai-capex-panel")).to_be_hidden()
     expect(page.locator("#ai-hardware-board .ai-metric")).to_have_count(4)
     expect(page.locator("#ai-hardware-board tbody tr")).to_have_count(2)
+    gpu_select = page.locator("#ai-hardware-gpu")
+    gpu_select.focus()
+    gpu_select.dispatch_event("change")
+    expect(page.locator("#ai-hardware-gpu")).to_be_focused()
     expect(page.locator("#ai-hardware-cost")).to_have_text("$8,640")
+    page.locator("#ai-hardware-count").fill("0")
+    expect(page.locator("#ai-hardware-cost")).to_have_text("—")
+    expect(page.locator("#ai-hardware-cost-note")).to_contain_text("allowed range")
     page.locator("#ai-hardware-count").fill("4")
     page.locator("#ai-hardware-hours").fill("12")
     page.locator("#ai-hardware-days").fill("10")
     expect(page.locator("#ai-hardware-cost")).to_have_text("$720")
     expect(page.locator("#ai-source-link")).to_have_text("ComputePrices source")
+
+    # Warm-cache section switches must restore the visible section's status.
+    page.locator("#ai-capex-tab").click()
+    expect(page.locator("#ai-data-status")).to_contain_text("Company statements")
+    page.locator("#ai-hardware-tab").click()
+    expect(page.locator("#ai-data-status")).to_contain_text("ComputePrices")
 
     # PCPartPicker street-price charts now live with the other hardware data.
     # Images stay same-origin and category selection updates the visible cards.
@@ -395,6 +408,13 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
     expect(page.locator("#ai-hardware-panel .component-card strong")).to_have_text(
         "Ryzen 7 Zen 4 (AM5)"
     )
+
+    # Global refresh force-refreshes both Hardware data sources.
+    with (
+        page.expect_request("**/api/ai/hardware"),
+        page.expect_request("**/api/component-trends"),
+    ):
+        page.locator("#refresh-button").click()
 
     page.goto(f"{base_url}/#view=ai", wait_until="domcontentloaded")
     expect(page.locator("#ai-view")).to_be_visible()
@@ -1565,7 +1585,6 @@ def test_trends_tab_renders_group_bands_and_links_to_markets(page: Page, base_ur
         "aria-pressed", "true"
     )
     expect(page.locator(".trend-card")).to_have_count(2)
-
 
     # A card is a cross-link: it opens Markets filtered to the group.
     page.locator(".trend-card").first.click()

@@ -577,11 +577,10 @@ function init() {
   // Stay in "poll" until the socket's open handler flips to "ws" — assigning
   // "ws" here gates off the 10s poll while the socket hangs in CONNECTING.
   updateFeedModeLabel();
-  if (shouldUseWebSocket()) openSocket();
-  // Poll only while the tab is visible; a hidden tab otherwise burns
-  // ~5.7k serverless invocations/day for nothing. On WS hosts frames
-  // stream in; polling would double-fetch and risk stale overwrites
-  // (feedMode flips to "poll" if the socket dies, resuming this timer).
+  openSocket();
+  // Poll only while the tab is visible. WebSocket frames normally stream in;
+  // polling would double-fetch and risk stale overwrites (feedMode flips to
+  // "poll" if the socket dies, resuming this timer).
   window.setInterval(() => {
     if (document.hidden) return;
     if (feedMode === "ws") {
@@ -610,7 +609,7 @@ function init() {
   window.setInterval(() => {
     if (!document.hidden) refreshKeyDateCountdowns();
   }, 30000);
-  // WS pushes news instantly; polling is the fallback for serverless hosts.
+  // WebSocket pushes news instantly; polling remains the transport fallback.
   window.setInterval(() => {
     if (document.hidden) return;
     updateNewsAges();
@@ -625,7 +624,7 @@ function init() {
       fetchQuotes();
       // Reconnects are not scheduled while hidden; reopen on return
       // (openSocket no-ops if a socket is already OPEN/CONNECTING).
-      if (shouldUseWebSocket()) openSocket();
+      openSocket();
     } else {
       recoverStaleWebSocket();
     }
@@ -688,6 +687,10 @@ function init() {
     if (activeView === "ai" && activeAiSection === "models") fetchAiModels(true);
     if (activeView === "ai" && activeAiSection === "token-index") fetchAiTokenIndex(true);
     if (activeView === "ai" && activeAiSection === "capex") fetchAiCapex(true);
+    if (activeView === "ai" && activeAiSection === "hardware") {
+      fetchAiHardware(true);
+      loadComponentTrends(true);
+    }
   });
   viewButtons.forEach((button) => {
     button.addEventListener("click", () => selectView(button.dataset.view || "daily"));
@@ -1086,10 +1089,13 @@ function selectTrendsRange(days) {
 // --- PCPartPicker component prices (Hardware panel) -------------------------
 // The source publishes daily-regenerated PNG charts (no data API); the
 // backend scrapes each category gallery and proxies its CDN images.
-async function loadComponentTrends() {
-  if (latestComponents && Date.now() - componentsFetchedAt < COMPONENTS_TTL_MS) return;
+async function loadComponentTrends(force = false) {
+  if (!force && latestComponents && Date.now() - componentsFetchedAt < COMPONENTS_TTL_MS) return;
   if (componentsLoading) return;
   componentsLoading = true;
+  if (!latestComponents) {
+    componentsGrid.innerHTML = '<div class="empty-state">Loading component prices</div>';
+  }
   try {
     const response = await fetch("/api/component-trends");
     if (!response.ok) throw new Error("components_failed");
@@ -1624,11 +1630,6 @@ async function fetchQuotes() {
   }
 }
 
-function shouldUseWebSocket() {
-  // Serverless (Vercel) can't hold sockets; every long-lived host can.
-  // On Railway/VPS the board streams over WS instead of 10s polling.
-  return !window.location.hostname.endsWith(".vercel.app");
-}
 
 function openSocket() {
   // A pending reconnect timer and a visibility reopen can race; never
@@ -4966,14 +4967,8 @@ function moveMarketRowFocus(step) {
 
 async function openEditor() {
   openDialog(editorModal, groupNameInput);
-  setEditorStatus(persistenceNotice());
+  setEditorStatus("");
   await fetchWatchlistConfig();
-}
-
-function persistenceNotice() {
-  // Local runs persist edits to the YAML file; serverless deployments write
-  // to /tmp and lose edits on the next cold start.
-  return shouldUseWebSocket() ? "" : "Edits are session-only on this deployment — they reset on redeploy/cold start.";
 }
 
 function closeEditor() {
@@ -6670,6 +6665,11 @@ function toChartTime(value, interval) {
 
 // --- AI market intelligence ---------------------------------------------
 
+function setAiDataStatus(section, text) {
+  if (activeAiSection === section) aiDataStatus.textContent = text;
+}
+
+
 function renderAiView() {
   selectAiSection(activeAiSection);
 }
@@ -6728,10 +6728,11 @@ async function fetchAiModels(force = false) {
   if (aiModelsLoading) return;
   if (!force && latestAiModels && Date.now() - aiModelsFetchedAt < AI_DATA_TTL_MS) {
     renderAiModels();
+    setAiDataStatus("models", `OpenRouter · ${latestAiModels.summary?.models || 0} text models`);
     return;
   }
   aiModelsLoading = true;
-  aiDataStatus.textContent = "Loading OpenRouter model catalog";
+  setAiDataStatus("models", "Loading OpenRouter model catalog");
   if (!latestAiModels) {
     aiModelsBoard.innerHTML = '<div class="empty-state">Loading model prices</div>';
   }
@@ -6742,15 +6743,15 @@ async function fetchAiModels(force = false) {
     syncAiProviderFilter();
     aiModelsFetchedAt = Date.now();
     renderAiModels();
-    aiDataStatus.textContent = `OpenRouter · ${latestAiModels.summary?.models || 0} text models`;
+    setAiDataStatus("models", `OpenRouter · ${latestAiModels.summary?.models || 0} text models`);
   } catch (error) {
     if (latestAiModels) {
       renderAiModels();
-      aiDataStatus.textContent = "OpenRouter unavailable · showing cached catalog";
+      setAiDataStatus("models", "OpenRouter unavailable · showing cached catalog");
     } else {
       aiModelsBoard.innerHTML =
         '<div class="empty-state">Model pricing is temporarily unavailable</div>';
-      aiDataStatus.textContent = "OpenRouter model catalog unavailable";
+      setAiDataStatus("models", "OpenRouter model catalog unavailable");
     }
   } finally {
     aiModelsLoading = false;
@@ -6914,10 +6915,11 @@ async function fetchAiTokenIndex(force = false) {
   if (aiIndexLoading) return;
   if (!force && latestAiIndex && Date.now() - aiIndexFetchedAt < AI_DATA_TTL_MS) {
     renderAiTokenIndex();
+    setAiDataStatus("token-index", `OpenRouter rankings · through ${latestAiIndex.as_of}`);
     return;
   }
   aiIndexLoading = true;
-  aiDataStatus.textContent = "Building usage-weighted token index";
+  setAiDataStatus("token-index", "Building usage-weighted token index");
   if (!latestAiIndex) {
     aiIndexBoard.innerHTML = '<div class="empty-state">Matching usage to model prices</div>';
   }
@@ -6927,15 +6929,15 @@ async function fetchAiTokenIndex(force = false) {
     latestAiIndex = await response.json();
     aiIndexFetchedAt = Date.now();
     renderAiTokenIndex();
-    aiDataStatus.textContent = `OpenRouter rankings · through ${latestAiIndex.as_of}`;
+    setAiDataStatus("token-index", `OpenRouter rankings · through ${latestAiIndex.as_of}`);
   } catch (error) {
     if (latestAiIndex) {
       renderAiTokenIndex();
-      aiDataStatus.textContent = "Rankings unavailable · showing cached index";
+      setAiDataStatus("token-index", "Rankings unavailable · showing cached index");
     } else {
       aiIndexBoard.innerHTML =
         '<div class="empty-state">Token index is temporarily unavailable</div>';
-      aiDataStatus.textContent = "OpenRouter rankings unavailable";
+      setAiDataStatus("token-index", "OpenRouter rankings unavailable");
     }
   } finally {
     aiIndexLoading = false;
@@ -7051,10 +7053,11 @@ async function fetchAiCapex(force = false) {
   if (aiCapexLoading) return;
   if (!force && latestAiCapex && Date.now() - aiCapexFetchedAt < AI_DATA_TTL_MS) {
     renderAiCapex();
+    setAiDataStatus("capex", `Company statements · through ${latestAiCapex.as_of}`);
     return;
   }
   aiCapexLoading = true;
-  aiDataStatus.textContent = "Loading reported infrastructure capex";
+  setAiDataStatus("capex", "Loading reported infrastructure capex");
   if (!latestAiCapex) {
     aiCapexBoard.innerHTML = '<div class="empty-state">Loading company cash-flow statements</div>';
   }
@@ -7064,15 +7067,15 @@ async function fetchAiCapex(force = false) {
     latestAiCapex = await response.json();
     aiCapexFetchedAt = Date.now();
     renderAiCapex();
-    aiDataStatus.textContent = `Company statements · through ${latestAiCapex.as_of}`;
+    setAiDataStatus("capex", `Company statements · through ${latestAiCapex.as_of}`);
   } catch (error) {
     if (latestAiCapex) {
       renderAiCapex();
-      aiDataStatus.textContent = "Statements unavailable · showing cached capex";
+      setAiDataStatus("capex", "Statements unavailable · showing cached capex");
     } else {
       aiCapexBoard.innerHTML =
         '<div class="empty-state">Reported capex is temporarily unavailable</div>';
-      aiDataStatus.textContent = "Company capex unavailable";
+      setAiDataStatus("capex", "Company capex unavailable");
     }
   } finally {
     aiCapexLoading = false;
@@ -7141,10 +7144,12 @@ async function fetchAiHardware(force = false) {
   if (aiHardwareLoading) return;
   if (!force && latestAiHardware && Date.now() - aiHardwareFetchedAt < AI_DATA_TTL_MS) {
     renderAiHardware();
+    const prefix = latestAiHardware.stale ? "Cached ComputePrices data" : "ComputePrices";
+    setAiDataStatus("hardware", `${prefix} · through ${latestAiHardware.as_of}`);
     return;
   }
   aiHardwareLoading = true;
-  aiDataStatus.textContent = "Loading cloud GPU rental prices";
+  setAiDataStatus("hardware", "Loading cloud GPU rental prices");
   if (!latestAiHardware) {
     aiHardwareBoard.innerHTML = '<div class="empty-state">Loading GPU models and providers</div>';
   }
@@ -7155,15 +7160,15 @@ async function fetchAiHardware(force = false) {
     aiHardwareFetchedAt = Date.now();
     renderAiHardware();
     const prefix = latestAiHardware.stale ? "Cached ComputePrices data" : "ComputePrices";
-    aiDataStatus.textContent = `${prefix} · through ${latestAiHardware.as_of}`;
+    setAiDataStatus("hardware", `${prefix} · through ${latestAiHardware.as_of}`);
   } catch (error) {
     if (latestAiHardware) {
       renderAiHardware();
-      aiDataStatus.textContent = "ComputePrices unavailable · showing cached GPU prices";
+      setAiDataStatus("hardware", "ComputePrices unavailable · showing cached GPU prices");
     } else {
       aiHardwareBoard.innerHTML =
         '<div class="empty-state">Cloud GPU prices are temporarily unavailable</div>';
-      aiDataStatus.textContent = "ComputePrices unavailable";
+      setAiDataStatus("hardware", "ComputePrices unavailable");
     }
   } finally {
     aiHardwareLoading = false;
@@ -7284,6 +7289,7 @@ function renderAiHardware() {
   aiHardwareBoard.querySelector("#ai-hardware-gpu")?.addEventListener("change", (event) => {
     selectedAiHardwareSlug = event.target.value;
     renderAiHardware();
+    aiHardwareBoard.querySelector("#ai-hardware-gpu")?.focus();
   });
   [
     ["#ai-hardware-count", "count", 1, 1024],
@@ -7291,7 +7297,12 @@ function renderAiHardware() {
     ["#ai-hardware-days", "days", 1, 366],
   ].forEach(([selector, field, min, max]) => {
     aiHardwareBoard.querySelector(selector)?.addEventListener("input", (event) => {
-      const value = Math.max(min, Math.min(max, Number(event.target.value) || min));
+      const raw = event.target.value;
+      const value = Number(raw);
+      if (raw === "" || !Number.isFinite(value) || !event.target.validity.valid) {
+        showAiHardwareEstimateUnavailable();
+        return;
+      }
       if (field === "count") aiHardwareGpuCount = value;
       else if (field === "hours") aiHardwareHoursPerDay = value;
       else aiHardwareDays = value;
@@ -7300,6 +7311,14 @@ function renderAiHardware() {
   });
   updateAiHardwareEstimate(lowestRate, selected?.name);
 }
+
+function showAiHardwareEstimateUnavailable() {
+  const output = aiHardwareBoard.querySelector("#ai-hardware-cost");
+  const note = aiHardwareBoard.querySelector("#ai-hardware-cost-note");
+  if (output) output.textContent = "—";
+  if (note) note.textContent = "Enter values within the allowed range";
+}
+
 
 function updateAiHardwareEstimate(rateOverride = null, nameOverride = null) {
   const selected = latestAiHardware?.models?.find(

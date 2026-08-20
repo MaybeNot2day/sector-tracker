@@ -26,7 +26,7 @@ import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 
-from vault_report_uploader import load_config
+from vault_report_uploader import _is_secure_board_url, load_config
 
 DEFAULT_BACKUP_DIR = Path.home() / "hermes-research/.board-backups"
 DEFAULT_KEEP = 14
@@ -36,6 +36,8 @@ REQUEST_TIMEOUT = 180
 
 
 def fetch_snapshot(base_url: str, token: str) -> bytes:
+    if not _is_secure_board_url(base_url):
+        raise ValueError("BOARD_URL must use HTTPS (HTTP is allowed only for localhost)")
     request = urllib.request.Request(base_url + "/api/backup", headers={"X-Edit-Token": token})
     with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:  # nosec B310
         return bytes(response.read())

@@ -421,7 +421,8 @@ The board supports:
 Environment variables:
 
 ```bash
-EDIT_TOKEN=                # when set, watchlist edits require this token
+EDIT_TOKEN=                # required for mutations/backups; empty disables those endpoints
+ALLOW_UNSAFE_EDITS=false   # local-only explicit opt-in; never enable on a reachable server
 DATABASE_PATH=./data/market_board.sqlite3
 DATABASE_SEED_PATH=./config/market_board_seed.sqlite3
 WATCHLIST_PATH=./config/watchlists.yaml
@@ -508,15 +509,3 @@ sudo systemctl restart sector-tracker
 Read access is public through Tailscale Funnel. Mutation endpoints still require
 `X-Edit-Token`; the browser keeps that token only for the current tab session.
 
-### Vercel
-
-This repo includes `api/index.py`, `requirements.txt`, and `vercel.json` for Vercel.
-Vercel runs the FastAPI app as serverless functions, so `vercel.json` uses `/tmp` for
-runtime SQLite/watchlist files, seeds SQLite from `config/market_board_seed.sqlite3`,
-and disables background polling tasks. The browser polls `/api/quotes` directly in
-production instead of opening the local WebSocket. Watchlist edits and daily snapshots
-are runtime-only there; prefer the VPS for the full feature set.
-
-```bash
-vercel --prod
-```

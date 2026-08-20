@@ -10,11 +10,13 @@ thumb repeat the same URL), and ignore non-trend images.
 from __future__ import annotations
 
 import copy
+import importlib.util
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -25,6 +27,14 @@ from app.services.component_trends import (
     normalize_pushed_payload,
     parse_trend_charts,
 )
+
+_PUSHER_SPEC = importlib.util.spec_from_file_location(
+    "component_trends_pusher",
+    Path(__file__).resolve().parents[1] / "scripts" / "component_trends_pusher.py",
+)
+assert _PUSHER_SPEC is not None and _PUSHER_SPEC.loader is not None
+component_trends_pusher = importlib.util.module_from_spec(_PUSHER_SPEC)
+_PUSHER_SPEC.loader.exec_module(component_trends_pusher)
 
 PAGE_SNIPPET = """ noqa: E501
         var images = [
@@ -63,6 +73,62 @@ def test_parser_extracts_titles_and_absolute_urls() -> None:
 
 def test_parser_survives_pages_without_a_gallery() -> None:
     assert parse_trend_charts("<html><body>maintenance</body></html>") == []
+
+
+def test_parser_preserves_unicode_and_decodes_escaped_quotes() -> None:
+    html = r"""
+        var images = [{
+            src: "//cdna.pcpartpicker.com/static/forever/images/trends/intel.png",
+            title: "Intel® Core \"Ultra\""
+        }];
+    """
+    assert parse_trend_charts(html) == [
+        {
+            "title": 'Intel® Core "Ultra"',
+            "image": "https://cdna.pcpartpicker.com/static/forever/images/trends/intel.png",
+        }
+    ]
+
+
+def test_parser_ignores_a_malformed_trailing_escape() -> None:
+    html = r"""
+        var images = [{
+            src: "//cdna.pcpartpicker.com/static/forever/images/trends/broken.png",
+            title: "Broken\"
+        }];
+    """
+    assert parse_trend_charts(html) == []
+
+
+@pytest.mark.asyncio
+async def test_image_proxy_rejects_oversize_response_before_reading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_client = httpx.AsyncClient
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            headers={
+                "content-type": "image/png",
+                "content-length": str(component_trends.IMAGE_MAX_BYTES + 1),
+            },
+            content=b"not-read",
+        )
+    )
+
+    def client_factory(**kwargs: Any) -> httpx.AsyncClient:
+        return original_client(transport=transport, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr("app.services.component_trends.httpx.AsyncClient", client_factory)
+    component_trends._image_cache.clear()
+    src = IMAGE_PREFIX + "oversize.png"
+    assert await component_trends.fetch_trend_image(src) is None
+    assert src not in component_trends._image_cache
+
+
+def test_pusher_rejects_insecure_remote_url() -> None:
+    with pytest.raises(ValueError, match="must use HTTPS"):
+        component_trends_pusher.push("http://board.test", "sekrit", VALID_PUSH)
 
 
 VALID_PUSH = {

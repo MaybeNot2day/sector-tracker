@@ -44,6 +44,11 @@ def _idea(**overrides: Any) -> dict[str, Any]:
     return base
 
 
+def test_close_rejects_insecure_remote_url() -> None:
+    with pytest.raises(ValueError, match="must use HTTPS"):
+        monitor.close_position("http://board.test", "sekrit", 9, "stop")
+
+
 @pytest.fixture()
 def wired(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     state_path = tmp_path / "stop-monitor.json"

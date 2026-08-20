@@ -1,8 +1,8 @@
-"""EDIT_TOKEN gate on watchlist mutations.
+"""EDIT_TOKEN gate on mutations, diagnostics, and database exports.
 
-Contract: when settings.edit_token is empty every request is allowed; when it
-is set, mutation requests must carry the exact token in X-Edit-Token or get
-401 "edit_token_required". Reads are never gated.
+Contract: an empty token disables protected endpoints unless explicit local
+unsafe mode is enabled. Configured tokens require an exact X-Edit-Token match.
+Ordinary read endpoints stay public.
 
 The app lifespan starts network pollers, so these tests never run it: the
 dependency is exercised directly and over HTTP via a TestClient that is not
@@ -26,6 +26,7 @@ from app.models import AssetConfig, GroupConfig
 from app.providers.base import ValidationStatus
 
 TOKEN = "s3cret-edit-token"
+UNSAFE_LOCAL = "__unsafe_local__"
 
 
 @pytest.fixture
@@ -39,8 +40,10 @@ def configure_edit_token(tmp_path: Path) -> Iterator[Callable[[str], None]]:
     original = app.state.settings if had_settings else None
 
     def _configure(edit_token: str) -> None:
+        unsafe_local = edit_token == UNSAFE_LOCAL
         app.state.settings = SimpleNamespace(
-            edit_token=edit_token,
+            edit_token="" if unsafe_local else edit_token,
+            allow_unsafe_edits=unsafe_local,
             watchlist_path=tmp_path / "watchlists.yaml",
         )
 
@@ -70,7 +73,7 @@ def configure_asset_mutation(
         groups: list[GroupConfig],
         validation_status: ValidationStatus,
     ) -> tuple[TestClient, Path]:
-        configure_edit_token("")
+        configure_edit_token(UNSAFE_LOCAL)
         watchlist_path = tmp_path / "watchlists.yaml"
         save_watchlists(watchlist_path, groups)
         provider = StubValidationProvider(validation_status)
@@ -93,8 +96,7 @@ def configure_asset_mutation(
 @pytest.mark.parametrize(
     ("edit_token", "header"),
     [
-        pytest.param("", None, id="empty-token-missing-header"),
-        pytest.param("", "anything", id="empty-token-ignores-header"),
+        pytest.param(UNSAFE_LOCAL, None, id="explicit-unsafe-local-mode"),
         pytest.param(TOKEN, TOKEN, id="exact-match"),
     ],
 )
@@ -106,6 +108,18 @@ def test_require_edit_token_allows(
     configure_edit_token(edit_token)
 
     require_edit_token(header)
+
+
+def test_require_edit_token_fails_closed_when_secret_is_missing(
+    configure_edit_token: Callable[[str], None],
+) -> None:
+    configure_edit_token("")
+
+    with pytest.raises(HTTPException) as excinfo:
+        require_edit_token(None)
+
+    assert excinfo.value.status_code == 503
+    assert excinfo.value.detail == "edit_token_not_configured"
 
 
 @pytest.mark.parametrize(
@@ -161,6 +175,17 @@ def test_mutation_endpoints_reject_missing_token(
     assert response.json()["detail"] == "edit_token_required"
 
 
+def test_mutation_endpoint_is_disabled_when_secret_is_missing(
+    configure_edit_token: Callable[[str], None],
+) -> None:
+    configure_edit_token("")
+
+    response = TestClient(app).post("/api/groups", json={"name": "NEWGRP"})
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "edit_token_not_configured"
+
+
 def test_mutation_endpoint_rejects_wrong_token_header(
     configure_edit_token: Callable[[str], None],
 ) -> None:
@@ -177,10 +202,10 @@ def test_mutation_endpoint_rejects_wrong_token_header(
     assert response.json()["detail"] == "edit_token_required"
 
 
-# --- wiring: exactly the four mutation routes are gated, reads stay open ---
+# --- wiring: every privileged route is gated; ordinary reads stay open ---
 
 
-def test_gate_is_wired_to_exactly_the_mutation_routes() -> None:
+def test_gate_is_wired_to_every_privileged_route() -> None:
     gated = {
         (method, route.path)
         for route in app.routes
@@ -199,6 +224,8 @@ def test_gate_is_wired_to_exactly_the_mutation_routes() -> None:
         ("POST", "/api/component-trends"),
         ("POST", "/api/fringe/{idea_id}/close"),
         ("GET", "/api/backup"),
+        ("GET", "/api/hyperliquid-status"),
+        ("GET", "/api/yahoo-status"),
     }
 
 
@@ -209,7 +236,7 @@ def test_gate_is_wired_to_exactly_the_mutation_routes() -> None:
 def test_create_asset_rejects_symbol_containing_slash(
     configure_edit_token: Callable[[str], None],
 ) -> None:
-    configure_edit_token("")
+    configure_edit_token(UNSAFE_LOCAL)
     client = TestClient(app)
 
     response = client.post("/api/groups/TEST/assets", json={"symbol": "BRK/A"})
@@ -222,7 +249,7 @@ def test_create_asset_rejects_blank_symbol(
 ) -> None:
     # " " passes min_length but collapses to "" — it would persist as an
     # empty-symbol asset unreachable by the DELETE path param.
-    configure_edit_token("")
+    configure_edit_token(UNSAFE_LOCAL)
     client = TestClient(app)
 
     response = client.post("/api/groups/TEST/assets", json={"symbol": "   "})
@@ -233,7 +260,7 @@ def test_create_asset_rejects_blank_symbol(
 def test_create_group_rejects_blank_name(
     configure_edit_token: Callable[[str], None],
 ) -> None:
-    configure_edit_token("")
+    configure_edit_token(UNSAFE_LOCAL)
     client = TestClient(app)
 
     response = client.post("/api/groups", json={"name": "   "})

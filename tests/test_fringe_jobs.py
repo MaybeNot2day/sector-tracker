@@ -56,6 +56,11 @@ def _modes(closed_count: int, win_rate: float, streak: int, expectancy: float) -
     return modes
 
 
+def test_weekly_report_rejects_insecure_remote_url() -> None:
+    with pytest.raises(ValueError, match="must use HTTPS"):
+        review.post_report("http://board.test", "sekrit", "2026-08-20", "body")
+
+
 def test_streak_counts_consecutive_losses_newest_first() -> None:
     closed = [
         _closed(1, 50.0, "2026-08-10"),
@@ -106,6 +111,19 @@ def test_profit_factor_is_inf_without_losses() -> None:
     result = stats.compute_rolling_stats([_closed(1, 10.0)])
     assert result["profit_factor"] == float("inf")
     assert stats.format_profit_factor(result["profit_factor"]) == "inf"
+
+
+def test_rolling_stats_ignore_unsized_closes() -> None:
+    closed = [
+        _closed(1, 100.0, "2026-08-12"),
+        _closed(2, -40.0, "2026-08-13"),
+        _closed(3, 0.0, "2026-08-14", realized_usd=None),
+    ]
+    result = stats.compute_rolling_stats(closed)
+    assert result["closed_count"] == 2
+    assert result["win_rate_pct"] == 50.0
+    assert result["expectancy_usd"] == 30.0
+    assert result["losing_streak"] == 1
 
 
 def test_direction_buckets() -> None:

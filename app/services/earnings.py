@@ -344,16 +344,20 @@ class EarningsCalendarService:
 
         semaphore = asyncio.Semaphore(_SURPRISE_CONCURRENCY)
 
-        async def fetch(symbol: str) -> tuple[str, list[bool | None]]:
+        async def fetch(symbol: str) -> tuple[str, list[bool | None] | None]:
             async with semaphore:
                 try:
                     response = await self._http().get(SURPRISE_URL.format(symbol=symbol))
                     response.raise_for_status()
                     return symbol, _parse_surprises(response.json())
                 except Exception:
-                    return symbol, []
+                    return symbol, None
 
         for symbol, marks in await asyncio.gather(*(fetch(symbol) for symbol in missing)):
+            if marks is None:
+                stale = self._surprise_cache.get(symbol)
+                results[symbol] = stale[1] if stale is not None else []
+                continue
             results[symbol] = marks
             self._surprise_cache[symbol] = (now, marks)
         while len(self._surprise_cache) > SURPRISE_CACHE_MAX:

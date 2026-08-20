@@ -320,7 +320,7 @@ class SecurityHeadersMiddleware:
 
 
 app = FastAPI(title="Cross-Asset Board", lifespan=lifespan)
-# Vercel's edge gzips responses; this covers local/VPS deployments too.
+# Compress dynamic responses on the VPS; static assets are already compact.
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.add_middleware(SecurityHeadersMiddleware)
 
@@ -410,15 +410,13 @@ def groups() -> dict[str, object]:
 def require_edit_token(
     x_edit_token: str | None = Header(default=None, alias="X-Edit-Token"),
 ) -> None:
-    """Gate watchlist mutations when EDIT_TOKEN is configured.
-
-    Read endpoints stay public so the board can be shared; without a token
-    anyone with the URL could edit or wipe the persisted watchlists. An
-    empty EDIT_TOKEN keeps the open behavior for local development.
-    """
-    token = app.state.settings.edit_token
+    """Gate every mutation and database export behind explicit configuration."""
+    settings = app.state.settings
+    token = settings.edit_token
     if not token:
-        return
+        if getattr(settings, "allow_unsafe_edits", False):
+            return
+        raise HTTPException(status_code=503, detail="edit_token_not_configured")
     # Compare as bytes: compare_digest on str raises TypeError for non-ASCII
     # (headers decode as latin-1), turning a garbage header into a 500.
     if not x_edit_token or not secrets.compare_digest(x_edit_token.encode(), token.encode()):
@@ -907,7 +905,7 @@ def _report_slug(value: str) -> str:
     return cleaned[:64]
 
 
-@app.get("/api/hyperliquid-status")
+@app.get("/api/hyperliquid-status", dependencies=[Depends(require_edit_token)])
 def hyperliquid_status() -> dict[str, object]:
     """Hyperliquid feed diagnostics: cache freshness and active 429 cooldowns.
 
@@ -921,7 +919,7 @@ def hyperliquid_status() -> dict[str, object]:
     return {"status": "ok", **hyperliquid.status()}
 
 
-@app.get("/api/yahoo-status")
+@app.get("/api/yahoo-status", dependencies=[Depends(require_edit_token)])
 def yahoo_status() -> dict[str, object]:
     """Cached Yahoo transport diagnostics from inside the running host."""
     global _yahoo_status_cache

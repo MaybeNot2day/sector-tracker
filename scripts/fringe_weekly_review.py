@@ -32,7 +32,7 @@ from fringe_stats_notepad import (
     mode_labels,
     signed_usd,
 )
-from vault_report_uploader import load_config
+from vault_report_uploader import _is_secure_board_url, load_config
 
 DEFAULT_VAULT_DIR = Path.home() / "hermes-research"
 REPORT_TITLE = "Fringe Weekly Review"
@@ -122,6 +122,8 @@ def compose_review(payload: dict[str, Any], today: date) -> tuple[str, str]:
 
 
 def post_report(base_url: str, token: str, date_text: str, body: str) -> int:
+    if not _is_secure_board_url(base_url):
+        raise ValueError("BOARD_URL must use HTTPS (HTTP is allowed only for localhost)")
     payload = json.dumps({"title": REPORT_TITLE, "body": body, "date": date_text}).encode("utf-8")
     request = urllib.request.Request(
         base_url + "/api/reports",

@@ -237,6 +237,27 @@ async def test_caches_serve_repeat_weeks_and_survive_outages(
 
 
 @pytest.mark.asyncio
+async def test_failed_surprise_fetch_is_not_cached() -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(503)
+        return httpx.Response(200, json=_surprise_payload(["1.0"]))
+
+    service = EarningsCalendarService(
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    assert await service._surprise_histories(["WMT"]) == {"WMT": []}
+    assert "WMT" not in service._surprise_cache
+
+    assert await service._surprise_histories(["WMT"]) == {"WMT": [True]}
+    assert attempts == 2
+
+
+@pytest.mark.asyncio
 async def test_implied_move_scales_atm_iv_for_held_symbols_only() -> None:
     api = NasdaqAPI(
         days={

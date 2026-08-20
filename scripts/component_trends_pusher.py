@@ -22,6 +22,7 @@ import json
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,8 +51,8 @@ CATEGORIES = (
 # Mirrors app/services/component_trends.py: src+title pairs from the page's
 # inline JS gallery; src repeats as thumb, titles carry \u002D escapes.
 IMAGE_ENTRY = re.compile(
-    r"src:\s*\"(//cdna\.pcpartpicker\.com/[^\"]+/images/trends/[^\"]+\.png)\"[^{}]*?"
-    r"title:\s*\"([^\"]+)\"",
+    r'src:\s*"(//cdna\.pcpartpicker\.com/[^"]+/images/trends/[^"]+\.png)"[^{}]*?'
+    r'title:\s*"((?:\\.|[^"\\])*)"',
     re.DOTALL,
 )
 
@@ -70,6 +71,21 @@ def load_config(path: Path = CONFIG_PATH) -> dict[str, str]:
     return config
 
 
+def _decode_js_string(value: str) -> str:
+    try:
+        decoded = json.loads(f'"{value}"')
+    except json.JSONDecodeError:
+        return value.strip()
+    return decoded.strip() if isinstance(decoded, str) else value.strip()
+
+
+def _is_secure_board_url(base_url: str) -> bool:
+    parsed = urllib.parse.urlparse(base_url)
+    return parsed.scheme == "https" or (
+        parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "::1", "localhost"}
+    )
+
+
 def parse_trend_charts(html: str) -> list[dict[str, str]]:
     charts: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -77,7 +93,7 @@ def parse_trend_charts(html: str) -> list[dict[str, str]]:
         if src in seen:
             continue
         seen.add(src)
-        title = raw_title.encode("utf-8").decode("unicode_escape").strip()
+        title = _decode_js_string(raw_title)
         charts.append({"title": title, "image": "https:" + src})
     return charts
 
@@ -99,6 +115,8 @@ def fetch_category(slug: str, label: str) -> dict[str, object] | None:
 
 
 def push(board_url: str, edit_token: str, payload: dict[str, object]) -> None:
+    if not _is_secure_board_url(board_url):
+        raise ValueError("BOARD_URL must use HTTPS (HTTP is allowed only for localhost)")
     request = urllib.request.Request(
         board_url.rstrip("/") + "/api/component-trends",
         data=json.dumps(payload).encode("utf-8"),

@@ -14,9 +14,10 @@ from app.models import AssetConfig, AssetType, GroupConfig, ProviderName
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # When set, watchlist create/delete endpoints require the X-Edit-Token
-    # header; leave empty for open local development.
+    # Mutation and backup endpoints stay disabled until a token is configured.
+    # Local open-mode requires an explicit opt-in; an omitted secret never fails open.
     edit_token: str = ""
+    allow_unsafe_edits: bool = False
     database_path: Path = Path("./data/market_board.sqlite3")
     # The repo seed warms daily-board metrics on first boot in any fresh
     # environment; existing runtime databases are never overwritten.

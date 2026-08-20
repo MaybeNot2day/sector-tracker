@@ -251,20 +251,16 @@ def test_close_stamps_date_and_reason_and_close_without_open_is_ignored(
     assert closed["exit_price"] is None  # stamped separately, best-effort
 
 
-def test_hold_without_open_idea_opens_one(tmp_path: Path) -> None:
+def test_hold_without_open_idea_is_ignored(tmp_path: Path) -> None:
     path = tmp_path / "board.sqlite3"
-    db.apply_fringe_actions(
+    counts = db.apply_fringe_actions(
         path,
         slug="fringe",
         report_date="2026-07-16",
         actions=[act("hold", "XLU", "short", "crowded", "1w")],
     )
-    (idea,) = open_ideas(path)
-    assert (idea["ticker"], idea["direction"], idea["opened_date"]) == (
-        "XLU",
-        "short",
-        "2026-07-16",
-    )
+    assert open_ideas(path) == []
+    assert counts["opened"] == 0
 
 
 def test_same_ticker_opposite_directions_are_separate_ideas(tmp_path: Path) -> None:
@@ -428,7 +424,9 @@ def configure_app(tmp_path: Path) -> Iterator[Callable[..., Path]]:
         groups: list[GroupConfig] | None = None,
     ) -> Path:
         path = tmp_path / "board.sqlite3"
-        app.state.settings = SimpleNamespace(edit_token="", database_path=path)
+        app.state.settings = SimpleNamespace(
+            edit_token="", allow_unsafe_edits=True, database_path=path
+        )
         app.state.fringe_service = FringeService(path, providers or {})
         app.state.groups = groups or []
         app.state.econ_calendar_service = None
@@ -612,7 +610,10 @@ def test_fringe_route_flags_ideas_the_newest_report_did_not_refresh(
     path = configure_app({})
     client = TestClient(app)
     db.apply_fringe_actions(
-        path, slug="fringe", report_date="2026-07-15", actions=[act("open", "AAA", "long")]
+        path,
+        slug="fringe",
+        report_date="2026-07-15",
+        actions=[act("open", "AAA", "long"), act("open", "BBB", "long")],
     )
     db.apply_fringe_actions(
         path, slug="fringe", report_date="2026-07-16", actions=[act("hold", "BBB", "long")]
@@ -1129,10 +1130,27 @@ def test_fringe_excursions_from_daily_bars(tmp_path: Path) -> None:
             close=161.0,
         )
 
-    db.save_bars(path, [bar(10, 165.0, 150.0), bar(13, 180.0, 159.0), bar(20, 200.0, 100.0)])
-
+    db.save_bars(
+        path,
+        [
+            bar(10, 165.0, 150.0),
+            bar(13, 180.0, 159.0),
+            bar(20, 200.0, 100.0),
+            Bar(
+                symbol="NVDA",
+                provider="stooq",
+                interval="1d",
+                timestamp=datetime(2026, 7, 12, 13, 30, tzinfo=UTC),
+                open=50_000.0,
+                high=60_000.0,
+                low=40_000.0,
+                close=55_000.0,
+            ),
+        ],
+    )
     # Long window 07-10 -> 07-16: worst low 150, best high 180; the 07-20 bar
-    # sits outside the window and must not leak in.
+    # sits outside the window and must not leak in. The largest coherent
+    # provider series is Yahoo, so incompatible one-row Stooq units are ignored.
     mae, mfe = db.fringe_excursions(
         path,
         symbol="NVDA",

@@ -607,7 +607,9 @@ def key_dates_app(tmp_path: Path) -> Iterator[Any]:
     had_settings = hasattr(app.state, "settings")
     original = app.state.settings if had_settings else None
     database_path = tmp_path / "board.sqlite3"
-    app.state.settings = SimpleNamespace(edit_token="", database_path=database_path)
+    app.state.settings = SimpleNamespace(
+        edit_token="", allow_unsafe_edits=True, database_path=database_path
+    )
     db.init_db(database_path)
     db.replace_key_dates(
         database_path,

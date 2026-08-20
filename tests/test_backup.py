@@ -72,6 +72,11 @@ def test_backup_endpoint_streams_verifiable_snapshot(board_app: Path, tmp_path: 
     assert count == 1
 
 
+def test_snapshot_fetch_rejects_insecure_remote_url() -> None:
+    with pytest.raises(ValueError, match="must use HTTPS"):
+        backup.fetch_snapshot("http://board.test", "sekrit")
+
+
 def test_nightly_run_verifies_compresses_and_rotates(
     board_app: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

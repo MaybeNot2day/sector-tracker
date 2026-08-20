@@ -997,7 +997,7 @@ def _apply_fringe_actions(
                 (text, horizon, target, confidence, stop, report_date, now, int(row["id"])),
             )
             counts["updated"] += 1
-        else:
+        elif action == "open":
             conn.execute(
                 """
                 INSERT INTO fringe_ideas (
@@ -1275,8 +1275,23 @@ def fringe_excursions(
         return None, None
     with _connect(path) as conn:
         row = conn.execute(
-            "SELECT MIN(low), MAX(high) FROM bars"
-            " WHERE symbol = ? AND interval = '1d' AND timestamp >= ? AND timestamp < ?",
+            """
+            WITH windowed AS (
+                SELECT provider, timestamp, low, high
+                FROM bars
+                WHERE symbol = ? AND interval = '1d'
+                  AND timestamp >= ? AND timestamp < ?
+            )
+            SELECT MIN(low), MAX(high)
+            FROM windowed
+            WHERE provider = (
+                SELECT provider
+                FROM windowed
+                GROUP BY provider
+                ORDER BY COUNT(*) DESC, MAX(timestamp) DESC, provider
+                LIMIT 1
+            )
+            """,
             (symbol, opened_date, end.isoformat()),
         ).fetchone()
     if row is None or row[0] is None or row[1] is None or entry_price <= 0:

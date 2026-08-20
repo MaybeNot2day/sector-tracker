@@ -180,8 +180,8 @@ def _get_raw_history_sync(asset: AssetConfig, interval: str, range_: str) -> lis
     """Fetch OHLCV bars from Yahoo's v8 chart API.
 
     Uses the same curl transport + query1/query2 retry as quotes; yfinance's
-    cookie/crumb scraping gets rate-limited from datacenter IPs (Vercel),
-    which made history silently fall back to stale cached bars.
+    cookie/crumb scraping is frequently rate-limited from datacenter IPs,
+    which otherwise makes history silently fall back to stale cached bars.
 
     Yahoo has no 4h resolution, so 4h is aggregated from native 1h bars.
     """

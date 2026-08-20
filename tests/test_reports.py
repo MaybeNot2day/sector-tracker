@@ -41,6 +41,7 @@ def configure_app(tmp_path: Path) -> Iterator[Callable[[str], None]]:
     def _configure(edit_token: str) -> None:
         app.state.settings = SimpleNamespace(
             edit_token=edit_token,
+            allow_unsafe_edits=not bool(edit_token),
             database_path=tmp_path / "reports.sqlite3",
         )
 

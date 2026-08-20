@@ -38,7 +38,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-from vault_report_uploader import load_config
+from vault_report_uploader import _is_secure_board_url, load_config
 
 STATE_PATH = Path.home() / ".local/state/sector-tracker/stop-monitor.json"
 HERMES_BIN = Path.home() / ".local/bin/hermes"
@@ -71,6 +71,8 @@ def fetch_book(base_url: str) -> dict[str, Any]:
 
 
 def close_position(base_url: str, token: str, idea_id: int, reason: str) -> dict[str, Any]:
+    if not _is_secure_board_url(base_url):
+        raise ValueError("BOARD_URL must use HTTPS (HTTP is allowed only for localhost)")
     payload = json.dumps({"reason": reason}).encode("utf-8")
     request = urllib.request.Request(
         base_url + f"/api/fringe/{idea_id}/close",

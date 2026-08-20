@@ -65,16 +65,21 @@ def _close_order_key(item: dict[str, Any]) -> tuple[str, float]:
 
 
 def compute_rolling_stats(closed: list[dict[str, Any]]) -> dict[str, Any]:
-    """Win rate, expectancy, profit factor, and current losing streak over all closed trades."""
-    realized = [_num(item.get("realized_usd")) or 0.0 for item in closed]
-    closed_count = len(closed)
+    """Risk statistics over sized closes, matching the server's sizing gates."""
+    sized: list[tuple[dict[str, Any], float]] = []
+    for item in closed:
+        value = _num(item.get("realized_usd"))
+        if value is not None:
+            sized.append((item, value))
+    realized = [value for _, value in sized]
+    closed_count = len(sized)
     win_values = [value for value in realized if value > 0]
     loss_values = [value for value in realized if value < 0]
     gross_win = sum(win_values)
     gross_loss = sum(loss_values)
     streak = 0
-    for item in sorted(closed, key=_close_order_key, reverse=True):
-        if (_num(item.get("realized_usd")) or 0.0) < 0:
+    for _, value in sorted(sized, key=lambda pair: _close_order_key(pair[0]), reverse=True):
+        if value < 0:
             streak += 1
         else:
             break
