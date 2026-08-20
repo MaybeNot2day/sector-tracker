@@ -5609,6 +5609,13 @@ a.key-date-row:focus-visible {
   grid-template-columns: minmax(340px, 0.8fr) minmax(0, 1.2fr);
 }
 
+.ai-capex-layout .ai-index-chart {
+  height: auto;
+  min-height: 200px;
+  max-height: 380px;
+  aspect-ratio: 16 / 9;
+}
+
 .ai-index-chart-panel {
   min-width: 0;
   padding: 15px;

@@ -360,6 +360,10 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
     expect(page.locator("#ai-token-index-panel")).to_be_hidden()
     expect(page.locator("#ai-capex-board .ai-metric")).to_have_count(4)
     expect(page.locator("#ai-capex-board .series-main")).to_be_visible()
+    capex_chart_box = page.locator("#ai-capex-board .ai-index-chart").bounding_box()
+    assert capex_chart_box is not None
+    assert capex_chart_box["height"] >= 200
+    assert capex_chart_box["width"] / capex_chart_box["height"] >= 1.6
     expect(page.locator("#ai-capex-board tbody tr")).to_have_count(2)
     expect(page.locator("#ai-capex-board")).to_contain_text("AI infrastructure proxy")
     expect(page.locator("#ai-source-link")).to_have_text("Yahoo Finance source")
