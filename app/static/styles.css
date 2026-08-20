@@ -5399,6 +5399,10 @@ a.key-date-row:focus-visible {
   border-bottom: 1px solid var(--line);
 }
 
+.ai-index-metrics {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
 .ai-metric {
   min-width: 0;
   padding: 13px 14px;
@@ -5762,6 +5766,10 @@ a.key-date-row:focus-visible {
   }
 
   .ai-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ai-index-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 

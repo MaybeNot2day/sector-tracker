@@ -6923,6 +6923,11 @@ function renderAiTokenIndex() {
   const latest = latestAiIndex.latest;
   const metrics = [
     aiMetric("Token price index", formatAiPrice(latest.index_price), "USD / 1M matched tokens"),
+    aiMetric(
+      "Proprietary price",
+      formatAiPrice(latest.proprietary_price),
+      "no published HF ID",
+    ),
     aiMetric("Matched usage", formatAiCompact(latest.priced_tokens), "prompt + completion"),
     aiMetric("Price coverage", `${Number(latest.coverage_pct).toFixed(1)}%`, "of ranked tokens"),
     aiMetric("Open-weight share", `${Number(latest.open_share_pct).toFixed(1)}%`, "HF ID proxy"),
@@ -6937,7 +6942,7 @@ function renderAiTokenIndex() {
     </tr>
   `).join("");
   aiIndexBoard.innerHTML = `
-    <div class="ai-metrics">${metrics}</div>
+    <div class="ai-metrics ai-index-metrics">${metrics}</div>
     <div class="ai-index-layout">
       <section class="ai-index-chart-panel">
         <div class="ai-index-heading">

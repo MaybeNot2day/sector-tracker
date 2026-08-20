@@ -133,6 +133,8 @@ async def test_token_index_prices_observed_mix_and_persists_history(tmp_path: Pa
         "open_share_pct": 66.67,
         "model_count": 2,
     }
+    methodology = cast(dict[str, Any], payload["methodology"])
+    assert "not only Anthropic and OpenAI" in methodology["description"]
     series = payload["series"]
     assert isinstance(series, list)
     assert [point["date"] for point in series] == ["2026-08-17", "2026-08-18"]

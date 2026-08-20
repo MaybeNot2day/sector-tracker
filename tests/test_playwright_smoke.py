@@ -344,7 +344,10 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
     page.locator("#ai-token-index-tab").click()
     expect(page.locator("#ai-token-index-panel")).to_be_visible()
     expect(page.locator("#ai-models-panel")).to_be_hidden()
-    expect(page.locator("#ai-index-board .ai-metric")).to_have_count(5)
+    expect(page.locator("#ai-index-board .ai-metric")).to_have_count(6)
+    proprietary_metric = page.locator("#ai-index-board .ai-metric").nth(1)
+    expect(proprietary_metric).to_contain_text("Proprietary price")
+    expect(proprietary_metric).to_contain_text("$3")
     expect(page.locator("#ai-index-board .series-main")).to_be_visible()
     chart_box = page.locator("#ai-index-board .ai-index-chart").bounding_box()
     assert chart_box is not None

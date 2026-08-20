@@ -198,7 +198,9 @@ class AIDataService:
                     "Observed prompt and completion tokens are priced separately, then "
                     "divided by matched tokens. Token counts use each upstream provider's "
                     "tokenizer and are not standardized across providers. Open-weight is a "
-                    "proxy based on a published Hugging Face ID."
+                    "proxy based on a published Hugging Face ID. Proprietary is the "
+                    "complement: every priced model without a published HF ID, not only "
+                    "Anthropic and OpenAI."
                 ),
                 "formula": (
                     "sum(prompt_tokens * input_price + completion_tokens * output_price) "
