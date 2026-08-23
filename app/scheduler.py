@@ -17,6 +17,7 @@ from app.services.econ_calendar import any_hot_release, key_dates_payload
 from app.services.hyperliquid_discovery import HyperliquidDiscoveryService
 from app.services.macro import MACRO_TAPE_GROUP_NAME, macro_payload, with_macro_group
 from app.services.quotes import grouped_quotes_payload
+from app.services.sofr import SOFRService, sofr_poll_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +130,21 @@ async def hyperliquid_discovery_loop(app_state: Any) -> None:
         except Exception:
             logger.exception("Hyperliquid discovery cycle failed")
         await asyncio.sleep(app_state.settings.hyperliquid_discovery_seconds)
+
+
+async def sofr_refresh_loop(app_state: Any) -> None:
+    """Track the NY Fed release within one minute around its 08:00 ET publication."""
+    await asyncio.sleep(2)
+    while True:
+        try:
+            changed = await app_state.sofr_service.refresh(force=True)
+            if changed:
+                logger.info("SOFR observation refreshed")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("SOFR refresh cycle failed")
+        await asyncio.sleep(sofr_poll_seconds())
 
 
 # The earnings week payload costs ~35 Nasdaq surprise fetches on a cold
@@ -352,8 +368,17 @@ def _board_payload(app_state: Any, groups: Any, grouped: Any) -> dict[str, objec
     hyperliquid = app_state.providers.get("hyperliquid")
     tape = hyperliquid.crypto_tape_cached() if isinstance(hyperliquid, HyperliquidProvider) else []
     overview["crypto_breadth"] = crypto_breadth_metrics(tape)
+    macro = macro_payload(grouped.get(MACRO_TAPE_GROUP_NAME, []))
+    sofr_service = getattr(app_state, "sofr_service", None)
+    if isinstance(sofr_service, SOFRService):
+        sofr = sofr_service.snapshot()
+        if sofr is not None:
+            overview["sofr"] = sofr
+        sofr_macro = sofr_service.macro_item()
+        if sofr_macro is not None:
+            macro.append(sofr_macro)
     payload["overview"] = overview
-    payload["macro"] = macro_payload(grouped.get(MACRO_TAPE_GROUP_NAME, []))
+    payload["macro"] = macro
     payload["crypto_tape"] = tape
     payload["ui_version"] = UI_VERSION
     return payload

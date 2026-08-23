@@ -2889,8 +2889,8 @@ async function fetchFringe() {
 }
 
 // --- Macro tape ------------------------------------------------------------
-// VIX / DXY / US10Y context strip. These symbols are polled alongside the
-// watchlists but stay out of the universe, so breadth metrics are unaffected.
+// VIX / DXY / US10Y / SOFR context strip. Quote symbols are polled alongside
+// watchlists; SOFR arrives from the official New York Fed release service.
 function renderMacroStrip(items) {
   if (!macroStrip) return;
   if (!Array.isArray(items) || !items.length) {
@@ -3072,11 +3072,14 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
       ${cryptoBreadthPanel(overview.crypto_breadth)}
     </div>`],
 
+    ["sofr", sofrSection(overview.sofr)],
+
     ["themes", `<div class="analytics-grid equal">
       <section class="analytics-panel">
         ${panelHeading(
           "Dominant Themes",
           `Top ${Math.min(8, themes.length)} of ${themes.length} by score`,
+
           "Each watchlist sector scored 0-100: today's move and the 5-day move carry most weight, plus how many members are rising and in uptrends. \u0394 = score change vs yesterday. Labels: \u226575 DOMINANT, \u226562 STRONG, \u226552 EMERGING, \u226545 NEUTRAL, below that DETERIORATING / FADING."
         )}
         ${themeTable(themes.slice(0, 8), "score", prevScores)}
@@ -3271,6 +3274,64 @@ function regimeCell(label, value, detail, tone = "") {
     <strong class="metric-value ${tone}">${escapeHtml(value)}</strong>
     <span class="metric-detail">${escapeHtml(detail || "")}</span>
   </div>`;
+}
+
+function sofrSection(payload) {
+  const latest = payload?.latest;
+  if (!latest || typeof latest.rate !== "number") return "";
+  const changeBp = typeof latest.change_bp === "number" ? latest.change_bp : null;
+  const fundingTone =
+    changeBp > 0 ? "tone-negative" : changeBp < 0 ? "tone-positive" : "tone-neutral";
+  const effectiveDate = latest.effective_date || "";
+  const note = [
+    effectiveDate ? `Effective ${effectiveDate}` : "",
+    latest.revision_indicator ? "Revised" : "",
+    payload.stale ? "Cached" : "NY Fed official",
+  ].filter(Boolean).join(" · ");
+  const series = Array.isArray(payload.series) ? payload.series : [];
+  const rates = series.map((row) => Number(row.rate)).filter(Number.isFinite);
+  return `<section class="analytics-panel sofr-panel${payload.stale ? " stale" : ""}">
+    ${panelHeading(
+      "SOFR",
+      note,
+      "The Secured Overnight Financing Rate is the New York Fed's broad measure of overnight Treasury-repo funding. It is published around 08:00 ET each business day. Percentiles describe the transaction-rate distribution; volume is total underlying repo activity."
+    )}
+    <div class="regime-grid sofr-grid">
+      ${regimeCell(
+        "Rate",
+        formatSofrRate(latest.rate),
+        changeBp === null ? "Prior change unavailable" : `${formatSigned(changeBp)} bp vs prior`,
+        fundingTone
+      )}
+      ${regimeCell("1st percentile", formatSofrRate(latest.percentile_1), "Low-rate tail")}
+      ${regimeCell("25th percentile", formatSofrRate(latest.percentile_25), "Lower quartile")}
+      ${regimeCell("75th percentile", formatSofrRate(latest.percentile_75), "Upper quartile")}
+      ${regimeCell("99th percentile", formatSofrRate(latest.percentile_99), "High-rate tail")}
+      ${regimeCell("Volume", formatSofrVolume(latest.volume_billions), "Underlying repo activity")}
+      <div class="regime-cell sofr-trend-cell">
+        <span class="metric-label">Recent rate</span>
+        <div class="sofr-spark">${sparklineSvg(rates)}</div>
+        <span class="metric-detail">${rates.length} observations</span>
+      </div>
+    </div>
+    <footer class="sofr-footer">
+      <span>Volume-weighted median · Treasury collateral</span>
+      <a href="https://www.newyorkfed.org/markets/reference-rates/sofr" target="_blank" rel="noopener noreferrer">New York Fed source</a>
+    </footer>
+  </section>`;
+}
+
+
+function formatSofrRate(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? `${number.toFixed(2)}%` : "--";
+}
+
+
+function formatSofrVolume(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "--";
+  return number >= 1000 ? `$${(number / 1000).toFixed(2)}T` : `$${number.toFixed(0)}B`;
 }
 
 function themeRegimeCell(label, theme) {

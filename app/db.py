@@ -212,6 +212,18 @@ CREATE TABLE IF NOT EXISTS hyperliquid_listings (
 
 CREATE INDEX IF NOT EXISTS idx_hyperliquid_listings_active_seen
 ON hyperliquid_listings (market_kind, auto_added, is_active, first_seen_at DESC);
+
+CREATE TABLE IF NOT EXISTS sofr_history (
+    effective_date TEXT PRIMARY KEY,
+    rate REAL NOT NULL,
+    percentile_1 REAL,
+    percentile_25 REAL,
+    percentile_75 REAL,
+    percentile_99 REAL,
+    volume_billions REAL,
+    revision_indicator TEXT NOT NULL DEFAULT '',
+    fetched_at TEXT NOT NULL
+);
 """
 _initialized_paths: set[Path] = set()
 _init_lock = Lock()
@@ -377,6 +389,79 @@ def load_auto_hyperliquid_listings(path: Path) -> list[dict[str, object]]:
             "coin": str(row["coin"]),
             "first_seen_at": str(row["first_seen_at"]),
             "last_seen_at": str(row["last_seen_at"]),
+        }
+        for row in rows
+    ]
+
+
+def save_sofr_observations(
+    path: Path,
+    rows: Sequence[Mapping[str, object]],
+    fetched_at: str,
+) -> None:
+    if not rows:
+        return
+    init_db(path)
+    with _connect(path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO sofr_history (
+                effective_date, rate, percentile_1, percentile_25,
+                percentile_75, percentile_99, volume_billions,
+                revision_indicator, fetched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(effective_date) DO UPDATE SET
+                rate = excluded.rate,
+                percentile_1 = excluded.percentile_1,
+                percentile_25 = excluded.percentile_25,
+                percentile_75 = excluded.percentile_75,
+                percentile_99 = excluded.percentile_99,
+                volume_billions = excluded.volume_billions,
+                revision_indicator = excluded.revision_indicator,
+                fetched_at = excluded.fetched_at
+            """,
+            [
+                (
+                    row["effective_date"],
+                    row["rate"],
+                    row.get("percentile_1"),
+                    row.get("percentile_25"),
+                    row.get("percentile_75"),
+                    row.get("percentile_99"),
+                    row.get("volume_billions"),
+                    row.get("revision_indicator") or "",
+                    fetched_at,
+                )
+                for row in rows
+            ],
+        )
+
+
+def load_sofr_history(path: Path, *, limit: int = 90) -> list[dict[str, object]]:
+    init_db(path)
+    with _connect(path) as conn:
+        rows = conn.execute(
+            """
+            SELECT effective_date, rate, percentile_1, percentile_25,
+                   percentile_75, percentile_99, volume_billions,
+                   revision_indicator, fetched_at
+            FROM sofr_history
+            ORDER BY effective_date DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [
+        {
+            "effective_date": str(row["effective_date"]),
+            "rate": float(row["rate"]),
+            "percentile_1": _optional_float(row["percentile_1"]),
+            "percentile_25": _optional_float(row["percentile_25"]),
+            "percentile_75": _optional_float(row["percentile_75"]),
+            "percentile_99": _optional_float(row["percentile_99"]),
+            "volume_billions": _optional_float(row["volume_billions"]),
+            "revision_indicator": str(row["revision_indicator"]),
+            "fetched_at": str(row["fetched_at"]),
         }
         for row in rows
     ]

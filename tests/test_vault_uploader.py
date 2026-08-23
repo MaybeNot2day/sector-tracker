@@ -724,7 +724,7 @@ def test_invalid_current_cron_report_is_not_uploaded(env: SimpleNamespace) -> No
         ),
         encoding="utf-8",
     )
-    name = "2026-07-22 Macro Tape Brief.md"
+    name = f"{_TODAY_TEXT} Macro Tape Brief.md"
     _write_report(env.vault, name, "Now save to the Obsidian vault")
 
     assert uploader.run([]) == 1

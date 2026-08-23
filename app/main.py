@@ -55,6 +55,7 @@ from app.scheduler import (
     hyperliquid_discovery_loop,
     news_poll_loop,
     quote_poll_loop,
+    sofr_refresh_loop,
     stop_task,
 )
 from app.services.ai_capex import AICapexError, AICapexService
@@ -81,6 +82,7 @@ from app.services.market_context import market_context_payload
 from app.services.news import NewsService
 from app.services.options import MarketDataOptionsService, OptionsDataError
 from app.services.quotes import QuoteService
+from app.services.sofr import SOFRError, SOFRService
 from app.services.trends import group_trends_payload
 
 APP_DIR = Path(__file__).parent
@@ -223,6 +225,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.database_path,
         api_key=settings.computeprices_api_key,
     )
+    app.state.sofr_service = SOFRService(settings.database_path)
     app.state.connection_manager = ConnectionManager()
     app.state.watchlist_lock = asyncio.Lock()
     app.state.trends_revision = 0
@@ -233,6 +236,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.earnings_task = None
     app.state.ai_data_task = None
     app.state.hyperliquid_discovery_task = None
+    app.state.sofr_task = None
     if settings.enable_background_tasks:
         app.state.poll_task = asyncio.create_task(
             quote_poll_loop(app.state), name="quote_poll_loop"
@@ -254,6 +258,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             hyperliquid_discovery_loop(app.state),
             name="hyperliquid_discovery_loop",
         )
+        app.state.sofr_task = asyncio.create_task(
+            sofr_refresh_loop(app.state),
+            name="sofr_refresh_loop",
+        )
         for task in (
             app.state.poll_task,
             app.state.history_task,
@@ -262,6 +270,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.earnings_task,
             app.state.ai_data_task,
             app.state.hyperliquid_discovery_task,
+            app.state.sofr_task,
         ):
             task.add_done_callback(_log_loop_crash)
 
@@ -282,6 +291,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await stop_task(app.state.ai_data_task)
         if app.state.hyperliquid_discovery_task is not None:
             await stop_task(app.state.hyperliquid_discovery_task)
+        if app.state.sofr_task is not None:
+            await stop_task(app.state.sofr_task)
         await asyncio.gather(
             *(provider.aclose() for provider in providers.values()),
             app.state.news_service.aclose(),
@@ -291,6 +302,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.ai_data_service.aclose(),
             app.state.ai_capex_service.aclose(),
             app.state.gpu_compute_service.aclose(),
+            app.state.sofr_service.aclose(),
             return_exceptions=True,
         )
 
@@ -1012,6 +1024,16 @@ async def ai_hardware() -> dict[str, object]:
         service = cast(GPUComputeService, app.state.gpu_compute_service)
         return await service.get_hardware()
     except GPUComputeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/sofr")
+async def sofr() -> dict[str, object]:
+    """Official SOFR rate distribution and history from the New York Fed."""
+    try:
+        service = cast(SOFRService, app.state.sofr_service)
+        return await service.get_payload()
+    except SOFRError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 

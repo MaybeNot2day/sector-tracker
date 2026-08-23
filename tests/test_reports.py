@@ -676,13 +676,16 @@ def test_deleting_archived_report_does_not_clear_current_key_dates(
 ) -> None:
     configure_app("")
     client = TestClient(app)
+    event_base = datetime.now(UTC).date() + timedelta(days=10)
+    older_event = event_base.isoformat()
+    current_event = (event_base + timedelta(days=1)).isoformat()
     older = client.post(
         "/api/reports",
         json={
             "title": "Macro Tape",
             "slug": "macro-tape",
             "date": "2026-07-08",
-            "body": "## Key Dates\n- 2026-08-20 - Older Event\n",
+            "body": f"## Key Dates\n- {older_event} - Older Event\n",
         },
     )
     newer = client.post(
@@ -691,7 +694,7 @@ def test_deleting_archived_report_does_not_clear_current_key_dates(
             "title": "Macro Tape",
             "slug": "macro-tape",
             "date": "2026-07-09",
-            "body": "## Key Dates\n- 2026-08-21 - Current Event\n",
+            "body": f"## Key Dates\n- {current_event} - Current Event\n",
         },
     )
     assert older.status_code == newer.status_code == 200

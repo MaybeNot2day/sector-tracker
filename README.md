@@ -53,6 +53,13 @@ The daily board persists a condensed snapshot per UTC day (regime, breadth, them
 to SQLite; the UI uses it for the 50DMA breadth trend sparkline and day-over-day theme
 score deltas, and `/api/snapshots?days=30` serves the raw history.
 
+The Daily Board also tracks the New York Fed's official SOFR distribution:
+latest rate, daily basis-point move, 1st/25th/75th/99th percentiles, repo
+volume, and recent history (`GET /api/sofr`). Observations accrue in
+`sofr_history`. The background loop polls every minute from 07:55 through
+09:30 ET on business days around the approximately 08:00 ET publication,
+then every 15 minutes for later revisions.
+
 Watchlists live in YAML and can also be edited in the app. Quotes and OHLC bars are cached in
 SQLite, and market data providers are isolated behind a common interface so Yahoo, Hyperliquid,
 Stooq, and Farside can be swapped or extended.

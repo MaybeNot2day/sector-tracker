@@ -169,6 +169,18 @@ def test_daily_board_loads_without_page_errors_and_renders_core_sections(
     expect(
         page.locator("#daily-board").get_by_role("heading", name="Dominant Themes")
     ).to_be_visible()
+    expect(page.locator("#daily-board").get_by_role("heading", name="SOFR")).to_be_visible()
+    sofr_panel = page.locator("#daily-board .sofr-panel")
+    expect(sofr_panel.locator(".regime-cell")).to_have_count(7)
+    expect(sofr_panel).to_contain_text("3.63%")
+    expect(sofr_panel).to_contain_text("$2.92T")
+    expect(sofr_panel.locator(".sofr-footer a")).to_have_attribute(
+        "href", "https://www.newyorkfed.org/markets/reference-rates/sofr"
+    )
+    sofr_macro = page.locator("#macro-strip .macro-item").filter(has_text="SOFR")
+    expect(sofr_macro.locator("strong")).to_have_text("3.63%")
+    expect(sofr_macro.locator("em")).to_have_text("+1.00bp")
+    expect(sofr_macro.locator("em")).to_have_class("change-negative")
 
     benchmark_cards = page.locator("#daily-board .benchmark-card")
     expect(benchmark_cards.nth(0)).to_be_visible()
@@ -2615,10 +2627,45 @@ BOARD_PAYLOAD: dict[str, Any] = {
             "volume_usd": 23_400_000,
             "positive_funding_pct": 50.0,
         },
+        "sofr": {
+            "as_of": "2026-08-20T12:00:00Z",
+            "source": {
+                "name": "Federal Reserve Bank of New York",
+                "url": "https://www.newyorkfed.org/markets/reference-rates/sofr",
+            },
+            "latest": {
+                "effective_date": "2026-08-20",
+                "rate": 3.63,
+                "percentile_1": 3.58,
+                "percentile_25": 3.60,
+                "percentile_75": 3.68,
+                "percentile_99": 3.71,
+                "volume_billions": 2922.0,
+                "revision_indicator": "",
+                "change_bp": 1.0,
+            },
+            "series": [
+                {"date": "2026-08-17", "rate": 3.66, "volume_billions": 3068.0},
+                {"date": "2026-08-18", "rate": 3.65, "volume_billions": 3010.0},
+                {"date": "2026-08-19", "rate": 3.62, "volume_billions": 2923.0},
+                {"date": "2026-08-20", "rate": 3.63, "volume_billions": 2922.0},
+            ],
+            "stale": False,
+        },
     },
     "macro": [
         {"label": "VIX", "value": 14.2, "change_pct": -2.1, "invert_tone": True},
         {"label": "DXY", "value": 98.4, "change_pct": 0.2},
+        {
+            "symbol": "SOFR",
+            "label": "SOFR",
+            "unit": "yield",
+            "last": 3.63,
+            "change_abs": 0.01,
+            "change_pct": None,
+            "invert_tone": True,
+            "is_stale": False,
+        },
     ],
 }
 BOARD_PAYLOAD["crypto_tape"].extend(
