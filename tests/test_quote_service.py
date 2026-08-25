@@ -151,6 +151,72 @@ async def test_quote_service_returns_error_quote_without_cache(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_cold_start_serves_persisted_quotes_instantly(tmp_path: Path) -> None:
+    """After a deploy restart the first paint must come from SQLite, marked
+    stale, instead of blocking behind a full provider sweep."""
+    database = tmp_path / "board.sqlite3"
+    persisted = Quote.from_last_and_prev_close(
+        symbol="AAPL",
+        asset_type="equity",
+        provider="yahoo",
+        last=110.0,
+        previous_close=100.0,
+        timestamp=datetime.now(UTC),
+    )
+    db.save_quotes(database, [persisted])
+    groups = [
+        GroupConfig(name="TEST", assets=[AssetConfig(symbol="AAPL", type="equity", source="yahoo")])
+    ]
+
+    class NeverResolves(EmptyProvider):
+        async def get_quotes(self, assets: list[AssetConfig]) -> list[Quote]:
+            await asyncio.sleep(30)
+            return []
+
+    service = QuoteService(database, {"yahoo": NeverResolves()}, min_refresh_seconds=60)
+
+    grouped = await asyncio.wait_for(
+        service.get_board_quotes(groups, allow_stale=True), timeout=1.0
+    )
+
+    assert grouped["TEST"][0].last == 110.0
+    assert grouped["TEST"][0].is_stale is True
+
+
+@pytest.mark.asyncio
+async def test_cold_start_with_empty_database_still_fetches_live(tmp_path: Path) -> None:
+    groups = [
+        GroupConfig(name="TEST", assets=[AssetConfig(symbol="AAPL", type="equity", source="yahoo")])
+    ]
+    service = QuoteService(tmp_path / "board.sqlite3", {"yahoo": WorkingProvider()})
+
+    grouped = await service.get_board_quotes(groups, allow_stale=True)
+
+    assert grouped["TEST"][0].last == 110.0
+    assert grouped["TEST"][0].is_stale is False
+
+
+def test_quote_payload_omits_redundant_display_fields() -> None:
+    quote = Quote.from_last_and_prev_close(
+        symbol="SPY",
+        asset_type="etf",
+        provider="yahoo",
+        last=500.0,
+        previous_close=490.0,
+        timestamp=datetime.now(UTC),
+        currency="USD",
+        display_last=500.0,
+        display_currency="USD",
+    )
+
+    payload = quote_payload(quote)
+
+    assert "display_last" not in payload
+    assert "display_currency" not in payload
+    assert payload["last"] == 500.0
+
+
+@pytest.mark.asyncio
 async def test_lookup_quotes_fetch_and_short_cache(tmp_path: Path) -> None:
     provider = CountingProvider()
     service = QuoteService(tmp_path / "board.sqlite3", {"yahoo": provider})

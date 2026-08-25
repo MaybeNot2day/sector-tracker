@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import re
@@ -356,6 +357,36 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.add_middleware(SecurityHeadersMiddleware)
 
 
+_MINIFIED_SOURCES = ("app.js", "styles.css")
+_MIN_HEADER = re.compile(rb"^/\*src=([0-9a-f]{64})\*/")
+
+
+def _minified_variants() -> dict[str, Path]:
+    """Committed minified twins (scripts/minify-static.sh) keyed by source name.
+
+    A twin is only trusted when the sha256 recorded in its header matches the
+    CURRENT source file, so editing app.js without regenerating the twin
+    safely falls back to serving the unminified original.
+    """
+    variants: dict[str, Path] = {}
+    for name in _MINIFIED_SOURCES:
+        source = STATIC_DIR / name
+        stem, _, suffix = name.rpartition(".")
+        minified = STATIC_DIR / f"{stem}.min.{suffix}"
+        if not source.exists() or not minified.exists():
+            continue
+        with minified.open("rb") as handle:
+            match = _MIN_HEADER.match(handle.read(80))
+        if match is None:
+            continue
+        if hashlib.sha256(source.read_bytes()).hexdigest() == match.group(1).decode():
+            variants[name] = minified
+    return variants
+
+
+_MIN_VARIANTS = _minified_variants()
+
+
 class CachedStaticFiles(StaticFiles):
     """Static files with immutable caching.
 
@@ -379,6 +410,12 @@ class CachedStaticFiles(StaticFiles):
         else:
             response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         return response
+
+    def lookup_path(self, path: str) -> tuple[str, os.stat_result | None]:
+        variant = _MIN_VARIANTS.get(path)
+        if variant is not None:
+            return str(variant), os.stat(variant)
+        return super().lookup_path(path)
 
 
 app.mount("/static", CachedStaticFiles(directory=STATIC_DIR), name="static")

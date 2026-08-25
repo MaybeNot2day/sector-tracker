@@ -124,6 +124,10 @@ const helpTooltip = document.querySelector("#help-tooltip");
 let activeHelpTip = null;
 
 let latestData = null;
+// Ticks that land while a view is hidden defer its render; selectView
+// replays latestData on entry (see applyQuotes).
+let boardRenderPending = false;
+let dailyRenderPending = false;
 let latestCryptoEtfFlows = null;
 let latestKeyDates = null;
 let keyDatesRevision = 0;
@@ -628,7 +632,17 @@ function init() {
   restoreUrlState();
   window.addEventListener("popstate", restoreReportNavigation);
   restoreCachedBoard();
-  fetchQuotes();
+  // The WS handshake pushes a full board snapshot within ~1s, so with a
+  // cached board already painted an eager HTTP fetch just transfers and
+  // renders the identical payload twice. Give the socket a short head start
+  // and fetch only if it hasn't delivered; first-ever visits fetch eagerly.
+  if (latestData) {
+    window.setTimeout(() => {
+      if (dataIsCached) fetchQuotes();
+    }, 1500);
+  } else {
+    fetchQuotes();
+  }
   fetchCryptoEtfFlows();
   fetchKeyDates();
   fetchSnapshots();
@@ -688,7 +702,7 @@ function init() {
   }, 20000);
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
-      flushBoardCache();
+      flushBoardCache({ urgent: true });
       return;
     }
     if (feedMode !== "ws") {
@@ -711,7 +725,7 @@ function init() {
     fetchFringe();
     refreshReportsBadge();
   });
-  window.addEventListener("pagehide", flushBoardCache);
+  window.addEventListener("pagehide", () => flushBoardCache({ urgent: true }));
   newsToggle.addEventListener("click", () => setNewsOpen(!document.body.classList.contains("news-open")));
   newsClose.addEventListener("click", () => setNewsOpen(false));
   newsSearch.addEventListener("input", () => {
@@ -2010,10 +2024,18 @@ function selectView(view) {
   if (activeView === "trends") renderTrendsView();
   if (activeView === "earnings") renderEarningsView();
   if (activeView === "watch") renderWatchView();
+  if (activeView === "daily" && dailyRenderPending && latestData) {
+    dailyRenderPending = false;
+    renderDailyBoard(latestData.overview, latestCryptoEtfFlows);
+  }
   // The treemap sizes itself from board.clientWidth, which is 0 while the
   // markets view is hidden (a refresh landing on Daily still renders the
-  // board): re-render on entry so the map lays out at the real width.
-  if (activeView === "markets" && marketLayout === "map") renderBoard(latestData);
+  // board): re-render on entry so the map lays out at the real width, and
+  // replay any ticks that were skipped while the view was hidden.
+  if (activeView === "markets" && latestData && (boardRenderPending || marketLayout === "map")) {
+    boardRenderPending = false;
+    renderBoard(latestData);
+  }
   syncUrlState();
 }
 
@@ -2064,11 +2086,24 @@ function persistBoardCache(payload) {
   }
 }
 
-function flushBoardCache() {
+function flushBoardCache({ urgent = false } = {}) {
   if (boardCacheWriteTimer !== null) {
     window.clearTimeout(boardCacheWriteTimer);
     boardCacheWriteTimer = null;
   }
+  if (!pendingBoardCachePayload) return;
+  // Stringifying the full board payload takes several ms on the main thread
+  // and used to land in the same frame as a WS render tick. Periodic flushes
+  // wait for idle time; pagehide/visibility flushes stay synchronous because
+  // the page may be gone before an idle callback ever fires.
+  if (!urgent && typeof window.requestIdleCallback === "function") {
+    window.requestIdleCallback(writeBoardCache, { timeout: 5000 });
+  } else {
+    writeBoardCache();
+  }
+}
+
+function writeBoardCache() {
   if (!pendingBoardCachePayload) return;
   const payload = pendingBoardCachePayload;
   pendingBoardCachePayload = null;
@@ -2233,9 +2268,22 @@ function applyQuotes(payload) {
   rememberAndPatchFunding(payload, { remember: !dataIsCached });
   latestData = payload;
   checkUiVersion(payload.ui_version);
-  renderBoard(payload);
+  // Hidden views skip their reconciliation entirely (a 10s WS tick used to
+  // re-diff ~130 Markets rows into a display:none panel); selectView replays
+  // the latest payload on entry, so nothing is lost — just deferred.
+  if (marketsView.hidden) {
+    boardRenderPending = true;
+  } else {
+    boardRenderPending = false;
+    renderBoard(payload);
+  }
   renderMacroStrip(payload.macro);
-  renderDailyBoard(payload.overview, latestCryptoEtfFlows);
+  if (dailyView.hidden) {
+    dailyRenderPending = true;
+  } else {
+    dailyRenderPending = false;
+    renderDailyBoard(payload.overview, latestCryptoEtfFlows);
+  }
   updateHeader(payload.overview);
   openPendingChartFromUrl();
 }
@@ -3060,12 +3108,50 @@ function renderNews(payload) {
     // New posts prepend above the reading position; anchor the first visible
     // row so an update never swaps the article under the reader.
     const anchor = newsScrollAnchor();
-    newsList.innerHTML = visible.map((item) => newsItemMarkup(item, seenBefore)).join("");
+    if (!prependNewsItems(visible, seenBefore)) {
+      newsList.innerHTML = visible.map((item) => newsItemMarkup(item, seenBefore)).join("");
+    }
     restoreNewsScrollAnchor(anchor);
   }
   // Track ALL ids (muted, filtered, and deduplicated included) so changing a
   // view never fakes a "new" flash.
   knownNewsIds = new Set(items.map((item) => item.id));
+}
+
+// Busy feeds used to rebuild the WHOLE drawer DOM for one new headline. When
+// the update is purely "new items on top of the same surviving tail", prepend
+// only the unseen rows and trim server-window evictions off the bottom; any
+// other shape (edits, reorders, filter flips) falls back to the full rebuild.
+function prependNewsItems(visible, seenBefore) {
+  const rendered = Array.from(newsList.children);
+  if (!rendered.length || !rendered.every((node) => node.classList.contains("news-item"))) {
+    return false;
+  }
+  const firstRenderedId = rendered[0].dataset.newsId || "";
+  const offset = visible.findIndex((item) => String(item.id) === firstRenderedId);
+  if (offset < 0) return false;
+  const tail = visible.slice(offset);
+  if (tail.length > rendered.length) return false;
+  for (let index = 0; index < tail.length; index += 1) {
+    const node = rendered[index];
+    if (node.dataset.newsId !== String(tail[index].id)) return false;
+    // Telegram edits keep the id but change the text: a stale row must force
+    // the full rebuild (the render key already changed to get us here).
+    if (node.querySelector("p")?.textContent !== String(tail[index].text ?? "")) return false;
+  }
+  for (let index = rendered.length - 1; index >= tail.length; index -= 1) {
+    rendered[index].remove();
+  }
+  if (offset > 0) {
+    newsList.insertAdjacentHTML(
+      "afterbegin",
+      visible
+        .slice(0, offset)
+        .map((item) => newsItemMarkup(item, seenBefore))
+        .join(""),
+    );
+  }
+  return true;
 }
 
 function newsRenderKey(payload) {
@@ -3662,8 +3748,10 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
   }
   // The overview timestamp and flow revision are supplied by their producers;
   // snapshotRevision also invalidates same-date snapshot corrections.
+  // as_of advances every quote tick; minute granularity keeps the Daily
+  // panels from re-laying out every 10s when only sub-minute noise moved.
   const renderKey = [
-    overview.as_of || "",
+    String(overview.as_of || "").slice(0, 16),
     cryptoEtfFlows?.status || "",
     cryptoEtfFlows?.updated_at || "",
     snapshotRevision,

@@ -653,12 +653,13 @@ def test_market_map_toggle_renders_treemap_and_opens_charts(page: Page, base_url
 def test_market_map_relayouts_at_full_width_after_hidden_boot_render(
     page: Page, base_url: str
 ) -> None:
-    # A refresh landing on the Daily view with the map layout persisted
-    # renders the treemap inside the hidden markets panel (clientWidth 0,
-    # floored to 320px). Entering Markets must re-lay it out at real width.
+    # A refresh landing on the Daily view with the map layout persisted must
+    # NOT render the treemap into the hidden markets panel (ticks defer while
+    # a view is hidden); entering Markets renders it at the real width.
     page.goto(f"{base_url}/?deep=hidden-map#layout=map", wait_until="domcontentloaded")
     expect(page.locator("#daily-view")).to_be_visible()
-    page.locator("#board .market-map").wait_for(state="attached")
+    expect(page.locator("#daily-board .analytics-panel").first).to_be_visible()
+    expect(page.locator("#board .market-map")).to_have_count(0)
 
     page.locator("#markets-tab").click()
     expect(page.locator("#markets-view")).to_be_visible()

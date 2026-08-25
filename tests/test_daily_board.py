@@ -36,6 +36,53 @@ def test_daily_board_builds_regime_breadth_and_theme_ranking(tmp_path: Path) -> 
     assert len(payload["benchmarks"]) == 1  # type: ignore[arg-type]
 
 
+def test_build_board_reuses_bars_until_the_table_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bars table changes at most hourly, but the board rebuilds every
+    quote poll: the full-table load must be cached on db.bars_revision."""
+    database = tmp_path / "board.sqlite3"
+    groups = [
+        GroupConfig(name="TECH", assets=[AssetConfig(symbol="NVDA", type="equity", source="yahoo")])
+    ]
+    db.save_bars(database, _rising_bars("NVDA"))
+    grouped_quotes = {"TECH": [_quote("NVDA", "equity", 128.0, 124.0)]}
+    service = DailyBoardService(database)
+    loads = 0
+    original_load = db.load_bars_by_symbol
+
+    def counting_load(*args: object, **kwargs: object) -> object:
+        nonlocal loads
+        loads += 1
+        return original_load(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(db, "load_bars_by_symbol", counting_load)
+
+    first = service.build(groups, grouped_quotes)
+    second = service.build(groups, grouped_quotes)
+    assert loads == 1
+    assert first["universe"] == second["universe"]
+
+    # A bar write bumps the revision and invalidates the cached load.
+    db.save_bars(
+        database,
+        [
+            Bar(
+                symbol="NVDA",
+                provider="yahoo",
+                interval="1d",
+                timestamp=datetime.now(UTC),
+                open=130.0,
+                high=131.0,
+                low=129.0,
+                close=130.5,
+            )
+        ],
+    )
+    service.build(groups, grouped_quotes)
+    assert loads == 2
+
+
 def test_market_summaries_include_sparkline_performance_and_range(tmp_path: Path) -> None:
     database = tmp_path / "board.sqlite3"
     groups = [

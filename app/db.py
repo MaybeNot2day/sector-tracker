@@ -763,6 +763,20 @@ def load_bars_by_symbol(
     return grouped
 
 
+def bars_revision(path: Path) -> int:
+    """Cheap change marker for the bars table (one B-tree probe).
+
+    MAX(rowid) bumps on every INSERT and INSERT OR REPLACE (replace assigns a
+    fresh rowid), so callers can cache derived bar state and invalidate on any
+    write. Deletes only happen in the startup quarantine sweep, before any
+    cache exists.
+    """
+    init_db(path)
+    with _connect(path) as conn:
+        row = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM bars").fetchone()
+        return int(row[0])
+
+
 def newest_bar_timestamps(path: Path, interval: str) -> dict[str, datetime]:
     """Newest bar timestamp per symbol for one interval (any provider)."""
     init_db(path)

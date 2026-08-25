@@ -34,6 +34,12 @@ class DailyBoardService:
         self._last_snapshot_write: float | None = None
         self._last_snapshot_success_at: datetime | None = None
         self._last_snapshot_error: str | None = None
+        # Daily bars change at most hourly (history refresh / heal), but the
+        # board rebuilds every quote poll: cache the expensive bars-table load
+        # keyed by db.bars_revision so steady-state builds skip the full scan.
+        self._bars_cache: (
+            tuple[int, dict[tuple[str, ProviderName], list[Bar]], dict[str, list[Bar]]] | None
+        ) = None
 
     def build_board(
         self,
@@ -45,8 +51,7 @@ class DailyBoardService:
         Loading the bars table materializes tens of thousands of Bar objects;
         doing it once per poll instead of twice halves the hot path.
         """
-        cached = db.load_bars_by_symbol(self.database_path, "1d")
-        fallback_bars = _fallback_bars_by_symbol(cached)
+        cached, fallback_bars = self._load_daily_bars()
         assets = _unique_assets(groups)
         quotes = _quotes_by_symbol(grouped_quotes)
         prepared = {
@@ -80,6 +85,21 @@ class DailyBoardService:
         }
         self._maybe_snapshot(overview)
         return overview, summaries
+
+    def _load_daily_bars(
+        self,
+    ) -> tuple[dict[tuple[str, ProviderName], list[Bar]], dict[str, list[Bar]]]:
+        try:
+            revision = db.bars_revision(self.database_path)
+        except Exception:
+            revision = -1  # unknown: fall through to a fresh load, don't cache
+        if self._bars_cache is not None and revision >= 0 and self._bars_cache[0] == revision:
+            return self._bars_cache[1], self._bars_cache[2]
+        cached = db.load_bars_by_symbol(self.database_path, "1d")
+        fallback_bars = _fallback_bars_by_symbol(cached)
+        if revision >= 0:
+            self._bars_cache = (revision, cached, fallback_bars)
+        return cached, fallback_bars
 
     def _maybe_snapshot(self, overview: dict[str, object]) -> None:
         """Persist a condensed daily snapshot, throttled per process.

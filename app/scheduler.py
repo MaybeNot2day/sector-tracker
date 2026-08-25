@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -65,8 +66,11 @@ class ConnectionManager:
         clients = list(self._clients)
         if not clients:
             return
+        # Serialize ONCE for the whole fan-out: send_json would re-encode the
+        # (large) board payload per client. Compact separators shave ~10%.
+        data = json.dumps(payload, separators=(",", ":"))
         results = await asyncio.gather(
-            *(asyncio.wait_for(ws.send_json(payload), timeout=5.0) for ws in clients),
+            *(asyncio.wait_for(ws.send_text(data), timeout=5.0) for ws in clients),
             return_exceptions=True,
         )
         for websocket, result in zip(clients, results, strict=True):
@@ -81,6 +85,7 @@ class ConnectionManager:
 async def quote_poll_loop(app_state: Any) -> None:
     await asyncio.sleep(1)
     while True:
+        started = asyncio.get_running_loop().time()
         try:
             # One groups snapshot per cycle: a watchlist edit completing
             # mid-cycle must not zip NEW groups against OLD quotes.
@@ -95,7 +100,10 @@ async def quote_poll_loop(app_state: Any) -> None:
             raise
         except Exception:
             logger.exception("quote poll cycle failed")
-        await asyncio.sleep(app_state.settings.quote_poll_seconds)
+        # Fixed tick: sleeping the full period AFTER a slow fetch made the
+        # effective cadence drift to poll+fetch (12-18s irregular updates).
+        elapsed = asyncio.get_running_loop().time() - started
+        await asyncio.sleep(max(1.0, app_state.settings.quote_poll_seconds - elapsed))
 
 
 HYPERLIQUID_DISCOVERY_INITIAL_DELAY_SECONDS = 10

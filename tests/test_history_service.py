@@ -76,6 +76,53 @@ async def test_history_service_fetches_and_caches_bars(tmp_path: Path) -> None:
     assert bars[0].close == 102.0
 
 
+def _daily_bar(symbol: str, timestamp: datetime, close: float = 100.0) -> Bar:
+    return Bar(
+        symbol=symbol,
+        provider="yahoo",
+        interval="1d",
+        timestamp=timestamp,
+        open=close,
+        high=close + 1,
+        low=close - 1,
+        close=close,
+    )
+
+
+@pytest.mark.asyncio
+async def test_fresh_cached_daily_bars_skip_live_providers(tmp_path: Path) -> None:
+    """A chart open must not wait on a provider when SQLite already holds a
+    fresh (<26h) daily series — the hourly warm loop keeps it current."""
+    database = tmp_path / "board.sqlite3"
+    groups = [
+        GroupConfig(name="TEST", assets=[AssetConfig(symbol="SPY", type="etf", source="yahoo")])
+    ]
+    now = datetime.now(UTC)
+    db.save_bars(database, [_daily_bar("SPY", now - timedelta(days=2)), _daily_bar("SPY", now)])
+    provider = CountingHistoryProvider()
+    service = HistoryService(database, {"yahoo": provider})
+
+    bars = await service.get_history(groups, "SPY", interval="1d", range_="1y")
+
+    assert len(bars) == 2
+    assert provider.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_stale_cached_daily_bars_still_fetch_live(tmp_path: Path) -> None:
+    database = tmp_path / "board.sqlite3"
+    groups = [
+        GroupConfig(name="TEST", assets=[AssetConfig(symbol="SPY", type="etf", source="yahoo")])
+    ]
+    db.save_bars(database, [_daily_bar("SPY", datetime.now(UTC) - timedelta(days=4))])
+    provider = CountingHistoryProvider()
+    service = HistoryService(database, {"yahoo": provider})
+
+    await service.get_history(groups, "SPY", interval="1d", range_="1y")
+
+    assert provider.calls == 1
+
+
 @pytest.mark.asyncio
 async def test_history_service_fetches_unconfigured_explicit_fallback(
     tmp_path: Path,

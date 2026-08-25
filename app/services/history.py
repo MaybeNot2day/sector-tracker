@@ -26,6 +26,10 @@ HISTORY_CACHE_MAX = 256
 # configured source so DMAs and 52W metrics keep official session bars.
 INTRADAY_INTERVALS = {"1m", "5m", "15m", "30m", "1h", "4h"}
 
+# Ranges fully covered by the hourly 1y warm loop: for these a fresh cached
+# daily series can answer a chart open without touching a live provider.
+_DB_FIRST_RANGES = {"1d", "1w", "1mo", "3mo", "6mo", "ytd", "1y"}
+
 
 class HistoryService:
     def __init__(self, database_path: Path, providers: dict[ProviderName, QuoteProvider]) -> None:
@@ -112,6 +116,15 @@ class HistoryService:
         interval: str,
         range_: str,
     ) -> list[Bar]:
+        if interval == "1d" and range_ in _DB_FIRST_RANGES:
+            # Chart opens must not wait on Yahoo (curl + retries, worst case
+            # tens of seconds) when the warm loop already keeps a fresh daily
+            # series in SQLite. Staleness gate mirrors the heal loop's 26h.
+            cached = await asyncio.to_thread(
+                db.load_bars, self.database_path, asset.symbol, interval, asset.source
+            )
+            if cached and datetime.now(UTC) - cached[-1].timestamp < STALE_BAR_AGE:
+                return filter_bars_to_range(cached, range_)
         providers_to_try: list[QuoteProvider] = []
         hyperliquid = self.providers.get("hyperliquid")
         if (

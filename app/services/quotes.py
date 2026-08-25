@@ -62,11 +62,55 @@ class QuoteService:
             # so the synchronous fetch below is their only refresh path.
             self._schedule_refresh(groups, cache_key)
             return self._cached_grouped
+        if allow_stale and self._cached_grouped is None:
+            # Cold process (fresh deploy): the last poll's quotes are already
+            # persisted in SQLite. Serve them instantly as stale and let the
+            # (possibly already in-flight) refresh replace them, instead of
+            # blocking the first paint behind a full provider sweep.
+            seeded = await self._seed_from_persisted(groups, cache_key)
+            if seeded is not None:
+                self._schedule_refresh(groups, cache_key)
+                return seeded
         async with self._refresh_lock:
             cached = self._cached_quotes(cache_key)
             if cached is not None:
                 return cached
             return await self._refresh(groups, cache_key)
+
+    async def _seed_from_persisted(
+        self, groups: list[GroupConfig], cache_key: GroupsCacheKey
+    ) -> dict[str, list[Quote]] | None:
+        symbols = sorted({asset.symbol for group in groups for asset in group.assets})
+        try:
+            cached_by_symbol = await asyncio.to_thread(
+                db.load_latest_quotes, self.database_path, symbols
+            )
+        except Exception:
+            logger.warning("persisted quote seed failed", exc_info=True)
+            return None
+        if self._cached_grouped is not None:
+            # A concurrent refresh landed while we were reading SQLite: the
+            # live snapshot must win — never clobber it with stale rows.
+            return self._cached_grouped if self._cache_key == cache_key else None
+        hits = 0
+        result: dict[str, list[Quote]] = {}
+        for group in groups:
+            quotes: list[Quote] = []
+            for asset in group.assets:
+                cached = cached_by_symbol.get(asset.symbol.upper())
+                if cached is not None and _cached_quote_matches(asset, cached):
+                    hits += 1
+                quotes.append(self._stale_or_error(asset, cached_by_symbol))
+            result[group.name] = quotes
+        if not hits:
+            return None  # empty database: nothing better than waiting for live
+        # Install as the current snapshot but dated one refresh window in the
+        # past: subsequent requests ride stale-while-revalidate immediately,
+        # and the scheduled refresh still runs because the cache reads expired.
+        self._cache_key = cache_key
+        self._cached_grouped = result
+        self._cache_time = monotonic() - max(self.min_refresh_seconds, 1.0)
+        return result
 
     async def get_lookup_quotes(self, assets: list[AssetConfig]) -> dict[str, Quote]:
         """Fresh quotes for arbitrary (possibly off-board) assets.
@@ -373,7 +417,7 @@ def grouped_quotes_payload(
 
 
 def quote_payload(quote: Quote) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "symbol": quote.symbol,
         "asset_type": quote.asset_type,
         "provider": quote.provider,
@@ -385,23 +429,28 @@ def quote_payload(quote: Quote) -> dict[str, object]:
         "is_stale": quote.is_stale,
         "error": quote.error,
         "currency": quote.currency,
-        "display_last": quote.display_last if quote.display_last is not None else quote.last,
-        "display_previous_close": (
-            quote.display_previous_close
-            if quote.display_previous_close is not None
-            else quote.previous_close
-        ),
-        "display_change_abs": (
-            quote.display_change_abs if quote.display_change_abs is not None else quote.change_abs
-        ),
-        "display_change_pct": (
-            quote.display_change_pct if quote.display_change_pct is not None else quote.change_pct
-        ),
-        "display_currency": quote.display_currency or quote.currency,
         "volume": quote.volume,
         "funding_rate": quote.funding_rate,
         "open_interest_usd": quote.open_interest_usd,
     }
+    # display_* mirror the base fields for most (USD) quotes. The frontend
+    # falls back to the base field when a display key is absent, so only ship
+    # them when FX normalization actually made them differ — this trims five
+    # duplicated fields per asset from every board frame.
+    if quote.display_last is not None and quote.display_last != quote.last:
+        payload["display_last"] = quote.display_last
+    if (
+        quote.display_previous_close is not None
+        and quote.display_previous_close != quote.previous_close
+    ):
+        payload["display_previous_close"] = quote.display_previous_close
+    if quote.display_change_abs is not None and quote.display_change_abs != quote.change_abs:
+        payload["display_change_abs"] = quote.display_change_abs
+    if quote.display_change_pct is not None and quote.display_change_pct != quote.change_pct:
+        payload["display_change_pct"] = quote.display_change_pct
+    if quote.display_currency and quote.display_currency != quote.currency:
+        payload["display_currency"] = quote.display_currency
+    return payload
 
 
 def clone_quote_with_provider(quote: Quote, provider: ProviderName) -> Quote:
