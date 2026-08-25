@@ -83,6 +83,7 @@ from app.services.news import NewsService
 from app.services.options import MarketDataOptionsService, OptionsDataError
 from app.services.quotes import QuoteService, quote_payload
 from app.services.sofr import SOFRError, SOFRService
+from app.services.symbol_logos import LOGO_KINDS, fetch_symbol_logo
 from app.services.trends import group_trends_payload
 
 APP_DIR = Path(__file__).parent
@@ -1172,6 +1173,27 @@ async def component_image(src: str = Query(min_length=1, max_length=300)) -> Res
         content=data,
         media_type=content_type,
         headers={"Cache-Control": "public, max-age=21600"},
+    )
+
+
+_LOGO_SYMBOL = re.compile(r"[A-Z0-9.\-]{1,24}")
+
+
+@app.get("/api/symbol-logo/{symbol}")
+async def symbol_logo(symbol: str, kind: str = Query(min_length=1, max_length=10)) -> Response:
+    """Same-origin proxy for asset logos (Hyperliquid coins, Parqet tickers)."""
+    clean = clean_symbol(symbol)
+    if kind not in LOGO_KINDS or not _LOGO_SYMBOL.fullmatch(clean):
+        raise HTTPException(status_code=422, detail="logo_request_invalid")
+    result = await fetch_symbol_logo(clean, kind)
+    if result is None:
+        # Cacheable 404: the browser hides the img and won't re-ask all day.
+        return Response(status_code=404, headers={"Cache-Control": "public, max-age=21600"})
+    data, content_type = result
+    return Response(
+        content=data,
+        media_type=content_type,
+        headers={"Cache-Control": "public, max-age=86400"},
     )
 
 

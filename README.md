@@ -66,13 +66,22 @@ then every 15 minutes for later revisions.
 The Watch tab has two modes. Charts is a DexScreener-style wall of up to nine
 interactive candlestick tiles sharing one timeframe. Lists is a personal
 screener: any number of named lists ("Crypto", "AI stocks", ...), each holding
-up to 60 free-typed symbols across asset classes, rendered as a clean table
-(last, 1D %, 1D change, asset-type tag) with the same chart-modal drill-down.
-Board symbols ride the live WebSocket payload; off-board symbols are quoted
-through `GET /api/quotes/lookup?symbols=...`, which resolves each ticker
-independently (board config first, then the Hyperliquid market map, then
-Yahoo) and caches results for 30 seconds. Both modes persist per browser in
-localStorage.
+up to 60 free-typed symbols across asset classes, rendered as a dense table
+(last, 1D %, 1D change, $ notional volume, annualized perp funding, open
+interest, asset-type tag) with the same chart-modal drill-down. List
+create/rename/delete run through an in-app dialog styled like the board, not
+the browser prompt. Board symbols ride the live WebSocket payload; off-board
+symbols are quoted through `GET /api/quotes/lookup?symbols=...`, which
+resolves each ticker independently (board config first, then the Hyperliquid
+market map, then Yahoo) and caches results for 30 seconds. Both modes persist
+per browser in localStorage.
+
+Asset logos render across the board — Markets rows, the crypto tape, watch
+lists and tiles, and the chart modal header — through the same-origin
+`GET /api/symbol-logo/{symbol}?kind=crypto|stock` proxy (the CSP pins img-src
+to 'self'). Crypto icons come from Hyperliquid, ticker logos from Parqet;
+hits cache in memory for a week, misses negative-cache for six hours, and a
+failed load simply drops the icon so the symbol text stands alone.
 
 Watchlists live in YAML and can also be edited in the app. Quotes and OHLC bars are cached in
 SQLite, and market data providers are isolated behind a common interface so Yahoo, Hyperliquid,

@@ -17,7 +17,7 @@
         }
       } catch {}
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260826-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260826-2" />
   </head>
   <body>
     <aside id="news-panel" class="news-panel" aria-label="Live Telegram news" aria-hidden="true" inert>
@@ -475,6 +475,25 @@
       </section>
     </main>
 
+    <div id="board-dialog" class="modal" aria-hidden="true">
+      <form class="dialog-shell" role="dialog" aria-modal="true" aria-labelledby="board-dialog-title">
+        <h2 id="board-dialog-title"></h2>
+        <p id="board-dialog-message" hidden></p>
+        <input
+          id="board-dialog-input"
+          type="text"
+          autocomplete="off"
+          spellcheck="false"
+          maxlength="40"
+          hidden
+        />
+        <div class="dialog-actions">
+          <button id="board-dialog-cancel" type="button">Cancel</button>
+          <button id="board-dialog-ok" type="submit" class="dialog-primary">OK</button>
+        </div>
+      </form>
+    </div>
+
     <div id="editor-modal" class="modal" aria-hidden="true">
       <div class="editor-shell" role="dialog" aria-modal="true" aria-labelledby="editor-title">
         <div class="modal-header">
@@ -598,6 +617,6 @@
 
     <div id="help-tooltip" class="help-tooltip" role="tooltip" hidden></div>
 
-    <script src="/static/app.js?v=20260826-1" defer></script>
+    <script src="/static/app.js?v=20260826-2" defer></script>
 
 </html>

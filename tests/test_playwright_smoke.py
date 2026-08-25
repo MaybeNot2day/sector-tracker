@@ -1679,6 +1679,14 @@ def test_watch_tab_builds_persistent_interactive_chart_wall(page: Page, base_url
     expect(page.locator(".watch-tile")).to_have_count(1)
 
 
+def _dialog_prompt(page: Page, value: str) -> None:
+    """Drive the in-app board dialog: type into its input and submit."""
+    expect(page.locator("#board-dialog")).to_have_attribute("aria-hidden", "false")
+    page.locator("#board-dialog-input").fill(value)
+    page.locator("#board-dialog-ok").click()
+    expect(page.locator("#board-dialog")).to_have_attribute("aria-hidden", "true")
+
+
 def test_watch_lists_mode_manages_named_screener_lists(page: Page, base_url: str) -> None:
     page.goto(f"{base_url}/#view=watch", wait_until="domcontentloaded")
     expect(page.locator("#watch-view")).to_be_visible()
@@ -1690,9 +1698,9 @@ def test_watch_lists_mode_manages_named_screener_lists(page: Page, base_url: str
     expect(page.locator("#watch-list-controls")).to_be_visible()
     expect(page.locator("#watch-list-board .empty-state")).to_contain_text("Create your first list")
 
-    # Create a named list through the prompt dialog.
-    page.once("dialog", lambda dialog: dialog.accept("Crypto"))
+    # Create a named list through the in-app dialog (not the browser prompt).
     page.locator("#watch-list-new").click()
+    _dialog_prompt(page, "Crypto")
     expect(page.locator("#watch-list-tabs button")).to_have_count(1)
     expect(page.locator("#watch-list-tabs button.active")).to_contain_text("Crypto")
 
@@ -1707,6 +1715,13 @@ def test_watch_lists_mode_manages_named_screener_lists(page: Page, base_url: str
     expect(lookup_row.locator("td.num").first).to_contain_text("100.00")
     expect(lookup_row.locator("td.num.positive").first).to_contain_text("+5.26%")
     expect(lookup_row.locator(".watch-list-type")).to_have_text("EQ")
+    # Metric columns exist: volume is derived, funding/OI dashes for equities.
+    expect(lookup_row.locator("td.num.dim").first).to_contain_text("$")
+    expect(lookup_row.locator('td[title="Perp funding, annualized"]')).to_have_text("—")
+    # Logos ride the same-origin proxy for both board and lookup symbols.
+    expect(rows.first.locator("img.asset-logo")).to_have_attribute(
+        "src", "/api/symbol-logo/SPY?kind=stock"
+    )
 
     # Duplicates are refused with a status message naming the list.
     page.locator("#watch-add").fill("TSLA")
@@ -1715,17 +1730,25 @@ def test_watch_lists_mode_manages_named_screener_lists(page: Page, base_url: str
     expect(rows).to_have_count(2)
 
     # A second list starts empty; switching tabs swaps the table.
-    page.once("dialog", lambda dialog: dialog.accept("Stocks"))
     page.locator("#watch-list-new").click()
+    _dialog_prompt(page, "Stocks")
     expect(page.locator("#watch-list-tabs button")).to_have_count(2)
     expect(page.locator("#watch-list-board .empty-state")).to_contain_text('"Stocks" is empty')
     page.locator('#watch-list-tabs button:has-text("Crypto")').click()
     expect(page.locator(".watch-list-table tbody tr")).to_have_count(2)
 
-    # Rename updates the active tab label.
-    page.once("dialog", lambda dialog: dialog.accept("Perps"))
+    # Rename pre-fills the current name and updates the active tab label.
     page.locator("#watch-list-rename").click()
+    expect(page.locator("#board-dialog-input")).to_have_value("Crypto")
+    _dialog_prompt(page, "Perps")
     expect(page.locator("#watch-list-tabs button.active")).to_contain_text("Perps")
+
+    # Escape cancels a dialog without touching the lists.
+    page.locator("#watch-list-new").click()
+    expect(page.locator("#board-dialog")).to_have_attribute("aria-hidden", "false")
+    page.keyboard.press("Escape")
+    expect(page.locator("#board-dialog")).to_have_attribute("aria-hidden", "true")
+    expect(page.locator("#watch-list-tabs button")).to_have_count(2)
 
     # Row remove drops the symbol from the open list only.
     page.locator('.watch-list-table tr[data-list-symbol="SPY"] .watch-list-remove').click()
@@ -1740,9 +1763,10 @@ def test_watch_lists_mode_manages_named_screener_lists(page: Page, base_url: str
     expect(page.locator("#watch-list-tabs button.active")).to_contain_text("Perps")
     expect(page.locator(".watch-list-table tbody tr")).to_have_count(1)
 
-    # Deleting the open list falls back to the next saved list.
-    page.once("dialog", lambda dialog: dialog.accept())
+    # Deleting the open list confirms in-app and falls back to the next list.
     page.locator("#watch-list-delete").click()
+    expect(page.locator("#board-dialog-message")).to_contain_text("1 symbol will be removed")
+    page.locator("#board-dialog-ok").click()
     expect(page.locator("#watch-list-tabs button")).to_have_count(1)
     expect(page.locator("#watch-list-tabs button.active")).to_contain_text("Stocks")
 
@@ -2245,6 +2269,9 @@ def _lookup_payload(symbols: list[str]) -> dict[str, Any]:
             "change_pct": 7.08 if crypto else 5.26,
             "timestamp": "2026-08-26T12:00:00+00:00",
             "is_stale": False,
+            "volume": 1_500.0 if crypto else 2_500_000.0,
+            "funding_rate": 0.0000125 if crypto else None,
+            "open_interest_usd": 5_000_000_000.0 if crypto else None,
         }
         assets[symbol] = {
             "type": "crypto_perp" if crypto else "equity",
@@ -2320,6 +2347,8 @@ def _stub_board_apis(page: Page) -> None:
         elif path == "/api/ai/hardware":
             _fulfill_json(route, AI_HARDWARE_PAYLOAD)
         elif path == "/api/component-image":
+            route.fulfill(status=200, content_type="image/png", body=_PNG_1PX)
+        elif path.startswith("/api/symbol-logo/"):
             route.fulfill(status=200, content_type="image/png", body=_PNG_1PX)
         elif path == "/api/reports":
             _fulfill_json(route, _reports_page(parsed.query))

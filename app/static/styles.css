@@ -3068,7 +3068,7 @@ a.key-date-row:focus-visible {
 }
 
 .watch-list-table th {
-  padding: 8px 14px;
+  padding: 7px 12px;
   border-bottom: 1px solid var(--line);
   font-family: var(--font-mono);
   font-size: 9.5px;
@@ -3081,8 +3081,8 @@ a.key-date-row:focus-visible {
 }
 
 .watch-list-table td {
-  padding: 7px 14px;
-  border-bottom: 1px solid var(--line);
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--line-soft);
   white-space: nowrap;
 }
 
@@ -3101,6 +3101,10 @@ a.key-date-row:focus-visible {
   font-size: 11.5px;
 }
 
+.watch-list-table td.num.dim {
+  color: var(--muted-strong);
+}
+
 .watch-list-table td.num.positive {
   color: var(--green);
 }
@@ -3116,6 +3120,9 @@ a.key-date-row:focus-visible {
 }
 
 .watch-list-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   border: 0;
   padding: 0;
   background: transparent;
@@ -3141,12 +3148,6 @@ a.key-date-row:focus-visible {
   padding: 1px 4px;
 }
 
-.watch-list-table td.name {
-  max-width: 340px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: var(--muted-strong);
-}
 
 .watch-list-stale {
   font-style: normal;
@@ -3174,6 +3175,129 @@ a.key-date-row:focus-visible {
 
 .watch-list-remove:hover,
 .watch-list-remove:focus-visible {
+  color: var(--red);
+}
+
+/* --- Asset logos (same-origin /api/symbol-logo proxy) ----------------------- */
+.asset-logo {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  object-fit: contain;
+  background: var(--surface-soft);
+}
+
+.symbol-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.symbol-head strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#chart-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#chart-title .asset-logo {
+  width: 18px;
+  height: 18px;
+}
+
+.watch-tile .watch-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* --- In-app prompt/confirm dialog ------------------------------------------- */
+.dialog-shell {
+  width: min(440px, 100%);
+  margin: 0;
+  padding: 20px 22px;
+  border: 1px solid var(--line-strong);
+  background: var(--bg);
+  box-shadow: var(--modal-shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.dialog-shell h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text);
+}
+
+.dialog-shell p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted-strong);
+}
+
+#board-dialog-input {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+#board-dialog-input:focus-visible {
+  outline: none;
+  border-color: var(--accent-dim);
+}
+
+#board-dialog-input[hidden] {
+  display: none;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.dialog-actions button {
+  padding: 7px 16px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--muted-strong);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.dialog-actions button:hover,
+.dialog-actions button:focus-visible {
+  border-color: var(--accent-dim);
+  color: var(--text);
+}
+
+.dialog-actions .dialog-primary {
+  background: var(--accent-soft);
+  border-color: var(--accent-dim);
+  color: var(--accent);
+}
+
+.dialog-actions .dialog-primary.danger {
+  background: color-mix(in srgb, var(--red) 14%, transparent);
+  border-color: color-mix(in srgb, var(--red) 45%, transparent);
   color: var(--red);
 }
 

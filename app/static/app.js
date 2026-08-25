@@ -66,6 +66,13 @@ const cryptoTapeElement = document.querySelector("#crypto-tape");
 const modal = document.querySelector("#chart-modal");
 const modalShell = document.querySelector("#chart-modal .modal-shell");
 const modalClose = document.querySelector("#modal-close");
+const boardDialog = document.querySelector("#board-dialog");
+const boardDialogForm = boardDialog.querySelector(".dialog-shell");
+const boardDialogTitle = document.querySelector("#board-dialog-title");
+const boardDialogMessage = document.querySelector("#board-dialog-message");
+const boardDialogInput = document.querySelector("#board-dialog-input");
+const boardDialogCancel = document.querySelector("#board-dialog-cancel");
+const boardDialogOk = document.querySelector("#board-dialog-ok");
 const chartTitle = document.querySelector("#chart-title");
 const chartSubtitle = document.querySelector("#chart-subtitle");
 const chartElement = document.querySelector("#chart");
@@ -602,6 +609,18 @@ function init() {
   setupHelpTooltips();
   // icons are inline SVG; no icon library needed
   setConnection("connecting");
+  // Failed logo loads (cacheable 404s from the proxy) drop the img so the
+  // symbol text stands alone; capture phase because error events don't bubble.
+  document.addEventListener(
+    "error",
+    (event) => {
+      const target = event.target;
+      if (target instanceof HTMLImageElement && target.classList.contains("asset-logo")) {
+        target.remove();
+      }
+    },
+    true,
+  );
   // Watch state loads before URL restore: a #view=watch deep link renders
   // the grid during restoreUrlState and must see the persisted symbols.
   loadWatchState();
@@ -886,6 +905,14 @@ function init() {
   watchListNewButton.addEventListener("click", createWatchList);
   watchListRenameButton.addEventListener("click", renameWatchList);
   watchListDeleteButton.addEventListener("click", deleteWatchList);
+  boardDialogForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    settleBoardDialog(true);
+  });
+  boardDialogCancel.addEventListener("click", () => settleBoardDialog(false));
+  boardDialog.addEventListener("click", (event) => {
+    if (event.target === boardDialog) settleBoardDialog(false);
+  });
   watchListBoard.addEventListener("click", (event) => {
     const remove = event.target.closest(".watch-list-remove");
     if (remove) {
@@ -977,6 +1004,7 @@ function init() {
         if (top === modal) closeModal();
         else if (top === editorModal) closeEditor();
         else if (top === reportsModal) closeReports();
+        else if (top === boardDialog) settleBoardDialog(false);
         else closeDialog(top);
         return;
       }
@@ -1504,9 +1532,12 @@ function renderWatchView() {
   }
 }
 
-function createWatchList() {
-  const name = window.prompt('Name the new list (e.g. "Crypto", "AI stocks"):', "");
-  const clean = String(name || "").trim().slice(0, 40);
+async function createWatchList() {
+  const name = await boardPrompt("Name the new list", {
+    placeholder: "Crypto, AI stocks, Memory…",
+    okLabel: "Create",
+  });
+  const clean = String(name || "").slice(0, 40);
   if (!clean) return;
   const list = { id: watchListId(), name: clean, symbols: [] };
   watchLists.push(list);
@@ -1517,22 +1548,27 @@ function createWatchList() {
   watchAddInput.focus();
 }
 
-function renameWatchList() {
+async function renameWatchList() {
   const list = activeWatchList();
   if (!list) return;
-  const name = window.prompt("Rename list:", list.name);
-  const clean = String(name || "").trim().slice(0, 40);
+  const name = await boardPrompt("Rename list", { value: list.name, okLabel: "Rename" });
+  const clean = String(name || "").slice(0, 40);
   if (!clean || clean === list.name) return;
   list.name = clean;
   persistWatchState();
   renderWatchLists();
 }
 
-function deleteWatchList() {
+async function deleteWatchList() {
   const list = activeWatchList();
   if (!list) return;
   const count = list.symbols.length;
-  if (!window.confirm(`Delete list "${list.name}"${count ? ` (${count} symbols)` : ""}?`)) return;
+  const confirmed = await boardConfirm(
+    `Delete "${list.name}"?`,
+    count ? `${count} symbol${count === 1 ? "" : "s"} will be removed with it.` : "",
+    { okLabel: "Delete", danger: true },
+  );
+  if (!confirmed) return;
   watchLists = watchLists.filter((item) => item !== list);
   activeWatchListId = watchLists[0]?.id || null;
   persistWatchState();
@@ -1617,6 +1653,39 @@ function watchListRowData(symbol) {
   };
 }
 
+// --- Asset logos: same-origin proxy (/api/symbol-logo), CSP img-src 'self'.
+// A failed load removes the img via the global capture-phase error handler.
+function symbolLogoHtml(symbol, type, size = 16) {
+  const kind =
+    type === "crypto_perp" ? "crypto" : type === "equity" || type === "etf" ? "stock" : "";
+  if (!kind || !/^[A-Z0-9.\-]{1,24}$/.test(symbol)) return "";
+  return `<img class="asset-logo" data-symbol="${escapeHtml(symbol)}" src="/api/symbol-logo/${encodeURIComponent(symbol)}?kind=${kind}" alt="" loading="lazy" decoding="async" width="${size}" height="${size}" />`;
+}
+
+// In-place row updates reuse DOM nodes across symbols: keep the logo in sync
+// with the symbol currently occupying the node.
+function syncSymbolLogo(container, symbol, type) {
+  const logo = container.querySelector("img.asset-logo");
+  const html = symbolLogoHtml(symbol, type);
+  if (!html) {
+    logo?.remove();
+    return;
+  }
+  if (logo && logo.dataset.symbol === symbol) return;
+  logo?.remove();
+  container.insertAdjacentHTML("afterbegin", html);
+}
+
+function fundingAprParts(quote) {
+  const rate = quote ? numericOrNull(quote.funding_rate) : null;
+  if (rate === null) return { text: "—", tone: "" };
+  const apr = rate * 24 * 365 * 100;
+  // Same read as the crypto tape: hot positive funding is crowded-long risk
+  // (red); negative funding pays longs (green).
+  const tone = apr >= 20 ? "negative" : apr < 0 ? "positive" : "";
+  return { text: `${apr >= 0 ? "+" : ""}${apr.toFixed(1)}%`, tone };
+}
+
 function watchListRow(symbol) {
   const { name, type, quote } = watchListRowData(symbol);
   const last = quote ? numericOrNull(displayQuoteValue(quote, "last")) : null;
@@ -1626,12 +1695,20 @@ function watchListRow(symbol) {
   const tag = WATCH_LIST_TYPE_TAGS[type] || "";
   const stale = quote?.is_stale ? ' <em class="watch-list-stale" title="Last cached quote">◌</em>' : "";
   const absText = abs === null ? "—" : `${abs > 0 ? "+" : ""}${formatPrice(abs)}`;
+  const volume = quote ? numericOrNull(quote.volume) : null;
+  const notional = volume !== null && last !== null ? volume * last : null;
+  const volumeText = notional === null ? "—" : `$${formatCompactPrice(notional)}`;
+  const funding = fundingAprParts(quote);
+  const oi = quote ? numericOrNull(quote.open_interest_usd) : null;
+  const oiText = oi === null ? "—" : `$${formatCompactPrice(oi)}`;
   return `<tr data-list-symbol="${escapeHtml(symbol)}">
-    <td class="sym"><button type="button" class="watch-list-open" data-symbol="${escapeHtml(symbol)}" title="Open full ${escapeHtml(symbol)} chart"><strong>${escapeHtml(symbol)}</strong></button>${tag ? `<em class="watch-list-type">${tag}</em>` : ""}</td>
-    <td class="name">${escapeHtml(name)}${stale}</td>
+    <td class="sym"><button type="button" class="watch-list-open" data-symbol="${escapeHtml(symbol)}" title="${escapeHtml(name ? `${name} — open full chart` : `Open full ${symbol} chart`)}">${symbolLogoHtml(symbol, type)}<strong>${escapeHtml(symbol)}</strong></button>${tag ? `<em class="watch-list-type">${tag}</em>` : ""}${stale}</td>
     <td class="num">${last === null ? '<span class="watch-list-missing">…</span>' : escapeHtml(formatPrice(last))}</td>
     <td class="num ${tone}">${pct === null ? "—" : escapeHtml(formatSignedPct(pct))}</td>
     <td class="num ${tone}">${escapeHtml(absText)}</td>
+    <td class="num dim" title="24h notional volume">${escapeHtml(volumeText)}</td>
+    <td class="num ${funding.tone}" title="Perp funding, annualized">${escapeHtml(funding.text)}</td>
+    <td class="num dim" title="Open interest">${escapeHtml(oiText)}</td>
     <td class="act"><button type="button" class="watch-list-remove" data-symbol="${escapeHtml(symbol)}" aria-label="Remove ${escapeHtml(symbol)} from list">&times;</button></td>
   </tr>`;
 }
@@ -1650,7 +1727,7 @@ function renderWatchListBoard() {
   }
   const rows = list.symbols.map((symbol) => watchListRow(symbol)).join("");
   watchListBoard.innerHTML = `<div class="watch-list-tablewrap"><table class="watch-list-table">
-    <thead><tr><th>Symbol</th><th>Name</th><th class="num">Last</th><th class="num">1D %</th><th class="num">1D Δ</th><th></th></tr></thead>
+    <thead><tr><th>Symbol</th><th class="num">Last</th><th class="num">1D %</th><th class="num">1D Δ</th><th class="num">Vol</th><th class="num">Funding</th><th class="num">OI</th><th></th></tr></thead>
     <tbody>${rows}</tbody>
   </table></div>`;
 }
@@ -1738,7 +1815,7 @@ function renderWatchGrid() {
     .map(
       (symbol) => `<article class="watch-tile" data-watch-symbol="${escapeHtml(symbol)}">
         <header>
-          <button type="button" class="watch-open" data-symbol="${escapeHtml(symbol)}" title="Open full ${escapeHtml(symbol)} chart"><strong>${escapeHtml(symbol)}</strong></button>
+          <button type="button" class="watch-open" data-symbol="${escapeHtml(symbol)}" title="Open full ${escapeHtml(symbol)} chart">${symbolLogoHtml(symbol, findAssetConfig(symbol)?.type || watchListAssets.get(symbol)?.type || "")}<strong>${escapeHtml(symbol)}</strong></button>
           <span class="watch-quote">${watchQuoteLine(symbol)}</span>
           <button type="button" class="watch-remove" data-symbol="${escapeHtml(symbol)}" aria-label="Remove ${escapeHtml(symbol)} from watch grid">&times;</button>
         </header>
@@ -5228,6 +5305,11 @@ function updateTapeRow(row, data) {
   row.setAttribute("aria-label", `${data.symbol} chart`);
   cells[0].className = "symbol-cell";
   cells[0].querySelector("strong").textContent = data.symbol;
+  syncSymbolLogo(
+    cells[0].querySelector(".symbol-head") || cells[0],
+    data.symbol,
+    "crypto_perp",
+  );
   const previousLast = numericOrNull(cells[1].dataset.value);
   cells[1].className = "last-cell";
   cells[1].title = "Last trade";
@@ -5332,7 +5414,7 @@ function tapeRowMarkup(row) {
   const aprText = apr === null ? "--" : `${apr >= 0 ? "+" : ""}${apr.toFixed(1)}%`;
   const aprClass = apr === null ? "" : apr >= 20 ? "tone-negative" : apr < 0 ? "tone-positive" : "";
   return `<button type="button" class="asset-row" data-symbol="${escapeHtml(row.symbol)}" aria-label="${escapeHtml(row.symbol)} chart">
-    <span class="symbol-cell"><strong>${escapeHtml(row.symbol)}</strong></span>
+    <span class="symbol-cell"><span class="symbol-head">${symbolLogoHtml(row.symbol, "crypto_perp")}<strong>${escapeHtml(row.symbol)}</strong></span></span>
     <span class="last-cell" title="Last trade">${escapeHtml(formatPrice(row.last))}</span>
     <span class="${changeClass(row.change_pct)}">${escapeHtml(formatSignedPct(row.change_pct))}</span>
     <span class="tape-funding ${aprClass}" title="Funding, annualized">${escapeHtml(aprText)}</span>
@@ -5942,17 +6024,21 @@ function ensureRowCell(row, key, className = "") {
 function updateSymbolCell(cell, asset) {
   cell.className = "symbol-cell";
   cell.title = `${asset.symbol} ${asset.name || asset.exchange || asset.type || ""}`.trim();
-  let symbol = cell.querySelector("strong");
+  let head = cell.querySelector(".symbol-head");
   let name = cell.querySelector("small");
-  if (!symbol) {
-    symbol = document.createElement("strong");
-    cell.appendChild(symbol);
+  if (!head) {
+    head = document.createElement("span");
+    head.className = "symbol-head";
+    const symbolElement = document.createElement("strong");
+    head.appendChild(symbolElement);
+    cell.prepend(head);
   }
   if (!name) {
     name = document.createElement("small");
     cell.appendChild(name);
   }
-  symbol.textContent = asset.symbol;
+  head.querySelector("strong").textContent = asset.symbol;
+  syncSymbolLogo(head, asset.symbol, asset.type);
   const base = asset.name || asset.exchange || asset.type || "";
   name.textContent = asset.groupLabel ? `${base} · ${asset.groupLabel}` : base;
 }
@@ -6077,7 +6163,7 @@ function openChart(asset, options = {}) {
   activeRange = timeframeButton?.dataset.range || "1y";
   intervalButtons.forEach((item) => item.classList.toggle("active", item === timeframeButton));
   updateIntradayAvailability(assetType);
-  chartTitle.textContent = symbol;
+  chartTitle.innerHTML = `${symbolLogoHtml(symbol, assetType, 18)}${escapeHtml(symbol)}`;
   updateChartWatchToggle();
   chartSubtitle.textContent = [name, sourceLabels[provider] || provider].filter(Boolean).join(" / ");
   openDialog(modal, modalClose);
@@ -7072,6 +7158,54 @@ function dialogReturnTarget(element) {
   return (
     Array.from(document.querySelectorAll(".asset-row")).find((row) => row.dataset.symbol === symbol) || null
   );
+}
+
+// --- In-app prompt/confirm: replaces window.prompt/confirm so list CRUD
+// matches the board design instead of the browser chrome. Promise-based;
+// rides the shared dialog stack (focus trap, Escape, backdrop close).
+let boardDialogResolve = null;
+
+function openBoardDialog({
+  title,
+  message = "",
+  input = false,
+  value = "",
+  placeholder = "",
+  okLabel = "OK",
+  danger = false,
+}) {
+  return new Promise((resolve) => {
+    boardDialogResolve = resolve;
+    boardDialogTitle.textContent = title;
+    boardDialogMessage.textContent = message;
+    boardDialogMessage.hidden = !message;
+    boardDialogInput.hidden = !input;
+    boardDialogInput.value = value;
+    boardDialogInput.placeholder = placeholder;
+    boardDialogOk.textContent = okLabel;
+    boardDialogOk.classList.toggle("danger", danger);
+    openDialog(boardDialog, input ? boardDialogInput : boardDialogOk);
+    if (input && value) window.requestAnimationFrame(() => boardDialogInput.select());
+  });
+}
+
+// null/false when cancelled: prompt resolves the trimmed string, confirm true.
+function settleBoardDialog(confirmed) {
+  const resolve = boardDialogResolve;
+  if (!resolve) return;
+  boardDialogResolve = null;
+  const prompting = !boardDialogInput.hidden;
+  const result = confirmed ? (prompting ? boardDialogInput.value.trim() : true) : prompting ? null : false;
+  closeDialog(boardDialog);
+  resolve(result);
+}
+
+function boardPrompt(title, { value = "", placeholder = "", okLabel = "Save" } = {}) {
+  return openBoardDialog({ title, input: true, value, placeholder, okLabel });
+}
+
+function boardConfirm(title, message = "", { okLabel = "Confirm", danger = false } = {}) {
+  return openBoardDialog({ title, message, okLabel, danger });
 }
 
 function trapDialogFocus(event, dialog) {
