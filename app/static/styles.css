@@ -2197,23 +2197,48 @@ a.key-date-row:focus-visible {
 
 .fringe-closed-row {
   display: grid;
-  grid-template-columns: auto 38px auto 54px minmax(0, 1fr);
-  align-items: baseline;
-  gap: 8px;
+  grid-template-columns: 48px 44px minmax(0, 1fr) 60px 64px;
+  align-items: center;
+  gap: 10px;
+  max-width: 460px;
+  padding: 3px 0;
   min-height: 20px;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 10.5px;
+  cursor: help;
+}
+
+.fringe-closed-row + .fringe-closed-row {
+  border-top: 1px solid var(--line-soft);
 }
 
 .fringe-closed-row strong {
-  color: var(--muted-strong);
+  color: var(--text);
   font-weight: 600;
 }
 
+.fringe-closed-row .fringe-chip {
+  justify-self: start;
+}
+
+.fringe-closed-trip {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .fringe-closed-usd {
-  color: var(--muted);
   font-size: 10px;
+  text-align: right;
+}
+
+.fringe-closed-usd.tone-positive {
+  color: var(--green);
+}
+
+.fringe-closed-usd.tone-negative {
+  color: var(--red);
 }
 
 /* --- Fringe tab: equity curve + trade history ---------------------------- */
@@ -2320,13 +2345,8 @@ a.key-date-row:focus-visible {
 
 .fringe-closed-row em {
   font-style: normal;
+  font-weight: 600;
   text-align: right;
-}
-
-.fringe-closed-reason {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .rotation-grid {

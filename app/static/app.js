@@ -1690,14 +1690,34 @@ function syncSymbolLogo(container, symbol, type) {
   container.insertAdjacentHTML("afterbegin", html);
 }
 
+// Classic exchange presentation: the raw hourly rate ("0.0013%"), matching
+// Hyperliquid's own UI. Displaying annualized APR made most of the tape look
+// suspiciously identical — 68% of HL perps sit at the 0.0000125/h default,
+// which reads as "+11.0%" APR but is just the balanced-market baseline.
+function formatFundingRate(rate) {
+  if (typeof rate !== "number" || !Number.isFinite(rate)) return null;
+  return `${(rate * 100).toFixed(4)}%`;
+}
+
+// Tone keeps the board's risk read: hot positive funding (≥20% APR) is
+// crowded-long risk (red); negative funding pays longs (green).
+function fundingTone(rate) {
+  if (typeof rate !== "number" || !Number.isFinite(rate)) return "";
+  const apr = rate * 24 * 365 * 100;
+  return apr >= 20 ? "negative" : apr < 0 ? "positive" : "";
+}
+
+function fundingTitle(rate) {
+  if (typeof rate !== "number" || !Number.isFinite(rate)) return "Perp funding, hourly rate";
+  const apr = rate * 24 * 365 * 100;
+  return `Perp funding per hour (${apr >= 0 ? "+" : ""}${apr.toFixed(1)}% annualized)`;
+}
+
 function fundingAprParts(quote) {
   const rate = quote ? numericOrNull(quote.funding_rate) : null;
-  if (rate === null) return { text: "—", tone: "" };
-  const apr = rate * 24 * 365 * 100;
-  // Same read as the crypto tape: hot positive funding is crowded-long risk
-  // (red); negative funding pays longs (green).
-  const tone = apr >= 20 ? "negative" : apr < 0 ? "positive" : "";
-  return { text: `${apr >= 0 ? "+" : ""}${apr.toFixed(1)}%`, tone };
+  const text = formatFundingRate(rate);
+  if (text === null) return { text: "—", tone: "" };
+  return { text, tone: fundingTone(rate) };
 }
 
 function watchListRow(symbol) {
@@ -1721,7 +1741,7 @@ function watchListRow(symbol) {
     <td class="num ${tone}">${pct === null ? "—" : escapeHtml(formatSignedPct(pct))}</td>
     <td class="num ${tone}">${escapeHtml(absText)}</td>
     <td class="num dim" title="24h notional volume">${escapeHtml(volumeText)}</td>
-    <td class="num ${funding.tone}" title="Perp funding, annualized">${escapeHtml(funding.text)}</td>
+    <td class="num ${funding.tone}" title="Perp funding, hourly rate">${escapeHtml(funding.text)}</td>
     <td class="num dim" title="Open interest">${escapeHtml(oiText)}</td>
     <td class="act"><button type="button" class="watch-list-remove" data-symbol="${escapeHtml(symbol)}" aria-label="Remove ${escapeHtml(symbol)} from list">&times;</button></td>
   </tr>`;
@@ -4651,8 +4671,9 @@ function fringeOpenRow(idea) {
 }
 
 // Compact realized-P&L footer: only the freshest 5 of the payload's 10
-// closed ideas — a ledger tail, not a history browser. The full close
-// reason rides as a native title since the row truncates it.
+// closed ideas — a ledger tail, not a history browser. Rows show ONLY the
+// outcome (ticker, side, entry→exit, P&L); the agent's full close reasoning
+// rides as a native title tooltip instead of cluttering the board.
 function fringeClosedList(closed) {
   if (!closed.length) return "";
   const rows = closed.slice(0, 5).map((idea) => {
@@ -4661,12 +4682,14 @@ function fringeClosedList(closed) {
     const entry = numericOrNull(idea.entry_price);
     const exit = numericOrNull(idea.exit_price);
     const trip = `${entry === null ? "\u2014" : formatPrice(entry)} \u2192 ${exit === null ? "\u2014" : formatPrice(exit)}`;
+    const usd = numericOrNull(idea.realized_usd);
+    const direction = String(idea.direction || "").toUpperCase();
     return `<div class="fringe-closed-row" title="${escapeHtml(idea.close_reason || "")}">
       <strong>${escapeHtml(idea.ticker || "")}</strong>
-      <span>${escapeHtml(String(idea.direction || "").toUpperCase())}</span>
+      <span class="fringe-chip fringe-${escapeHtml(direction.toLowerCase())}">${escapeHtml(direction)}</span>
       <span class="fringe-closed-trip">${escapeHtml(trip)}</span>
-      <em class="${tone}">${pct === null ? "\u2014" : escapeHtml(formatSignedPct(pct))}${(() => { const usd = numericOrNull(idea.realized_usd); return usd === null ? "" : ` <span class="fringe-closed-usd">${escapeHtml(formatSignedUsd(usd))}</span>`; })()}</em>
-      <span class="fringe-closed-reason">${escapeHtml(idea.close_reason || "")}</span>
+      <em class="${tone}">${pct === null ? "\u2014" : escapeHtml(formatSignedPct(pct))}</em>
+      <span class="fringe-closed-usd ${tone}">${usd === null ? "" : escapeHtml(formatSignedUsd(usd))}</span>
     </div>`;
   });
   return `<div class="fringe-closed">
@@ -5382,11 +5405,10 @@ function createTapeRow(data) {
 }
 
 function updateTapeRow(row, data) {
-  const apr =
-    typeof data.funding_rate === "number" ? data.funding_rate * 24 * 365 * 100 : null;
-  const aprText = apr === null ? "--" : `${apr >= 0 ? "+" : ""}${apr.toFixed(1)}%`;
-  const aprClass =
-    apr === null ? "" : apr >= 20 ? "tone-negative" : apr < 0 ? "tone-positive" : "";
+  const rate = typeof data.funding_rate === "number" ? data.funding_rate : null;
+  const fundingText = formatFundingRate(rate) ?? "--";
+  const tone = fundingTone(rate);
+  const aprClass = tone === "negative" ? "tone-negative" : tone === "positive" ? "tone-positive" : "";
   const cells = row.children;
   row.className = "asset-row";
   row.dataset.symbol = data.symbol;
@@ -5410,8 +5432,8 @@ function updateTapeRow(row, data) {
   cells[2].className = changeClass(data.change_pct);
   cells[2].textContent = formatSignedPct(data.change_pct);
   cells[3].className = `tape-funding ${aprClass}`;
-  cells[3].title = "Funding, annualized";
-  cells[3].textContent = aprText;
+  cells[3].title = fundingTitle(rate);
+  cells[3].textContent = fundingText;
   cells[4].className = "tape-oi";
   cells[4].title = "Open interest";
   cells[4].textContent = data.open_interest_usd
@@ -5497,15 +5519,15 @@ function sortedTapeRows(rows, sort) {
 }
 
 function tapeRowMarkup(row) {
-  const apr =
-    typeof row.funding_rate === "number" ? row.funding_rate * 24 * 365 * 100 : null;
-  const aprText = apr === null ? "--" : `${apr >= 0 ? "+" : ""}${apr.toFixed(1)}%`;
-  const aprClass = apr === null ? "" : apr >= 20 ? "tone-negative" : apr < 0 ? "tone-positive" : "";
+  const rate = typeof row.funding_rate === "number" ? row.funding_rate : null;
+  const aprText = formatFundingRate(rate) ?? "--";
+  const tone = fundingTone(rate);
+  const aprClass = tone === "negative" ? "tone-negative" : tone === "positive" ? "tone-positive" : "";
   return `<button type="button" class="asset-row" data-symbol="${escapeHtml(row.symbol)}" aria-label="${escapeHtml(row.symbol)} chart">
     <span class="symbol-cell"><span class="symbol-head">${symbolLogoHtml(row.symbol, "crypto_perp")}<strong>${escapeHtml(row.symbol)}</strong></span></span>
     <span class="last-cell" title="Last trade">${escapeHtml(formatPrice(row.last))}</span>
     <span class="${changeClass(row.change_pct)}">${escapeHtml(formatSignedPct(row.change_pct))}</span>
-    <span class="tape-funding ${aprClass}" title="Funding, annualized">${escapeHtml(aprText)}</span>
+    <span class="tape-funding ${aprClass}" title="${escapeHtml(fundingTitle(rate))}">${escapeHtml(aprText)}</span>
     <span class="tape-oi" title="Open interest">${row.open_interest_usd ? `$${escapeHtml(formatCompactPrice(row.open_interest_usd))}` : "--"}</span>
     <span class="tape-volume" title="24h notional volume">${row.day_volume_usd ? `$${escapeHtml(formatCompactPrice(row.day_volume_usd))}` : "--"}</span>
   </button>`;
@@ -6179,13 +6201,11 @@ function updateFundingChip(cell, quote) {
   }
   const apr = rate * 24 * 365 * 100;
   const oi = typeof quote.open_interest_usd === "number" ? quote.open_interest_usd : null;
-  const aprText = `${apr >= 0 ? "+" : ""}${apr.toFixed(1)}%`;
-  chip.textContent = `F ${aprText}${oi ? ` · OI $${formatCompactPrice(oi)}` : ""}`;
+  chip.textContent = `F ${formatFundingRate(rate)}${oi ? ` · OI $${formatCompactPrice(oi)}` : ""}`;
   chip.classList.toggle("funding-hot", apr >= 20);
   chip.classList.toggle("funding-negative", apr < 0);
   chip.title =
-    `Perp funding ${(rate * 100).toFixed(4)}%/h (${aprText} APR annualized)` +
-    (oi ? ` · open interest $${formatCompactPrice(oi)}` : "");
+    fundingTitle(rate) + (oi ? ` · open interest $${formatCompactPrice(oi)}` : "");
 }
 
 function flashCell(cell, delta) {

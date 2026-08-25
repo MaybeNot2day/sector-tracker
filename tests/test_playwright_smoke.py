@@ -1722,7 +1722,7 @@ def test_watch_lists_mode_manages_named_screener_lists(page: Page, base_url: str
     expect(lookup_row.locator(".watch-list-type")).to_have_text("EQ")
     # Metric columns exist: volume is derived, funding/OI dashes for equities.
     expect(lookup_row.locator("td.num.dim").first).to_contain_text("$")
-    expect(lookup_row.locator('td[title="Perp funding, annualized"]')).to_have_text("—")
+    expect(lookup_row.locator('td[title="Perp funding, hourly rate"]')).to_have_text("—")
     # Logos ride the same-origin proxy for both board and lookup symbols.
     expect(rows.first.locator("img.asset-logo")).to_have_attribute(
         "src", "/api/symbol-logo/SPY?kind=stock"
