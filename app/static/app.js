@@ -82,7 +82,7 @@ const macroStrip = document.querySelector("#macro-strip");
 const catalystStrip = document.querySelector("#catalyst-strip");
 const newsPanel = document.querySelector("#news-panel");
 const newsList = document.querySelector("#news-list");
-const newsMapView = document.querySelector("#news-map-view");
+const newsMapModal = document.querySelector("#news-map-modal");
 const newsMap = document.querySelector("#news-map");
 const newsViewTabs = document.querySelector("#news-view-tabs");
 const newsClusterPanel = document.querySelector("#news-cluster-panel");
@@ -90,6 +90,7 @@ const newsResizeHandle = document.querySelector("#news-resize-handle");
 const newsClusterTitle = document.querySelector("#news-cluster-title");
 const newsClusterItems = document.querySelector("#news-cluster-items");
 const newsClusterClose = document.querySelector("#news-cluster-close");
+const newsMapClose = document.querySelector("#news-map-close");
 const newsStatus = document.querySelector("#news-status");
 const newsToggle = document.querySelector("#news-toggle");
 const newsClose = document.querySelector("#news-close");
@@ -688,6 +689,10 @@ function init() {
     if (tile) selectNewsCluster(tile.dataset.clusterId || "");
   });
   newsClusterClose.addEventListener("click", () => selectNewsCluster(null));
+  newsMapClose.addEventListener("click", () => selectNewsView("list"));
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && newsView === "map") selectNewsView("list");
+  });
   newsResizeHandle.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
     event.preventDefault();
@@ -2851,14 +2856,14 @@ function selectNewsView(view) {
 
 function syncNewsView() {
   const mapActive = newsView === "map";
-  newsList.hidden = mapActive;
-  newsMapView.hidden = !mapActive;
-  newsSearch.disabled = mapActive;
-  newsFilters.querySelectorAll("button").forEach((button) => {
-    const focusDisabled = button.dataset.newsFilter === "focus" && !focusedSymbol;
-    button.disabled = mapActive || focusDisabled;
-  });
-  if (mapActive) renderNewsMap();
+  newsMapModal.hidden = !mapActive;
+  if (mapActive) {
+    document.body.classList.add("news-map-open");
+    renderNewsMap();
+  } else {
+    document.body.classList.remove("news-map-open");
+    renderNewsClusterPanel(null);
+  }
 }
 
 function renderNewsMap() {
@@ -2993,7 +2998,6 @@ function applyNewsWidth(width, { persist = true } = {}) {
       // Private browsing: width resets on reload, resize still works live.
     }
   }
-  if (newsView === "map") renderNewsMap();
 }
 
 function loadNewsWidth() {

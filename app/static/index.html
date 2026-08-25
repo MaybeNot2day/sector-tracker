@@ -17,7 +17,7 @@
         }
       } catch {}
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260820-12" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260821-1" />
   </head>
   <body>
     <aside id="news-panel" class="news-panel" aria-label="Live Telegram news" aria-hidden="true" inert>
@@ -56,21 +56,29 @@
       <div id="news-list" class="news-list">
         <div class="empty-state">Loading feed</div>
       </div>
-      <div id="news-map-view" class="news-map-view" hidden>
-        <div id="news-map" class="news-map">
-          <div class="empty-state">Loading semantic map</div>
-        </div>
-        <section id="news-cluster-panel" class="news-cluster-panel" hidden aria-live="polite">
-          <header>
-            <h3 id="news-cluster-title"></h3>
-            <button id="news-cluster-close" class="icon-button" type="button" aria-label="Close cluster">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
-            </button>
-          </header>
-          <div id="news-cluster-items"></div>
-        </section>
-      </div>
     </aside>
+
+    <div id="news-map-modal" class="news-map-modal" role="dialog" aria-modal="true" aria-labelledby="news-map-title" hidden>
+      <header class="news-map-modal-header">
+        <h2 id="news-map-title">Semantic News Map</h2>
+        <span id="news-map-status" class="news-map-status"></span>
+        <button id="news-map-close" class="icon-button" type="button" aria-label="Close news map">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+        </button>
+      </header>
+      <div id="news-map" class="news-map">
+        <div class="empty-state">Loading semantic map</div>
+      </div>
+      <section id="news-cluster-panel" class="news-cluster-panel" hidden aria-live="polite">
+        <header>
+          <h3 id="news-cluster-title"></h3>
+          <button id="news-cluster-close" class="icon-button" type="button" aria-label="Close cluster">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+          </button>
+        </header>
+        <div id="news-cluster-items"></div>
+      </section>
+    </div>
 
     <header class="app-header">
       <div class="brand">
@@ -579,6 +587,6 @@
 
     <div id="help-tooltip" class="help-tooltip" role="tooltip" hidden></div>
 
-    <script src="/static/app.js?v=20260820-12" defer></script>
+    <script src="/static/app.js?v=20260821-1" defer></script>
 
 </html>

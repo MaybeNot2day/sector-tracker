@@ -1024,12 +1024,16 @@ def test_news_semantic_map_tiles_and_cluster_drilldown(
     page.locator('button[data-news-view="map"]').click()
 
     tiles = page.locator(".news-map-tile")
-    expect(page.locator("#news-map-view")).to_be_visible()
-    expect(page.locator("#news-list")).to_be_hidden()
+    expect(page.locator("#news-map-modal")).to_be_visible()
     expect(tiles).to_have_count(2)
     expect(tiles.filter(has_text="FED / Cuts")).to_have_count(1)
+    # The modal is fullscreen: tiles must be large enough to click comfortably.
+    first_tile = tiles.filter(has_text="FED / Cuts").first
+    box = first_tile.bounding_box()
+    assert box is not None
+    assert box["width"] >= 200 and box["height"] >= 80
 
-    tiles.filter(has_text="FED / Cuts").click()
+    first_tile.click()
     expect(page.locator("#news-cluster-title")).to_have_text("FED / Cuts")
     expect(page.locator(".news-map-story")).to_have_count(2)
     expect(page.locator(".news-map-story").nth(0)).to_have_attribute(
@@ -1037,6 +1041,11 @@ def test_news_semantic_map_tiles_and_cluster_drilldown(
     )
     page.locator("#news-cluster-close").click()
     expect(page.locator("#news-cluster-panel")).to_be_hidden()
+
+    # The close button returns to the list view and hides the modal.
+    page.locator("#news-map-close").click()
+    expect(page.locator("#news-map-modal")).to_be_hidden()
+    expect(page.locator("#news-list")).to_be_visible()
 
 
 def test_news_refresh_keeps_reading_position_when_items_prepend(
