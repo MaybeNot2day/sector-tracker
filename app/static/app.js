@@ -7,6 +7,8 @@ const focusChip = document.querySelector("#focus-chip");
 const focusSymbolText = document.querySelector("#focus-symbol");
 const connectionState = document.querySelector("#connection-state");
 const liveFreshness = document.querySelector("#live-freshness");
+const liveBadge = document.querySelector("#live-badge");
+const telemetryPop = document.querySelector("#telemetry-pop");
 const feedModeLabel = document.querySelector("#feed-mode");
 const refreshButton = document.querySelector("#refresh-button");
 const themeToggle = document.querySelector("#theme-toggle");
@@ -130,7 +132,6 @@ let boardRenderPending = false;
 let dailyRenderPending = false;
 let latestCryptoEtfFlows = null;
 let latestKeyDates = null;
-let keyDatesRevision = 0;
 let latestFringe = null;
 let fringeRevision = 0;
 let latestSnapshots = null;
@@ -689,11 +690,6 @@ function init() {
   window.setInterval(() => {
     if (!document.hidden && feedMode !== "ws" && hasHotKeyDate()) fetchKeyDates();
   }, 30000);
-  // Key-date countdowns tick client-side between refetches so time-remaining
-  // stays honest without re-rendering the rail.
-  window.setInterval(() => {
-    if (!document.hidden) refreshKeyDateCountdowns();
-  }, 30000);
   // WebSocket pushes news instantly; polling remains the transport fallback.
   window.setInterval(() => {
     if (document.hidden) return;
@@ -796,14 +792,23 @@ function init() {
     if (latestNews) renderNews(latestNews);
   });
   focusChip.addEventListener("click", () => openFringeTicker(focusedSymbol));
-  catalystStrip.addEventListener("click", () => {
-    selectView("daily");
-    const panel = dailyBoard.querySelector('[data-panel="key-dates"]');
-    if (panel) {
-      panel.scrollIntoView({ behavior: "smooth", block: "start" });
-      panel.querySelector("a, button")?.focus({ preventScroll: true });
-    }
+  liveBadge.addEventListener("click", () => {
+    const open = telemetryPop.hidden;
+    telemetryPop.hidden = !open;
+    liveBadge.setAttribute("aria-expanded", String(open));
   });
+  document.addEventListener("click", (event) => {
+    if (telemetryPop.hidden || event.target.closest(".live-badge-wrap")) return;
+    telemetryPop.hidden = true;
+    liveBadge.setAttribute("aria-expanded", "false");
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || telemetryPop.hidden) return;
+    telemetryPop.hidden = true;
+    liveBadge.setAttribute("aria-expanded", "false");
+  });
+  // The key-dates rail is the calendar surface (QW6): no Daily panel to
+  // scroll to anymore.
   cryptoTapeElement.addEventListener("click", handleCryptoTapeClick);
   refreshButton.addEventListener("click", () => {
     fetchQuotes();
@@ -1893,7 +1898,7 @@ async function loadWatchChart(symbol, token) {
     const instance = window.LightweightCharts.createChart(container, {
       width: container.clientWidth || 420,
       height: container.clientHeight || 240,
-      layout: { background: { color: colors.background }, textColor: colors.text },
+      layout: { background: { color: colors.background }, textColor: colors.text, attributionLogo: false },
       grid: { vertLines: { color: colors.grid }, horzLines: { color: colors.grid } },
       rightPriceScale: { borderColor: colors.border, scaleMargins: { top: 0.08, bottom: 0.08 } },
       timeScale: {
@@ -3619,9 +3624,7 @@ async function fetchKeyDates() {
 // path shared by the HTTP poll and the WS "key_dates" push.
 function applyKeyDates(payload) {
   latestKeyDates = payload;
-  keyDatesRevision += 1;
   renderCatalystStrip(payload);
-  if (latestData?.overview) renderDailyBoard(latestData.overview, latestCryptoEtfFlows);
 }
 
 // HOT window shared with the backend enrichment: from 2 minutes before the
@@ -3738,14 +3741,26 @@ function updateHeader(overview) {
   boardMeta.textContent = `${date} · ${universe.total || 0} names · universe v2`;
   liveFreshness.textContent = time === "--" ? "Updated --" : `Updated ${time}`;
   const usSession = sessionState("us");
-  statusCopy.textContent = [
-    dataIsCached ? "CACHED VIEW · REFRESHING" : feedMode === "ws" ? "LIVE QUOTES" : "POLLED QUOTES",
-    usSession ? `US ${SESSION_STATE_COPY[usSession.state].toUpperCase()}` : null,
-    `${universe.quoted || 0}/${universe.total || 0} QUOTED`,
-    `HISTORY ${universe.history_count || 0}/${universe.total || 0}`,
-    `FLOWS ${flowStatusLabel(latestCryptoEtfFlows)}`,
-    `UPDATED ${time}`,
-  ].filter(Boolean).join(" · ");
+  // QW5: the SYSTEM telemetry line left the permanent header. Its content
+  // rides on the LIVE pill as a native title and a click popover; the strip
+  // itself only surfaces while connecting or on error.
+  const telemetry = [
+    ["Feed", dataIsCached ? "Cached view · refreshing" : feedMode === "ws" ? "Live quotes" : "Polled quotes"],
+    usSession ? ["US session", SESSION_STATE_COPY[usSession.state]] : null,
+    ["Quoted", `${universe.quoted || 0}/${universe.total || 0}`],
+    ["History", `${universe.history_count || 0}/${universe.total || 0}`],
+    ["Flows", flowStatusLabel(latestCryptoEtfFlows).toLowerCase()],
+    ["Updated", time],
+  ].filter(Boolean);
+  statusCopy.textContent = telemetry.map(([label, value]) => `${label} ${value}`).join(" · ");
+  if (liveBadge) {
+    liveBadge.title = telemetry.map(([label, value]) => `${label}: ${value}`).join("\n");
+  }
+  if (telemetryPop) {
+    telemetryPop.innerHTML = telemetry
+      .map(([label, value]) => `<div class="telemetry-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`)
+      .join("");
+  }
 }
 
 let lastDailyRenderKey = "";
@@ -3775,7 +3790,6 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
     cryptoEtfFlows?.status || "",
     cryptoEtfFlows?.updated_at || "",
     snapshotRevision,
-    keyDatesRevision,
     fringeRevision,
   ].join("|");
   if (renderKey === lastDailyRenderKey) return;
@@ -3796,35 +3810,22 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
   const asOfLabel = Number.isNaN(asOf.getTime()) ? "" : `As of ${formatLocalDate(asOf)}`;
 
   const chunks = [
-    ["regime", `<section class="analytics-panel">
-      ${panelHeading(
-        "Regime Read",
-        asOfLabel,
-        "The market's overall mood, read from the whole watchlist. RISK-ON = most names rising, RISK-OFF = most falling, MIXED = no clear side. BROAD means most stocks join the move; NARROW means only a few drive it. The small numbers show the share of names trading above their 50- and 200-day average prices — a health check of the trend."
-      )}
-      <div class="regime-grid">
-        ${regimeCell(
-          "Regime",
-          regime.label || "--",
-          `${formatPlainPct(universe.above_50dma_pct)} > 50DMA · ${formatPlainPct(universe.above_200dma_pct)} > 200DMA`,
-          `tone-${classToken(regime.tone)}`
-        )}
-        ${vixRegimeCell(regime.vix)}
-        ${themeRegimeCell("Dominant", regime.dominant)}
-        ${themeRegimeCell("Emerging", regime.emerging)}
-        ${themeRegimeCell("Fading", regime.fading)}
-        ${pairRegimeCell(
-          "New Highs / Lows",
-          universe.highs_20d,
-          universe.lows_20d,
-          `52W highs: ${universe.highs_52w || 0} · lows: ${universe.lows_52w || 0}`
-        )}
-        ${pairRegimeCell(
-          "Up 3% / Down 3%",
-          universe.up_3pct,
-          universe.down_3pct,
-          `${universe.advancers || 0} advancing · ${universe.decliners || 0} declining`
-        )}
+    ["regime", `<section class="analytics-panel regime-strip">
+      <div class="regime-call">
+        <div class="regime-call-label">
+          <span>Regime read<button type="button" class="help-tip" aria-label="What is the regime read?" data-tip="The market's overall mood, read from the whole watchlist. RISK-ON = most names rising, RISK-OFF = most falling, MIXED = no clear side. BROAD means most stocks join the move; NARROW means only a few drive it. The small numbers show the share of names trading above their 50- and 200-day average prices — a health check of the trend."><span class="help-tip-mark" aria-hidden="true">?</span></button></span>
+          <em>${escapeHtml(asOfLabel)}</em>
+        </div>
+        <strong class="regime-call-value tone-${classToken(regime.tone)}">${escapeHtml(regime.label || "--")}</strong>
+        <span class="regime-call-detail"><b>${escapeHtml(formatPlainPct(universe.above_50dma_pct))}</b> above 50DMA · <b>${escapeHtml(formatPlainPct(universe.above_200dma_pct))}</b> above 200DMA</span>
+      </div>
+      <div class="regime-facts">
+        ${regimeFactVix(regime.vix)}
+        ${regimeFactTheme("Dominant", regime.dominant)}
+        ${regimeFactTheme("Emerging", regime.emerging)}
+        ${regimeFactTheme("Fading", regime.fading)}
+        ${regimeFactPair("New highs / lows", universe.highs_20d, universe.lows_20d, `52W ↑${formatInteger(universe.highs_52w)} ↓${formatInteger(universe.lows_52w)}`)}
+        ${regimeFactPair("Up 3% / down 3%", universe.up_3pct, universe.down_3pct, `${formatInteger(universe.advancers)} adv · ${formatInteger(universe.decliners)} dec`)}
       </div>
     </section>`],
 
@@ -3832,12 +3833,10 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
       <section class="analytics-panel">
         ${panelHeading(
           "Benchmarks",
-          "Return / Dist 50DMA / ATR Ext",
+          "1D / 5D return · trend · stretch",
           "The big reference ETFs (S&P 500, Nasdaq, semis, bonds, gold, oil). 1D/5D = return over one/five days. >50DMA = how far price sits from its 50-day average — above zero means uptrend. ATR ext = distance from the 20-day average measured in units of typical daily movement; beyond ±2 the move is stretched and often due for a pause."
         )}
-        <div class="benchmark-grid">
-          ${benchmarks.map(benchmarkCard).join("") || '<div class="empty-state">Add ETF_MACRO benchmarks</div>'}
-        </div>
+        ${benchmarkTable(benchmarks)}
       </section>
 
       <section class="analytics-panel">
@@ -3893,8 +3892,7 @@ function renderDailyBoard(overview, cryptoEtfFlows) {
       ${cryptoEtfFlowPanel(cryptoEtfFlows)}
     </section>`],
 
-    ["key-dates", keyDatesSection(latestKeyDates)],
-
+    // Key dates live in the sticky catalyst rail (QW6); no Daily panel.
     ["fringe", fringeSection(latestFringe)],
 
     ["rotation", `<section class="analytics-panel">
@@ -3987,6 +3985,16 @@ dailyBoard.addEventListener("click", (event) => {
   // order deep links use. A failed chart load already shows chart-error.
   const fringeButton = event.target.closest(".fringe-ticker");
   if (fringeButton) openFringeTicker(fringeButton.dataset.symbol || "");
+});
+
+// Benchmark rows are <tr role="button">, not native buttons: Enter/Space must
+// activate them like the click delegate above.
+dailyBoard.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const card = event.target.closest?.(".benchmark-card");
+  if (!card) return;
+  event.preventDefault();
+  card.click();
 });
 
 function openFringeTicker(symbol) {
@@ -4124,29 +4132,37 @@ function formatSofrVolume(value) {
   return number >= 1000 ? `$${(number / 1000).toFixed(2)}T` : `$${number.toFixed(0)}B`;
 }
 
-function themeRegimeCell(label, theme) {
-  if (!theme) return regimeCell(label, "--", "Insufficient data");
-  const change = formatSignedPct(theme.change_1d);
-  return regimeCell(
+// Regime strip stat chips: label / mono value / metadata, right-aligned row.
+function regimeFact(label, value, detail, tone = "") {
+  return `<div class="regime-fact">
+    <span class="regime-fact-label">${escapeHtml(label)}</span>
+    <strong class="regime-fact-value ${tone}">${escapeHtml(value)}</strong>
+    <span class="regime-fact-detail">${escapeHtml(detail || "")}</span>
+  </div>`;
+}
+
+function regimeFactTheme(label, theme) {
+  if (!theme) return regimeFact(label, "--", "Insufficient data");
+  return regimeFact(
     label,
     displayGroupName(theme.name),
-    `${theme.status} · 1D ${change}`,
+    `${theme.status} · 1D ${formatSignedPct(theme.change_1d)}`,
     changeClass(theme.change_1d)
   );
 }
 
-function pairRegimeCell(label, positive, negative, detail) {
-  return `<div class="regime-cell">
-    <span class="metric-label">${escapeHtml(label)}</span>
-    <div class="metric-value split-value"><span class="tone-positive">↑${formatInteger(positive)}</span><span>/</span><span class="tone-negative">↓${formatInteger(negative)}</span></div>
-    <span class="metric-detail">${escapeHtml(detail)}</span>
+function regimeFactPair(label, positive, negative, detail) {
+  return `<div class="regime-fact">
+    <span class="regime-fact-label">${escapeHtml(label)}</span>
+    <strong class="regime-fact-value split-value"><span class="tone-positive">↑${formatInteger(positive)}</span><span class="split-slash">/</span><span class="tone-negative">↓${formatInteger(negative)}</span></strong>
+    <span class="regime-fact-detail">${escapeHtml(detail || "")}</span>
   </div>`;
 }
 
-function vixRegimeCell(vix) {
-  if (!vix) return regimeCell("Volatility", "--", "No VIX read");
+function regimeFactVix(vix) {
+  if (!vix) return regimeFact("Volatility", "--", "No VIX read");
   const level = typeof vix.level === "number" ? vix.level.toFixed(1) : "--";
-  return regimeCell(
+  return regimeFact(
     "Volatility",
     `VIX ${level}`,
     `${vix.state || ""} · 1D ${formatSignedPct(vix.change_pct)}`,
@@ -4154,17 +4170,32 @@ function vixRegimeCell(vix) {
   );
 }
 
-function benchmarkCard(item) {
-  return `<button class="benchmark-card" type="button" data-symbol="${escapeHtml(item.symbol)}" data-name="${escapeHtml(item.name || "")}" data-type="${escapeHtml(item.type || "etf")}" data-provider="">
-    <span class="benchmark-symbol">${escapeHtml(item.symbol)}</span>
-    <span class="benchmark-name">${escapeHtml(item.name || item.type || "Benchmark")}</span>
-    <span class="metric-lines">
-      ${metricLine("1D", formatSignedPct(item.change_1d), changeClass(item.change_1d), "Return over the last close")}
-      ${metricLine("5D", formatSignedPct(item.change_5d), changeClass(item.change_5d), "Return over the last 5 sessions")}
-      ${metricLine(">50DMA", formatSignedPct(item.distance_50dma), changeClass(item.distance_50dma), "Distance from the 50-day moving average")}
-      ${metricLine("ATR ext", formatSignedNumber(item.atr_extension), changeClass(item.atr_extension), "Distance from 20DMA in ATR(14) units — above +2 is stretched")}
-    </span>
-  </button>`;
+// One dense table replaces the old 2x4 label/value card wall (QW1): rows are
+// keyboard-activatable chart openers, numerics stay mono and right-aligned.
+function benchmarkTable(benchmarks) {
+  if (!benchmarks.length) return '<div class="empty-state">Add ETF_MACRO benchmarks</div>';
+  return `<table class="benchmark-table">
+    <thead><tr>
+      <th>Sym</th>
+      <th class="num">Last</th>
+      <th class="num" title="Return over the last close">1D</th>
+      <th class="num" title="Return over the last 5 sessions">5D</th>
+      <th class="num" title="Distance from the 50-day moving average">&gt;50DMA</th>
+      <th class="num" title="Distance from 20DMA in ATR(14) units — above +2 is stretched">ATR ext</th>
+    </tr></thead>
+    <tbody>${benchmarks.map(benchmarkRow).join("")}</tbody>
+  </table>`;
+}
+
+function benchmarkRow(item) {
+  return `<tr class="benchmark-card" role="button" tabindex="0" aria-label="Open ${escapeHtml(item.symbol)} chart" title="${escapeHtml(item.name || item.type || "Benchmark")}" data-symbol="${escapeHtml(item.symbol)}" data-name="${escapeHtml(item.name || "")}" data-type="${escapeHtml(item.type || "etf")}" data-provider="">
+    <td class="benchmark-symbol">${escapeHtml(item.symbol)}</td>
+    <td class="num">${escapeHtml(formatPrice(item.last))}</td>
+    <td class="num ${changeClass(item.change_1d)}">${escapeHtml(formatSignedPct(item.change_1d))}</td>
+    <td class="num ${changeClass(item.change_5d)}">${escapeHtml(formatSignedPct(item.change_5d))}</td>
+    <td class="num ${changeClass(item.distance_50dma)}">${escapeHtml(formatSignedPct(item.distance_50dma))}</td>
+    <td class="num ${changeClass(item.atr_extension)}">${escapeHtml(formatSignedNumber(item.atr_extension))}</td>
+  </tr>`;
 }
 
 function metricLine(label, value, tone, tip = "") {
@@ -4389,7 +4420,7 @@ function renderCatalystStrip(payload) {
   }
   catalystStrip.innerHTML = `<span class="catalyst-label">Next</span>
     <div class="catalyst-items">${upcoming.map((item) => catalystItemMarkup(item, asOf)).join("")}</div>
-    <span class="catalyst-more">Key dates \u2192</span>`;
+    <span class="catalyst-more">${items.length} event${items.length === 1 ? "" : "s"}</span>`;
 }
 
 function catalystItemMarkup(item, asOf) {
@@ -4404,30 +4435,10 @@ function catalystItemMarkup(item, asOf) {
   return `<span class="catalyst-item">
     <strong>${escapeHtml(when + time)}</strong>
     <span>${escapeHtml(item.title || "Market event")}</span>
-    <em>${escapeHtml(item.category || "EVENT")}</em>
+    <em class="catalyst-tag key-tag-${classToken(item.category, "event")}">${escapeHtml(item.category || "EVENT")}</em>
   </span>`;
 }
 
-function keyDatesSection(payload) {
-  const items = Array.isArray(payload?.key_dates) ? payload.key_dates : [];
-  return `<section class="analytics-panel">
-    ${panelHeading(
-      "Key Dates",
-      keyDatesNote(items),
-      'Upcoming market events fed by agent reports. Live figures are matched at runtime to TradingView economic-calendar series; each enriched row links to the exact series. Times show the timezone the agent wrote; days count on the US Eastern trading date.'
-    )}
-    ${keyDatesList(items, payload)}
-  </section>`;
-}
-
-function keyDatesNote(items) {
-  if (!items.length) return "Agent-fed calendar";
-  const span =
-    items.length === 1
-      ? keyDateShort(items[0].date)
-      : `${keyDateShort(items[0].date)} \u2013 ${keyDateShort(items[items.length - 1].date)}`;
-  return `${span} \u00b7 ${items.length} event${items.length === 1 ? "" : "s"}`;
-}
 
 function keyDateShort(date) {
   const [, month, day] = String(date || "").split("-").map(Number);
@@ -4435,107 +4446,10 @@ function keyDateShort(date) {
   return `${KEY_DATE_MONTHS[month - 1]} ${day}`;
 }
 
-function keyDatesList(items, payload) {
-  if (!items.length) {
-    const copy = !payload
-      ? "Loading key dates"
-      : payload.error
-        ? "Key dates unavailable"
-        : 'No key dates yet \u2014 add a "## Key Dates" section to an agent report';
-    return `<div class="empty-state">${copy}</div>`;
-  }
-  const asOf = payload?.as_of || "";
-  return `<div class="key-dates-list" data-scroll-keep="key-dates">${items.map((item) => keyDateRow(item, asOf)).join("")}</div>`;
-}
 
 
-function keyDateRow(item, asOf) {
-  const [, month, day] = String(item.date || "").split("-").map(Number);
-  const diff = keyDateDayDiff(item.date, asOf);
-  const relative =
-    diff === 0 ? "today" : diff === 1 ? "tomorrow" : diff > 1 ? `in ${diff} days` : "";
-  const release = item.release || null;
-  const series = [release?.country, release?.matched_title].filter(Boolean).join(" \u00b7 ");
-  const meta = [relative, item.time, series].filter(Boolean).join(" \u00b7 ");
-  const countdown = keyDateCountdownText(item.time_utc);
-  const countdownHtml = countdown
-    ? `<em class="key-date-countdown" data-countdown-utc="${escapeHtml(item.time_utc)}">${escapeHtml(countdown)}</em>`
-    : "";
-  // The indicator description rides as a native title: the list scrolls
-  // (overflow-y: auto), which would clip the help-tip CSS popover.
-  const tooltipText = [
-    release?.comment,
-    release?.source ? `Data source: ${release.source}` : "",
-  ].filter(Boolean).join(" \u00b7 ");
-  const tooltip = tooltipText ? ` title="${escapeHtml(tooltipText)}"` : "";
-  const high = release?.importance === 1;
-  // Calendar URLs arrive from scraped/config data: only http(s) may become
-  // an href (blocks javascript: and friends), same guard as the news feed.
-  const rawHref = release?.series_url || "";
-  const href = /^https?:\/\//i.test(rawHref) ? rawHref : "";
-  const [tagOpen, tagClose] = href
-    ? [`<a href="${escapeHtml(href)}" target="_blank" rel="noopener"`, "</a>"]
-    : ["<div", "</div>"];
-  return `${tagOpen} class="key-date-row${diff === 0 ? " is-today" : ""}"${tooltip}>
-    <span class="key-date-chip"><em>${month ? KEY_DATE_MONTHS[month - 1] : "--"}</em><strong>${day || "--"}</strong></span>
-    <div class="key-date-main">
-      <strong>${escapeHtml(item.title)}</strong>
-      ${countdownHtml || meta ? `<span>${countdownHtml}${escapeHtml(meta)}</span>` : ""}
-      ${release ? keyDateFigures(release) : ""}
-    </div>
-    <span class="key-date-tags">${high ? '<span class="key-date-tag key-tag-high">HIGH</span>' : ""}<span class="key-date-tag key-tag-${classToken(item.category, "event")}">${escapeHtml(item.category || "EVENT")}</span></span>
-  ${tagClose}`;
-}
 
-// Countdown for the Key Dates rail: readers in any timezone see "in 1h 42m"
-// instead of converting the event's printed zone by hand. Instants come from
-// the payload's per-item time_utc (matched calendar row, else the stored
-// zoned time). Only near events tick — beyond 48h the day label reads better.
-function keyDateCountdownText(timeUtc) {
-  const at = Date.parse(timeUtc || "");
-  if (Number.isNaN(at)) return null;
-  const delta = at - Date.now();
-  // Keep "due" on screen through the hot window so a reader arriving right
-  // at release time sees the print is in flight, not a vanished timer.
-  if (delta <= 0) return delta > -45 * 60000 ? "due" : null;
-  if (delta > 48 * 3600000) return null;
-  const minutes = Math.round(delta / 60000);
-  if (minutes < 1) return "due";
-  if (minutes < 60) return `in ${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  const rest = minutes % 60;
-  return rest ? `in ${hours}h ${rest}m` : `in ${hours}h`;
-}
 
-function refreshKeyDateCountdowns() {
-  document.querySelectorAll(".key-date-countdown").forEach((element) => {
-    const text = keyDateCountdownText(element.dataset.countdownUtc);
-    if (text) {
-      element.textContent = text;
-      element.hidden = false;
-    } else {
-      element.hidden = true;
-    }
-  });
-}
-
-function keyDateFigures(release) {
-  const dash = "\u2014";
-  const est = escapeHtml(release.forecast ?? dash);
-  const prev = escapeHtml(release.previous ?? dash);
-  let act = dash;
-  if (release.actual != null) {
-    // Beat/miss direction depends on the indicator (a hot CPI is bad news,
-    // hot payrolls good), so the surprise delta keeps the neutral accent —
-    // never green/red. Sub-cent surprises round to +0.00 noise; skip them.
-    const delta =
-      typeof release.surprise === "number" && Number(release.surprise.toFixed(2)) !== 0
-        ? ` <em class="key-date-surprise">${escapeHtml(formatSigned(release.surprise))}</em>`
-        : "";
-    act = `<strong>${escapeHtml(release.actual)}</strong>${delta}`;
-  }
-  return `<span class="key-date-figures">EST ${est} \u00b7 PREV ${prev} \u00b7 ACT ${act}</span>`;
-}
 
 function keyDateDayDiff(date, asOf) {
   // Date-only ISO strings parse as UTC midnight, so the difference is an
@@ -6376,7 +6290,7 @@ async function loadChart(symbol, range, interval) {
     const payload = await response.json();
     if (activeSymbol !== symbol || requestId !== chartLoadToken) return;
     const rawBars = payload.bars || [];
-    const bars = rawBars
+    const normalizedBars = rawBars
       .map((bar) => ({
         time: toChartTime(bar.timestamp, interval),
         open: numericOrNull(bar.open),
@@ -6388,6 +6302,10 @@ async function loadChart(symbol, range, interval) {
       // Number(null) is 0 and would drag the price scale to zero, so OHLC
       // goes through numericOrNull and incomplete bars drop before setData.
       .filter((bar) => Number.isFinite(bar.open) && Number.isFinite(bar.high) && Number.isFinite(bar.low) && Number.isFinite(bar.close));
+    // Daily providers can overlap the midnight and exchange-session forms of
+    // the same date. Lightweight Charts requires strictly unique times; keep
+    // the later payload row for each canonical chart time.
+    const bars = [...new Map(normalizedBars.map((bar) => [bar.time, bar])).values()];
     if (!bars.length) throw new Error("No history available");
     chartElement.replaceChildren();
     renderChart(bars, interval);
@@ -6516,9 +6434,6 @@ function restyleLiveCharts() {
       chartVolumeSeries.setData(volumeSeriesData(chartVolumeBars, colors));
     }
     chartPreviousCloseLine?.applyOptions({ color: colors.previous });
-    chartElement.querySelectorAll(".chart-legend i[data-color-token]").forEach((swatch) => {
-      swatch.style.background = themeColor(swatch.dataset.colorToken);
-    });
   }
   watchCharts.forEach((entry) => {
     entry.instance.applyOptions(chartOptions);
@@ -6536,7 +6451,7 @@ function renderChart(bars, interval) {
   chart = window.LightweightCharts.createChart(chartElement, {
     width: chartWidth,
     height: chartHeight,
-    layout: { background: { color: colors.background }, textColor: colors.text },
+    layout: { background: { color: colors.background }, textColor: colors.text, attributionLogo: false },
     grid: { vertLines: { color: colors.grid }, horzLines: { color: colors.grid } },
     rightPriceScale: { borderColor: colors.border, scaleMargins: { top: 0.05, bottom: 0.22 } },
     timeScale: { borderColor: colors.border, timeVisible: !DATE_ONLY_INTERVALS.has(interval) },
@@ -6637,8 +6552,8 @@ function renderChartLegend(mas) {
   legend.className = "chart-legend";
   legend.innerHTML = mas
     .map(
-      ({ period, color, colorToken }) =>
-        `<span><i data-color-token="${escapeHtml(colorToken)}" style="background:${color}"></i>MA${period}</span>`
+      ({ period, colorToken }) =>
+        `<span><i data-color-token="${escapeHtml(colorToken)}"></i>MA${period}</span>`
     )
     .join("");
   chartElement.appendChild(legend);
@@ -6666,7 +6581,11 @@ function resizeChartToContainer() {
   if (!chart) return;
   const width = Math.max(1, Math.floor(chartElement.clientWidth || 0));
   const height = Math.max(260, Math.floor(chartElement.clientHeight || 0));
-  chart.applyOptions({ width, height });
+  if (typeof chart.resize === "function") {
+    chart.resize(width, height, true);
+  } else {
+    chart.applyOptions({ width, height });
+  }
 }
 
 function supportsOptionsAsset(asset) {
@@ -6855,15 +6774,18 @@ function optionsStrikeProfile(payload) {
       if (optionsProfileMode === "gex") {
         const value = numericOrNull(row.net_gex) ?? 0;
         const magnitude = value === 0 ? 0 : Math.max(2, Math.abs(value) / maxValue * 48);
-        bars = `<i class="options-gex-bar ${value >= 0 ? "positive" : "negative"}" style="--bar:${magnitude.toFixed(2)}%"></i>`;
+        const y = value >= 0 ? 50 - magnitude : 50;
+        bars = `<svg class="options-profile-bars" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><rect class="${value >= 0 ? "positive" : "negative"}" x="25" y="${y.toFixed(2)}" width="50" height="${magnitude.toFixed(2)}"></rect></svg>`;
         title = `${formatPrice(strike)}: ${formatSignedCompactDollars(value)} net GEX`;
       } else {
         const callOi = numericOrNull(row.call_oi) ?? 0;
         const putOi = numericOrNull(row.put_oi) ?? 0;
-        bars = `
-          <i class="options-oi-bar call" style="--bar:${callOi === 0 ? 0 : Math.max(2, callOi / maxValue * 100).toFixed(2)}%"></i>
-          <i class="options-oi-bar put" style="--bar:${putOi === 0 ? 0 : Math.max(2, putOi / maxValue * 100).toFixed(2)}%"></i>
-        `;
+        const callHeight = callOi === 0 ? 0 : Math.max(2, callOi / maxValue * 100);
+        const putHeight = putOi === 0 ? 0 : Math.max(2, putOi / maxValue * 100);
+        bars = `<svg class="options-profile-bars" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+          <rect class="call" x="16" y="${(100 - callHeight).toFixed(2)}" width="32" height="${callHeight.toFixed(2)}"></rect>
+          <rect class="put" x="52" y="${(100 - putHeight).toFixed(2)}" width="32" height="${putHeight.toFixed(2)}"></rect>
+        </svg>`;
         title = `${formatPrice(strike)}: ${formatCompactPrice(callOi)} call OI / ${formatCompactPrice(putOi)} put OI`;
       }
       return `
@@ -7164,12 +7086,17 @@ function profileRangeBar(range) {
   const position = clampNumber(range.position_pct, 0, 100);
   const currency = activeAsset?.quote?.display_currency || activeAsset?.quote?.currency || "USD";
   return `
-    <div class="profile-range" style="--range-position: ${position}%">
+    <div class="profile-range">
       <div class="profile-range-head">
         <span>52W Range</span>
         <strong>${formatCurrencyPrice(range.current, currency)}</strong>
       </div>
-      <div class="range-track" aria-hidden="true"><span></span></div>
+      <svg class="range-track" viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="Current price at ${position.toFixed(1)} percent of the 52-week range">
+        <line x1="1" y1="4" x2="99" y2="4"></line>
+        <circle class="range-end" cx="1" cy="4" r="1.5"></circle>
+        <circle class="range-end" cx="99" cy="4" r="1.5"></circle>
+        <circle class="range-current" cx="${position.toFixed(2)}" cy="4" r="3"></circle>
+      </svg>
       <div class="range-labels">
         <span>${formatCurrencyPrice(range.low, currency)}</span>
         <span>${formatPlainPct(range.off_low_pct)} above low · ${formatPlainPct(range.off_high_pct)} below high</span>

@@ -4,10 +4,11 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Cross-Asset Market Board</title>
-    <link rel="preload" href="/static/fonts/ibm-plex-mono-latin-400.woff2" as="font" type="font/woff2" crossorigin />
-    <link rel="preload" href="/static/fonts/ibm-plex-mono-latin-600.woff2" as="font" type="font/woff2" crossorigin />
-    <link rel="preload" href="/static/fonts/ibm-plex-sans-latin-400.woff2" as="font" type="font/woff2" crossorigin />
-    <link rel="stylesheet" href="/static/fonts.css?v=20260722-3" />
+    <link rel="preload" href="/static/fonts/geist-mono-latin-400.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/static/fonts/geist-mono-latin-600.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/static/fonts/geist-sans-latin-400.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/static/fonts/geist-sans-latin-500.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/static/fonts.css?v=instrument-6" />
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=20260710-1" />
     <link rel="apple-touch-icon" href="/static/apple-touch-icon.png?v=20260710-1" />
     <script>
@@ -17,7 +18,7 @@
         }
       } catch {}
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260826-4" />
+    <link rel="stylesheet" href="/static/styles.css?v=instrument-6" />
   </head>
   <body>
     <aside id="news-panel" class="news-panel" aria-label="Live Telegram news" aria-hidden="true" inert>
@@ -27,7 +28,7 @@
         <span aria-hidden="true"></span>
       </button>
       <div class="news-header">
-        <span class="news-title">Live News</span>
+        <span class="news-title">Live news</span>
         <span id="news-status" class="news-status"></span>
         <button id="news-close" class="icon-button" type="button" aria-label="Close news panel">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
@@ -60,7 +61,7 @@
 
     <div id="news-map-modal" class="news-map-modal" role="dialog" aria-modal="true" aria-labelledby="news-map-title" hidden>
       <header class="news-map-modal-header">
-        <h2 id="news-map-title">Semantic News Map</h2>
+        <h2 id="news-map-title">Semantic news map</h2>
         <span id="news-map-status" class="news-map-status"></span>
         <button id="news-map-close" class="icon-button" type="button" aria-label="Close news map">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
@@ -90,76 +91,86 @@
       </div>
 
       <nav class="view-tabs" role="tablist" aria-label="Board view">
-        <button
-          id="daily-tab"
-          class="active"
-          type="button"
-          role="tab"
-          data-view="daily"
-          aria-controls="daily-view"
-          aria-selected="true"
-        >Daily</button>
-        <button
-          id="markets-tab"
-          type="button"
-          role="tab"
-          data-view="markets"
-          aria-controls="markets-view"
-          aria-selected="false"
-          tabindex="-1"
-        >Markets</button>
-        <button
-          id="ai-tab"
-          type="button"
-          role="tab"
-          data-view="ai"
-          aria-controls="ai-view"
-          aria-selected="false"
-          tabindex="-1"
-        >AI</button>
-        <button
-          id="fringe-tab"
-          type="button"
-          role="tab"
-          data-view="fringe"
-          aria-controls="fringe-view"
-          aria-selected="false"
-          tabindex="-1"
-        >Fringe</button>
-        <button
-          id="trends-tab"
-          type="button"
-          role="tab"
-          data-view="trends"
-          aria-controls="trends-view"
-          aria-selected="false"
-          tabindex="-1"
-        >Trends</button>
-        <button
-          id="earnings-tab"
-          type="button"
-          role="tab"
-          data-view="earnings"
-          aria-controls="earnings-view"
-          aria-selected="false"
-          tabindex="-1"
-        >Earnings</button>
-        <button
-          id="watch-tab"
-          type="button"
-          role="tab"
-          data-view="watch"
-          aria-controls="watch-view"
-          aria-selected="false"
-          tabindex="-1"
-        >Watch</button>
+        <div class="tab-group" role="presentation">
+          <button
+            id="daily-tab"
+            class="active"
+            type="button"
+            role="tab"
+            data-view="daily"
+            aria-controls="daily-view"
+            aria-selected="true"
+          >Daily</button>
+          <button
+            id="markets-tab"
+            type="button"
+            role="tab"
+            data-view="markets"
+            aria-controls="markets-view"
+            aria-selected="false"
+            tabindex="-1"
+          >Markets</button>
+          <button
+            id="watch-tab"
+            type="button"
+            role="tab"
+            data-view="watch"
+            aria-controls="watch-view"
+            aria-selected="false"
+            tabindex="-1"
+          >Watch</button>
+        </div>
+        <div class="tab-group tab-group-secondary" role="presentation">
+          <button
+            id="ai-tab"
+            type="button"
+            role="tab"
+            data-view="ai"
+            aria-controls="ai-view"
+            aria-selected="false"
+            tabindex="-1"
+          >AI</button>
+          <button
+            id="fringe-tab"
+            type="button"
+            role="tab"
+            data-view="fringe"
+            aria-controls="fringe-view"
+            aria-selected="false"
+            tabindex="-1"
+          >Fringe</button>
+          <button
+            id="trends-tab"
+            type="button"
+            role="tab"
+            data-view="trends"
+            aria-controls="trends-view"
+            aria-selected="false"
+            tabindex="-1"
+          >Trends</button>
+          <button
+            id="earnings-tab"
+            type="button"
+            role="tab"
+            data-view="earnings"
+            aria-controls="earnings-view"
+            aria-selected="false"
+            tabindex="-1"
+          >Earnings</button>
+        </div>
       </nav>
 
       <div class="topbar-actions">
-        <div class="live-badge">
-          <span id="connection-state" class="state-dot"></span>
-          <span id="feed-mode">Connecting</span>
-          <span id="live-freshness" class="live-freshness">Updated --</span>
+        <button id="focus-chip" class="focus-chip" type="button" aria-label="Open focused asset" hidden>
+          <span>Focus</span><strong id="focus-symbol"></strong>
+        </button>
+        <div class="live-badge-wrap">
+          <button id="live-badge" class="live-badge" type="button" aria-haspopup="true" aria-expanded="false" title="System telemetry">
+            <span id="connection-state" class="state-dot"></span>
+            <span id="feed-mode">Connecting</span>
+            <span id="live-freshness" class="live-freshness">Updated --</span>
+          </button>
+          <div id="telemetry-pop" class="telemetry-pop" role="status" hidden></div>
         </div>
         <button
           id="theme-toggle"
@@ -205,9 +216,6 @@
       <span class="status-pulse"></span>
       <span class="status-label">System</span>
       <span id="status-copy">Connecting to market data</span>
-      <button id="focus-chip" class="focus-chip" type="button" aria-label="Open focused asset" hidden>
-        <span>Focus</span><strong id="focus-symbol"></strong>
-      </button>
     </div>
 
     <div id="macro-strip" class="macro-strip" aria-label="Macro tape" hidden></div>
@@ -617,6 +625,6 @@
 
     <div id="help-tooltip" class="help-tooltip" role="tooltip" hidden></div>
 
-    <script src="/static/app.js?v=20260826-4" defer></script>
+    <script src="/static/app.js?v=instrument-6" defer></script>
 
 </html>
