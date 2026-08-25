@@ -954,6 +954,91 @@ def test_news_relevance_deduplication_and_symbol_focus(
     expect(page.locator("#focus-chip")).to_contain_text("SPY")
 
 
+def test_news_semantic_map_tiles_and_cluster_drilldown(
+    page: Page,
+    base_url: str,
+) -> None:
+    _goto_board(page, base_url)
+    feed_items = [
+        {
+            "id": "alpha/1",
+            "channel": "alpha",
+            "channel_title": "Alpha",
+            "timestamp": "2026-08-20T12:00:00+00:00",
+            "link": "https://example.com/alpha/1",
+            "text": "Fed cuts interest rates by 25bp",
+        },
+        {
+            "id": "beta/1",
+            "channel": "beta",
+            "channel_title": "Beta",
+            "timestamp": "2026-08-20T12:01:00+00:00",
+            "link": "https://example.com/beta/1",
+            "text": "Fed cuts interest rates by 25bp",
+        },
+        {
+            "id": "alpha/2",
+            "channel": "alpha",
+            "channel_title": "Alpha",
+            "timestamp": "2026-08-20T12:02:00+00:00",
+            "link": "https://example.com/alpha/2",
+            "text": "Nvidia reports record quarterly revenue",
+        },
+    ]
+    feed_payload = {
+        "updated_at": _iso(),
+        "failed_channels": [],
+        "channels": ["alpha", "beta"],
+        "items": feed_items,
+    }
+    map_payload = {
+        "generated_at": _iso(),
+        "singletons": 1,
+        "clusters": [
+            {
+                "id": "abcdef012345",
+                "label": "FED / Cuts",
+                "item_ids": ["alpha/1", "beta/1"],
+                "count": 2,
+                "channels": 2,
+                "first_seen": "2026-08-20T12:00:00+00:00",
+                "latest_seen": "2026-08-20T12:01:00+00:00",
+                "sample": "Fed cuts interest rates by 25bp",
+            },
+            {
+                "id": "123456abcdef",
+                "label": "Nvidia Reports Record Quarterly Revenue",
+                "item_ids": ["alpha/2"],
+                "count": 1,
+                "channels": 1,
+                "first_seen": "2026-08-20T12:02:00+00:00",
+                "latest_seen": "2026-08-20T12:02:00+00:00",
+                "sample": "Nvidia reports record quarterly revenue",
+            },
+        ],
+    }
+    page.route("**/api/news", lambda route: _fulfill_json(route, feed_payload))
+    page.route("**/api/news/map", lambda route: _fulfill_json(route, map_payload))
+    page.evaluate("() => fetchNews()")
+    page.locator("#news-toggle").click()
+    page.locator('button[data-news-view="map"]').click()
+
+    tiles = page.locator(".news-map-tile")
+    expect(page.locator("#news-map-view")).to_be_visible()
+    expect(page.locator("#news-list")).to_be_hidden()
+    expect(tiles).to_have_count(2)
+    expect(tiles.filter(has_text="FED / Cuts")).to_have_count(1)
+
+    tiles.filter(has_text="FED / Cuts").click()
+    expect(page.locator("#news-cluster-title")).to_have_text("FED / Cuts")
+    expect(page.locator(".news-map-story")).to_have_count(2)
+    expect(page.locator(".news-map-story").nth(0)).to_have_attribute(
+        "href", "https://example.com/alpha/1"
+    )
+    page.locator("#news-cluster-close").click()
+    expect(page.locator("#news-cluster-panel")).to_be_hidden()
+
+
 def test_news_refresh_keeps_reading_position_when_items_prepend(
     page: Page,
     base_url: str,

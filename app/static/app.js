@@ -82,6 +82,13 @@ const macroStrip = document.querySelector("#macro-strip");
 const catalystStrip = document.querySelector("#catalyst-strip");
 const newsPanel = document.querySelector("#news-panel");
 const newsList = document.querySelector("#news-list");
+const newsMapView = document.querySelector("#news-map-view");
+const newsMap = document.querySelector("#news-map");
+const newsViewTabs = document.querySelector("#news-view-tabs");
+const newsClusterPanel = document.querySelector("#news-cluster-panel");
+const newsClusterTitle = document.querySelector("#news-cluster-title");
+const newsClusterItems = document.querySelector("#news-cluster-items");
+const newsClusterClose = document.querySelector("#news-cluster-close");
 const newsStatus = document.querySelector("#news-status");
 const newsToggle = document.querySelector("#news-toggle");
 const newsClose = document.querySelector("#news-close");
@@ -202,6 +209,11 @@ let pendingBoardCachePayload = null;
 let boardCacheWriteTimer = null;
 let latestNews = null;
 let lastNewsRenderKey = "";
+let newsMapData = null;
+let newsMapFetchSeq = 0;
+let newsMapFetchApplied = 0;
+let newsView = "list";
+let activeNewsClusterId = null;
 let knownNewsIds = new Set();
 let newsFilter = "all";
 let newsSearchQuery = "";
@@ -654,6 +666,15 @@ function init() {
     newsList.scrollTop = 0;
     if (latestNews) renderNews(latestNews);
   });
+  newsViewTabs.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-news-view]");
+    if (button) selectNewsView(button.dataset.newsView || "list");
+  });
+  newsMap.addEventListener("click", (event) => {
+    const tile = event.target.closest(".news-map-tile");
+    if (tile) selectNewsCluster(tile.dataset.clusterId || "");
+  });
+  newsClusterClose.addEventListener("click", () => selectNewsCluster(null));
   themeToggle.addEventListener("click", () => {
     setTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light", true);
   });
@@ -746,6 +767,7 @@ function init() {
     if (tile) openFringeTicker(tile.dataset.symbol || "");
   });
   window.addEventListener("resize", () => {
+    if (newsView === "map") renderNewsMap();
     if (marketLayout !== "map" || marketsView.hidden) return;
     if (mapResizeTimer !== null) window.clearTimeout(mapResizeTimer);
     mapResizeTimer = window.setTimeout(() => renderBoard(latestData), 200);
@@ -2531,6 +2553,11 @@ async function fetchNews() {
 function renderNews(payload) {
   const items = payload?.items || [];
   latestNews = payload;
+  if (payload?.map) {
+    newsMapData = payload.map;
+    newsMapFetchApplied = newsMapFetchSeq;
+    renderNewsMap();
+  }
   const updated = payload?.updated_at ? new Date(payload.updated_at) : null;
   const updatedText = updated && !Number.isNaN(updated.getTime()) ? formatClock(updated) : "";
   const stale = Boolean(payload?.is_stale);
@@ -2549,6 +2576,11 @@ function renderNews(payload) {
   lastNewsRenderKey = renderKey;
   renderNewsChannels(payload);
   renderNewsControls();
+  syncNewsView();
+  if (newsView === "map") {
+    knownNewsIds = new Set(items.map((item) => item.id));
+    return;
+  }
   if (!items.length) {
     newsResultCount.textContent = "0";
     newsList.innerHTML = '<div class="empty-state">No posts yet</div>';
@@ -2752,6 +2784,160 @@ function renderNewsChannels(payload) {
         title="${muted ? "Unmute" : "Mute"} @${escapeHtml(channel)}">${escapeHtml(label)}</button>`;
     })
     .join("");
+}
+
+async function fetchNewsMap() {
+  const seq = ++newsMapFetchSeq;
+  try {
+    const response = await fetch("/api/news/map");
+    if (!response.ok) throw new Error("news_map_failed");
+    const payload = await response.json();
+    if (seq <= newsMapFetchApplied) return;
+    newsMapFetchApplied = seq;
+    newsMapData = payload;
+    renderNewsMap();
+  } catch (error) {
+    if (seq <= newsMapFetchApplied || newsMapData) return;
+    newsMap.innerHTML = '<div class="empty-state">Semantic map unavailable</div>';
+  }
+}
+
+function selectNewsView(view) {
+  newsView = view === "map" ? "map" : "list";
+  newsViewTabs.querySelectorAll("button[data-news-view]").forEach((button) => {
+    const active = button.dataset.newsView === newsView;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  syncNewsView();
+  if (newsView === "map" && !newsMapData) fetchNewsMap();
+}
+
+function syncNewsView() {
+  const mapActive = newsView === "map";
+  newsList.hidden = mapActive;
+  newsMapView.hidden = !mapActive;
+  newsSearch.disabled = mapActive;
+  newsFilters.querySelectorAll("button").forEach((button) => {
+    const focusDisabled = button.dataset.newsFilter === "focus" && !focusedSymbol;
+    button.disabled = mapActive || focusDisabled;
+  });
+  if (mapActive) renderNewsMap();
+}
+
+function renderNewsMap() {
+  if (newsView !== "map" || !newsMap) return;
+  const clusters = newsMapData?.clusters || [];
+  if (!clusters.length) {
+    newsMap.innerHTML = '<div class="empty-state">No semantic clusters yet</div>';
+    renderNewsClusterPanel(null);
+    return;
+  }
+  const visible = clusters
+    .filter((cluster) => {
+      const channels = newsClusterChannels(cluster);
+      return channels.length && !channels.every((channel) => mutedNewsChannels.has(channel));
+    })
+    .slice(0, 80);
+  const rect = newsMap.getBoundingClientRect();
+  const width = Math.max(rect.width, 300);
+  const height = Math.max(rect.height, 420);
+  const tiles = layoutNewsTiles(visible, 0, 0, width, height);
+  newsMap.innerHTML = tiles.map((tile) => newsMapTileMarkup(tile)).join("");
+  const activeVisible = visible.some(
+    (cluster) => String(cluster.id) === String(activeNewsClusterId)
+  );
+  renderNewsClusterPanel(activeVisible ? activeNewsClusterId : null);
+}
+
+function layoutNewsTiles(clusters, x, y, width, height) {
+  if (!clusters.length) return [];
+  if (clusters.length === 1) return [{ cluster: clusters[0], x, y, width, height }];
+  const total = clusters.reduce((sum, cluster) => sum + cluster.count, 0);
+  let midpoint = clusters.length - 1;
+  let bestDifference = Number.POSITIVE_INFINITY;
+  let leftTotal = 0;
+  for (let index = 0; index < clusters.length - 1; index += 1) {
+    leftTotal += clusters[index].count;
+    const difference = Math.abs(total - leftTotal * 2);
+    if (difference < bestDifference) {
+      bestDifference = difference;
+      midpoint = index + 1;
+    }
+  }
+  const left = clusters.slice(0, midpoint);
+  const right = clusters.slice(midpoint);
+  const share = leftTotal / Math.max(total, 1);
+  if (width >= height) {
+    const leftWidth = Math.max(width * share, 1);
+    return [
+      ...layoutNewsTiles(left, x, y, leftWidth, height),
+      ...layoutNewsTiles(right, x + leftWidth, y, width - leftWidth, height),
+    ];
+  }
+  const topHeight = Math.max(height * share, 1);
+  return [
+    ...layoutNewsTiles(left, x, y, width, topHeight),
+    ...layoutNewsTiles(right, x, y + topHeight, width, height - topHeight),
+  ];
+}
+
+function newsMapTileMarkup(tile) {
+  const cluster = tile.cluster;
+  const latest = Date.parse(cluster.latest_seen || "") || 0;
+  const ageHours = Math.max(0, (Date.now() - latest) / 3600000);
+  const freshness = Math.max(8, Math.min(30, 30 - ageHours));
+  const tone = Number.parseInt(String(cluster.id).slice(0, 2), 16) % 8;
+  const active = String(cluster.id) === String(activeNewsClusterId);
+  const classes = [
+    "news-map-tile",
+    `tone-${Number.isFinite(tone) ? tone : 0}`,
+    tile.width < 95 || tile.height < 54 ? "small" : "",
+    tile.width < 65 || tile.height < 38 ? "tiny" : "",
+    active ? "active" : "",
+  ].filter(Boolean).join(" ");
+  const sample = cluster.sample || "";
+  return `<button type="button" class="${classes}" data-cluster-id="${escapeHtml(String(cluster.id))}"
+    style="left:${tile.x.toFixed(1)}px;top:${tile.y.toFixed(1)}px;width:${tile.width.toFixed(1)}px;height:${tile.height.toFixed(1)}px;--news-freshness:${freshness.toFixed(1)}%"
+    title="${escapeHtml(sample)}" aria-pressed="${active}">
+    <strong>${escapeHtml(cluster.label)}</strong>
+    <span>${cluster.count} story${cluster.count === 1 ? "" : "s"} · ${cluster.channels} source${cluster.channels === 1 ? "" : "s"}</span>
+  </button>`;
+}
+
+function selectNewsCluster(clusterId) {
+  activeNewsClusterId = clusterId || null;
+  renderNewsMap();
+}
+
+function renderNewsClusterPanel(clusterId) {
+  const clusters = newsMapData?.clusters || [];
+  const cluster = clusters.find((entry) => String(entry.id) === String(clusterId));
+  if (!cluster) {
+    newsClusterPanel.hidden = true;
+    newsClusterItems.innerHTML = "";
+    return;
+  }
+  const items = new Map((latestNews?.items || []).map((item) => [item.id, item]));
+  const selected = cluster.item_ids.map((id) => items.get(id)).filter(Boolean);
+  newsClusterTitle.textContent = cluster.label;
+  newsClusterItems.innerHTML = selected.map((item) => newsMapStoryMarkup(item)).join("");
+  newsClusterPanel.hidden = false;
+}
+
+function newsMapStoryMarkup(item) {
+  const safeLink = /^https?:\/\//i.test(item.link || "") ? item.link : "#";
+  return `<a class="news-map-story" href="${escapeHtml(safeLink)}" target="_blank" rel="noopener noreferrer">
+    <header><span>${escapeHtml(item.channel_title || item.channel || "")}</span><time>${escapeHtml(newsAge(item.timestamp))}</time></header>
+    <p>${escapeHtml(item.text || "")}</p>
+  </a>`;
+}
+
+function newsClusterChannels(cluster) {
+  const items = new Map((latestNews?.items || []).map((item) => [item.id, item]));
+  return (cluster.item_ids || [])
+    .map((id) => items.get(id)?.channel)
+    .filter(Boolean);
 }
 
 function newsItemMarkup(item, seenBefore) {

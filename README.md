@@ -18,7 +18,10 @@ A Crypto Breadth panel on the Daily Board reads advance/decline, big movers, and
 share across the full tape while the curated regime/breadth universe stays unpolluted.
 A toggleable full-height news drawer streams public Telegram channels (scraped from their
 t.me previews, no API key): the server polls every 15 seconds and pushes new posts to the
-browser over the WebSocket, and each channel gets a per-browser mute chip.
+browser over the WebSocket, and each channel gets a per-browser mute chip. Its Map view
+renders a Newsmap-style semantic treemap: TF-IDF clusters of repeated stories become tiles
+whose size tracks the number of related headlines and whose color tracks freshness; clicking
+a tile opens the linked Telegram headlines.
 
 The AI view has four live panels. Models normalizes the public OpenRouter catalog into
 comparable input, output, cache, and 3:1 blended prices with provider, context, open-weight,

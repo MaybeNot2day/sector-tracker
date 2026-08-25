@@ -221,8 +221,9 @@ async def news_poll_loop(app_state: Any) -> None:
         try:
             new_items = await app_state.news_service.refresh()
             if new_items:
+                feed = app_state.news_service.feed_payload()
                 await app_state.connection_manager.broadcast(
-                    {"type": "news", "data": app_state.news_service.feed_payload()}
+                    {"type": "news", "data": {**feed, "map": app_state.news_service.map_payload()}}
                 )
         except asyncio.CancelledError:
             raise

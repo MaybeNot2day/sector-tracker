@@ -13,7 +13,9 @@ class StubNewsService:
     def __init__(self, results: list[Any]) -> None:
         self._results = list(results)
         self.payload = {"items": [{"id": "chan/1"}], "channels": ["chan"]}
+        self.map = {"clusters": [], "items": [], "singletons": 0}
         self.payload_calls = 0
+        self.map_calls = 0
 
     async def refresh(self) -> int:
         result = self._results.pop(0)
@@ -24,6 +26,10 @@ class StubNewsService:
     def feed_payload(self) -> dict[str, object]:
         self.payload_calls += 1
         return self.payload
+
+    def map_payload(self) -> dict[str, object]:
+        self.map_calls += 1
+        return self.map
 
 
 class StubConnectionManager:
@@ -72,8 +78,9 @@ async def test_broadcasts_only_when_refresh_finds_new_items(
 
     manager = await run_loop(service, max_sleeps=3, monkeypatch=monkeypatch)
 
-    assert manager.broadcasts == [{"type": "news", "data": service.payload}]
+    assert manager.broadcasts == [{"type": "news", "data": {**service.payload, "map": service.map}}]
     assert service.payload_calls == 1  # not built on the empty iteration
+    assert service.map_calls == 1
 
 
 @pytest.mark.asyncio
@@ -86,4 +93,6 @@ async def test_loop_survives_refresh_exception_and_keeps_polling(
 
     # The raising iteration is swallowed; the next one still broadcasts.
     assert [payload["type"] for payload in manager.broadcasts] == ["news"]
+    assert manager.broadcasts[0]["data"]["map"] == service.map
     assert service.payload_calls == 1
+    assert service.map_calls == 1

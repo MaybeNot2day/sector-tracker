@@ -17,7 +17,7 @@
         }
       } catch {}
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260820-5" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260820-7" />
   </head>
   <body>
     <aside id="news-panel" class="news-panel" aria-label="Live Telegram news" aria-hidden="true" inert>
@@ -34,6 +34,10 @@
           <input id="news-search" type="search" autocomplete="off" placeholder="Search headlines" aria-label="Search news headlines" />
         </label>
         <div class="news-filter-row">
+          <div id="news-view-tabs" class="news-filters" role="group" aria-label="News view">
+            <button type="button" data-news-view="list" class="active" aria-pressed="true">List</button>
+            <button type="button" data-news-view="map" aria-pressed="false">Map</button>
+          </div>
           <div id="news-filters" class="news-filters" role="group" aria-label="News relevance filter">
             <button type="button" data-news-filter="all" class="active" aria-pressed="true">All</button>
             <button type="button" data-news-filter="universe" aria-pressed="false">Universe</button>
@@ -46,6 +50,20 @@
       <div id="news-channels" class="news-channels" role="group" aria-label="News channel filters"></div>
       <div id="news-list" class="news-list">
         <div class="empty-state">Loading feed</div>
+      </div>
+      <div id="news-map-view" class="news-map-view" hidden>
+        <div id="news-map" class="news-map">
+          <div class="empty-state">Loading semantic map</div>
+        </div>
+        <section id="news-cluster-panel" class="news-cluster-panel" hidden aria-live="polite">
+          <header>
+            <h3 id="news-cluster-title"></h3>
+            <button id="news-cluster-close" class="icon-button" type="button" aria-label="Close cluster">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+            </button>
+          </header>
+          <div id="news-cluster-items"></div>
+        </section>
       </div>
     </aside>
 
@@ -556,6 +574,6 @@
 
     <div id="help-tooltip" class="help-tooltip" role="tooltip" hidden></div>
 
-    <script src="/static/app.js?v=20260820-5" defer></script>
+    <script src="/static/app.js?v=20260820-7" defer></script>
   </body>
 </html>

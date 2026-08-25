@@ -640,6 +640,13 @@ async def news() -> dict[str, object]:
     return await service.get_feed()
 
 
+@app.get("/api/news/map")
+async def news_map() -> dict[str, object]:
+    """Semantic treemap over the currently cached news feed."""
+    service: NewsService = app.state.news_service
+    return service.map_payload()
+
+
 async def _heal_stale_history() -> None:
     """Refresh a small batch of stale daily bars before building the board.
 

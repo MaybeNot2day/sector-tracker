@@ -5,9 +5,11 @@ import html
 import re
 from datetime import UTC, datetime
 from time import monotonic
-from typing import Any
+from typing import Any, cast
 
 import httpx
+
+from app.services.news_map import cluster_news, cluster_revision
 
 # Telegram's public web preview (t.me/s/<channel>) serves the last ~20 posts
 # of any public channel without auth — same spirit as the Farside scrape.
@@ -52,6 +54,7 @@ class NewsService:
         self._lock = asyncio.Lock()
         self._client: httpx.AsyncClient | None = None
         self._fetch_semaphore = asyncio.Semaphore(MAX_FETCH_CONCURRENCY)
+        self._map_cache: tuple[str, dict[str, object]] | None = None
 
     async def get_feed(self) -> dict[str, object]:
         await self.refresh()
@@ -87,6 +90,7 @@ class NewsService:
                         new_items += 1
                     self._items[item["id"]] = item
             self._trim()
+            self._map_cache = None
             self._fetched = monotonic()
             self._last_attempt_at = attempted_at
             self._failed_channels = failed_channels
@@ -112,6 +116,14 @@ class NewsService:
             and (self._last_success_at is None or bool(self._failed_channels)),
             "failed_channels": self._failed_channels,
         }
+
+    def map_payload(self) -> dict[str, object]:
+        """Semantic treemap payload for the current feed snapshot."""
+        items = cast(list[dict[str, Any]], self.feed_payload()["items"])
+        revision = cluster_revision(items)
+        if self._map_cache is None or self._map_cache[0] != revision:
+            self._map_cache = (revision, cluster_news(items))
+        return self._map_cache[1]
 
     def _trim(self) -> None:
         if len(self._items) <= MAX_FEED_ITEMS:
