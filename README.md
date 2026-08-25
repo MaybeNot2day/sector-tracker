@@ -448,7 +448,7 @@ OPTIONS_CACHE_SECONDS=60                           # chain snapshot cache, 15-90
 COMPUTEPRICES_API_KEY=                  # optional free key; public GPU pages are the keyless fallback
 ECON_CALENDAR_CACHE_SECONDS=300         # key-dates enrichment cache; auto-drops to 20s around releases
 ECON_CALENDAR_COUNTRIES=US,EU,DE,GB,JP,CN
-NEWS_TELEGRAM_CHANNELS=marketfeed,RetardFrens,tradehaven,AGGRNEWSWIRE,WalterBloomberg   # public t.me handles; each gets a mute chip in the drawer
+NEWS_TELEGRAM_CHANNELS=marketfeed,RetardFrens,tradehaven,AGGRNEWSWIRE,WalterBloomberg,StablewatchNews,cookiesreads,real_DonaldJTrump,ahboyashreads,thekobeissiletter   # public t.me handles; each gets a mute chip in the drawer
 NEWS_POLL_SECONDS=15
 ```
 

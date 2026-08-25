@@ -40,7 +40,10 @@ class Settings(BaseSettings):
     econ_calendar_countries: str = "US,EU,DE,GB,JP,CN,CA,AU,NZ"
     # Public Telegram channels for the live news drawer, comma-separated
     # t.me handles. Polled every news_poll_seconds and pushed over the WS.
-    news_telegram_channels: str = "marketfeed,RetardFrens,tradehaven,AGGRNEWSWIRE,WalterBloomberg"
+    news_telegram_channels: str = (
+        "marketfeed,RetardFrens,tradehaven,AGGRNEWSWIRE,WalterBloomberg,"
+        "StablewatchNews,cookiesreads,real_DonaldJTrump,ahboyashreads,thekobeissiletter"
+    )
     news_poll_seconds: int = Field(default=15, ge=5)
     enable_background_tasks: bool = True
 
