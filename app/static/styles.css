@@ -138,15 +138,61 @@ body.modal-open {
 
 /* --- Live news drawer ---------------------------------------------------- */
 /* The drawer is always a fixed overlay. Opening it must not mutate the
-   dashboard's layout width or push header controls outside the viewport. */
+   dashboard's layout width or push header controls outside the viewport.
+   Width is user-resizable via the right-edge handle (persisted per browser);
+   the inline --news-panel-width custom property set from JS wins here. */
 
+
+.news-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -7px;
+  bottom: 0;
+  width: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 3;
+}
+
+.news-resize-handle span {
+  width: 3px;
+  height: 64px;
+  border-radius: 2px;
+  background: var(--line);
+  transition: background 0.12s ease;
+}
+
+.news-resize-handle:hover span,
+.news-resize-handle:focus-visible span,
+.news-resize-handle.dragging span {
+  background: var(--accent);
+}
+
+.news-resize-handle:focus-visible {
+  outline: none;
+}
+
+.news-resize-handle[hidden] {
+  display: none;
+}
+
+body.news-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
 .news-panel {
   position: fixed;
   top: 0;
   left: 0;
   bottom: 0;
   z-index: 40;
-  width: min(340px, 100vw);
+  width: min(var(--news-panel-width, 340px), 100vw);
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--line);

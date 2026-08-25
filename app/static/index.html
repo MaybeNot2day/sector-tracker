@@ -17,10 +17,15 @@
         }
       } catch {}
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260820-7" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260820-12" />
   </head>
   <body>
     <aside id="news-panel" class="news-panel" aria-label="Live Telegram news" aria-hidden="true" inert>
+      <button id="news-resize-handle" class="news-resize-handle" type="button"
+        aria-label="Resize news panel" aria-orientation="vertical"
+        title="Drag to resize · arrow keys adjust width">
+        <span aria-hidden="true"></span>
+      </button>
       <div class="news-header">
         <span class="news-title">Live News</span>
         <span id="news-status" class="news-status"></span>
@@ -574,6 +579,6 @@
 
     <div id="help-tooltip" class="help-tooltip" role="tooltip" hidden></div>
 
-    <script src="/static/app.js?v=20260820-7" defer></script>
-  </body>
+    <script src="/static/app.js?v=20260820-12" defer></script>
+
 </html>

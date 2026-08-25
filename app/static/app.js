@@ -86,6 +86,7 @@ const newsMapView = document.querySelector("#news-map-view");
 const newsMap = document.querySelector("#news-map");
 const newsViewTabs = document.querySelector("#news-view-tabs");
 const newsClusterPanel = document.querySelector("#news-cluster-panel");
+const newsResizeHandle = document.querySelector("#news-resize-handle");
 const newsClusterTitle = document.querySelector("#news-cluster-title");
 const newsClusterItems = document.querySelector("#news-cluster-items");
 const newsClusterClose = document.querySelector("#news-cluster-close");
@@ -206,6 +207,11 @@ const BOARD_CACHE_KEY = "board-cache-v1";
 const BOARD_CACHE_WRITE_INTERVAL_MS = 30000;
 let lastBoardCacheWriteAt = 0;
 let pendingBoardCachePayload = null;
+const NEWS_WIDTH_KEY = "news-panel-width";
+const NEWS_WIDTH_MIN = 300;
+const NEWS_WIDTH_MAX_RATIO = 0.6;
+let newsResizing = false;
+let newsResizePointerId = null;
 let boardCacheWriteTimer = null;
 let latestNews = null;
 let lastNewsRenderKey = "";
@@ -647,6 +653,13 @@ function init() {
       recoverStaleWebSocket();
     }
     fetchCryptoEtfFlows();
+    if (newsPanel) {
+      // A stored width can exceed the 60% cap after the window shrinks;
+      // re-clamping keeps the drawer inside the viewport.
+      const current = newsPanel.getBoundingClientRect().width;
+      const { max } = newsWidthBounds();
+      if (current > max) applyNewsWidth(max, { persist: false });
+    }
     fetchKeyDates();
     fetchFringe();
     refreshReportsBadge();
@@ -675,6 +688,29 @@ function init() {
     if (tile) selectNewsCluster(tile.dataset.clusterId || "");
   });
   newsClusterClose.addEventListener("click", () => selectNewsCluster(null));
+  newsResizeHandle.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    beginNewsResize(event.pointerId);
+    newsResizeHandle.setPointerCapture(event.pointerId);
+  });
+  newsResizeHandle.addEventListener("pointermove", (event) => {
+    if (!newsResizing || event.pointerId !== newsResizePointerId) return;
+    // The handle hugs the panel's right edge, so its center tracks the
+    // requested width; the small constant offset keeps the drag 1:1.
+    applyNewsWidth(event.clientX + 7);
+  });
+  newsResizeHandle.addEventListener("pointerup", endNewsResize);
+  newsResizeHandle.addEventListener("pointercancel", endNewsResize);
+  newsResizeHandle.addEventListener("keydown", (event) => {
+    const steps = { ArrowLeft: -24, ArrowRight: 24 };
+    if (!(event.key in steps)) return;
+    event.preventDefault();
+    const current = newsPanel.getBoundingClientRect().width;
+    applyNewsWidth(current + steps[event.key]);
+  });
+  loadNewsWidth();
+
   themeToggle.addEventListener("click", () => {
     setTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light", true);
   });
@@ -2939,6 +2975,50 @@ function newsClusterChannels(cluster) {
     .map((id) => items.get(id)?.channel)
     .filter(Boolean);
 }
+
+function newsWidthBounds() {
+  const max = Math.round(window.innerWidth * NEWS_WIDTH_MAX_RATIO);
+  const min = Math.min(NEWS_WIDTH_MIN, max);
+  return { min, max: Math.max(min, max) };
+}
+
+function applyNewsWidth(width, { persist = true } = {}) {
+  const { min, max } = newsWidthBounds();
+  const clamped = Math.max(min, Math.min(max, Math.round(width)));
+  newsPanel.style.setProperty("--news-panel-width", `${clamped}px`);
+  if (persist) {
+    try {
+      localStorage.setItem(NEWS_WIDTH_KEY, String(clamped));
+    } catch (error) {
+      // Private browsing: width resets on reload, resize still works live.
+    }
+  }
+  if (newsView === "map") renderNewsMap();
+}
+
+function loadNewsWidth() {
+  try {
+    const stored = Number(localStorage.getItem(NEWS_WIDTH_KEY));
+    if (Number.isFinite(stored) && stored > 0) applyNewsWidth(stored, { persist: false });
+  } catch (error) {
+    // Storage unavailable: keep the default width.
+  }
+}
+
+function beginNewsResize(pointerId) {
+  newsResizing = true;
+  newsResizePointerId = pointerId;
+  newsResizeHandle.classList.add("dragging");
+  document.body.classList.add("news-resizing");
+}
+
+function endNewsResize() {
+  newsResizing = false;
+  newsResizePointerId = null;
+  newsResizeHandle.classList.remove("dragging");
+  document.body.classList.remove("news-resizing");
+}
+
 
 function newsItemMarkup(item, seenBefore) {
   const fresh = seenBefore && !knownNewsIds.has(item.id);
