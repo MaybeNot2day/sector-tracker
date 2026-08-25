@@ -21,6 +21,10 @@ GroupsCacheKey: TypeAlias = tuple[tuple[str, tuple[tuple[str, str, str], ...]], 
 # runs in the background; beyond this age the data is too old to serve blind.
 STALE_WHILE_REVALIDATE_SECONDS = 120.0
 
+# Personal-list lookups bypass the board cache; keep a short per-symbol TTL so
+# rapid list switching or re-renders reuse the same provider round-trip.
+LOOKUP_CACHE_SECONDS = 30.0
+
 
 class QuoteService:
     def __init__(
@@ -36,6 +40,8 @@ class QuoteService:
         self._cache_key: GroupsCacheKey | None = None
         self._cache_time = 0.0
         self._cached_grouped: dict[str, list[Quote]] | None = None
+        self._lookup_cache: dict[str, tuple[float, Quote]] = {}
+        self._lookup_lock = asyncio.Lock()
         self._refresh_lock = asyncio.Lock()
 
     async def get_board_quotes(
@@ -61,6 +67,52 @@ class QuoteService:
             if cached is not None:
                 return cached
             return await self._refresh(groups, cache_key)
+
+    async def get_lookup_quotes(self, assets: list[AssetConfig]) -> dict[str, Quote]:
+        """Fresh quotes for arbitrary (possibly off-board) assets.
+
+        Powers the personal named watch lists: their symbols are free-typed,
+        so they may not exist in any board group. A short per-symbol cache
+        keeps list re-renders from hammering the providers.
+        """
+        now = monotonic()
+        result: dict[str, Quote] = {}
+        missing: list[AssetConfig] = []
+        for asset in assets:
+            cached = self._lookup_cache.get(asset.symbol.upper())
+            if cached is not None and now - cached[0] < LOOKUP_CACHE_SECONDS:
+                result[asset.symbol.upper()] = cached[1]
+            else:
+                missing.append(asset)
+        if not missing:
+            return result
+        async with self._lookup_lock:
+            now = monotonic()
+            still_missing: list[AssetConfig] = []
+            for asset in missing:
+                cached = self._lookup_cache.get(asset.symbol.upper())
+                if cached is not None and now - cached[0] < LOOKUP_CACHE_SECONDS:
+                    result[asset.symbol.upper()] = cached[1]
+                else:
+                    still_missing.append(asset)
+            if still_missing:
+                by_provider: dict[ProviderName, list[AssetConfig]] = {}
+                for asset in still_missing:
+                    by_provider.setdefault(asset.source, []).append(asset)
+                tasks = [
+                    self._safe_provider_quotes(source, items)
+                    for source, items in by_provider.items()
+                    if source in self.providers
+                ]
+                fetched = monotonic()
+                for quotes in await asyncio.gather(*tasks):
+                    for quote in quotes:
+                        if quote.error or quote.last <= 0:
+                            continue
+                        key = quote.symbol.upper()
+                        result[key] = quote
+                        self._lookup_cache[key] = (fetched, quote)
+        return result
 
     def _schedule_refresh(self, groups: list[GroupConfig], cache_key: GroupsCacheKey) -> None:
         if self._refresh_lock.locked():

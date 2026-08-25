@@ -17,7 +17,7 @@
         }
       } catch {}
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260821-2" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260826-1" />
   </head>
   <body>
     <aside id="news-panel" class="news-panel" aria-label="Live Telegram news" aria-hidden="true" inert>
@@ -429,6 +429,10 @@
 
       <section id="watch-view" class="view-panel" role="tabpanel" aria-labelledby="watch-tab" hidden>
         <div class="market-tools watch-tools">
+          <div class="category-tabs" id="watch-mode" role="group" aria-label="Watch view mode">
+            <button type="button" data-mode="charts" class="active" aria-pressed="true">Charts</button>
+            <button type="button" data-mode="lists" aria-pressed="false">Lists</button>
+          </div>
           <label class="market-search watch-add-label" title="Add a symbol to the watch grid">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
             <input
@@ -452,6 +456,12 @@
             >Browse</button>
             <div id="watch-picker" class="watch-picker" hidden></div>
           </div>
+          <div class="watch-list-controls" id="watch-list-controls" hidden>
+            <div class="category-tabs watch-list-tabs" id="watch-list-tabs" role="group" aria-label="Saved watch lists"></div>
+            <button id="watch-list-new" class="toolbar-button compact" type="button" title="Create a new named list">New list</button>
+            <button id="watch-list-rename" class="toolbar-button compact" type="button" title="Rename the open list">Rename</button>
+            <button id="watch-list-delete" class="toolbar-button compact" type="button" title="Delete the open list">Delete</button>
+          </div>
           <div class="category-tabs" id="watch-intervals" role="group" aria-label="Watch chart timeframe">
             <button type="button" data-interval="15m" aria-pressed="false">15m</button>
             <button type="button" data-interval="1h" class="active" aria-pressed="true">1H</button>
@@ -461,6 +471,7 @@
           <span id="watch-status" class="trends-note" aria-live="polite"></span>
         </div>
         <div id="watch-grid" class="watch-grid"></div>
+        <div id="watch-list-board" class="watch-list-board" hidden></div>
       </section>
     </main>
 
@@ -587,6 +598,6 @@
 
     <div id="help-tooltip" class="help-tooltip" role="tooltip" hidden></div>
 
-    <script src="/static/app.js?v=20260821-2" defer></script>
+    <script src="/static/app.js?v=20260826-1" defer></script>
 
 </html>

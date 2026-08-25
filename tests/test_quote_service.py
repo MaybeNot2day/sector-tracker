@@ -3,6 +3,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -147,6 +148,71 @@ async def test_quote_service_returns_error_quote_without_cache(tmp_path: Path) -
 
     assert grouped["TEST"][0].is_stale is True
     assert grouped["TEST"][0].error == "no_quote_available"
+
+
+@pytest.mark.asyncio
+async def test_lookup_quotes_fetch_and_short_cache(tmp_path: Path) -> None:
+    provider = CountingProvider()
+    service = QuoteService(tmp_path / "board.sqlite3", {"yahoo": provider})
+    assets = [AssetConfig(symbol="MSFT", type="equity", source="yahoo")]
+
+    first = await service.get_lookup_quotes(assets)
+    second = await service.get_lookup_quotes(assets)
+
+    assert first["MSFT"].last == 110.0
+    assert second["MSFT"] is first["MSFT"]
+    assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_lookup_quotes_omit_unquotable_symbols(tmp_path: Path) -> None:
+    service = QuoteService(tmp_path / "board.sqlite3", {"yahoo": EmptyProvider()})
+
+    result = await service.get_lookup_quotes(
+        [AssetConfig(symbol="NOPE", type="equity", source="yahoo")]
+    )
+
+    assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_quotes_lookup_endpoint_resolves_board_and_free_symbols(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    groups = [
+        GroupConfig(
+            name="TEST",
+            assets=[AssetConfig(symbol="AAPL", type="etf", source="yahoo", name="Apple")],
+        )
+    ]
+    monkeypatch.setattr(main_module.app.state, "groups", groups, raising=False)
+    monkeypatch.setattr(main_module.app.state, "providers", {}, raising=False)
+    monkeypatch.setattr(
+        main_module.app.state,
+        "quote_service",
+        QuoteService(tmp_path / "board.sqlite3", {"yahoo": WorkingProvider()}),
+        raising=False,
+    )
+
+    payload = await main_module.quotes_lookup(symbols="aapl, msft,,aapl,bad/sym")
+
+    quotes = cast(dict[str, dict[str, object]], payload["quotes"])
+    assets = cast(dict[str, dict[str, object]], payload["assets"])
+    assert set(quotes) == {"AAPL", "MSFT"}
+    assert quotes["AAPL"]["last"] == 110.0
+    # Board config wins: the curated type and name ride along for the UI.
+    assert assets["AAPL"] == {"type": "etf", "source": "yahoo", "name": "Apple"}
+    assert assets["MSFT"] == {"type": "equity", "source": "yahoo", "name": None}
+
+
+@pytest.mark.asyncio
+async def test_quotes_lookup_endpoint_rejects_empty_symbol_set() -> None:
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as excinfo:
+        await main_module.quotes_lookup(symbols=",, /,")
+
+    assert excinfo.value.status_code == 422
 
 
 @pytest.mark.asyncio

@@ -1679,6 +1679,78 @@ def test_watch_tab_builds_persistent_interactive_chart_wall(page: Page, base_url
     expect(page.locator(".watch-tile")).to_have_count(1)
 
 
+def test_watch_lists_mode_manages_named_screener_lists(page: Page, base_url: str) -> None:
+    page.goto(f"{base_url}/#view=watch", wait_until="domcontentloaded")
+    expect(page.locator("#watch-view")).to_be_visible()
+
+    # Lists mode swaps the chart controls for list management.
+    page.locator('#watch-mode button[data-mode="lists"]').click()
+    expect(page.locator("#watch-intervals")).to_be_hidden()
+    expect(page.locator("#watch-grid")).to_be_hidden()
+    expect(page.locator("#watch-list-controls")).to_be_visible()
+    expect(page.locator("#watch-list-board .empty-state")).to_contain_text("Create your first list")
+
+    # Create a named list through the prompt dialog.
+    page.once("dialog", lambda dialog: dialog.accept("Crypto"))
+    page.locator("#watch-list-new").click()
+    expect(page.locator("#watch-list-tabs button")).to_have_count(1)
+    expect(page.locator("#watch-list-tabs button.active")).to_contain_text("Crypto")
+
+    # A board symbol rides the live payload; an off-board one uses the lookup.
+    for symbol in ("SPY", "TSLA"):
+        page.locator("#watch-add").fill(symbol)
+        page.locator("#watch-add").press("Enter")
+    rows = page.locator(".watch-list-table tbody tr")
+    expect(rows).to_have_count(2)
+    expect(rows.first.locator(".watch-list-open strong")).to_have_text("SPY")
+    lookup_row = page.locator('.watch-list-table tr[data-list-symbol="TSLA"]')
+    expect(lookup_row.locator("td.num").first).to_contain_text("100.00")
+    expect(lookup_row.locator("td.num.positive").first).to_contain_text("+5.26%")
+    expect(lookup_row.locator(".watch-list-type")).to_have_text("EQ")
+
+    # Duplicates are refused with a status message naming the list.
+    page.locator("#watch-add").fill("TSLA")
+    page.locator("#watch-add").press("Enter")
+    expect(page.locator("#watch-status")).to_contain_text('already in "Crypto"')
+    expect(rows).to_have_count(2)
+
+    # A second list starts empty; switching tabs swaps the table.
+    page.once("dialog", lambda dialog: dialog.accept("Stocks"))
+    page.locator("#watch-list-new").click()
+    expect(page.locator("#watch-list-tabs button")).to_have_count(2)
+    expect(page.locator("#watch-list-board .empty-state")).to_contain_text('"Stocks" is empty')
+    page.locator('#watch-list-tabs button:has-text("Crypto")').click()
+    expect(page.locator(".watch-list-table tbody tr")).to_have_count(2)
+
+    # Rename updates the active tab label.
+    page.once("dialog", lambda dialog: dialog.accept("Perps"))
+    page.locator("#watch-list-rename").click()
+    expect(page.locator("#watch-list-tabs button.active")).to_contain_text("Perps")
+
+    # Row remove drops the symbol from the open list only.
+    page.locator('.watch-list-table tr[data-list-symbol="SPY"] .watch-list-remove').click()
+    expect(page.locator(".watch-list-table tbody tr")).to_have_count(1)
+
+    # Mode, lists, and membership survive a reload (localStorage).
+    page.goto(f"{base_url}/?wl=1#view=watch", wait_until="domcontentloaded")
+    expect(page.locator('#watch-mode button[data-mode="lists"]')).to_have_attribute(
+        "aria-pressed", "true"
+    )
+    expect(page.locator("#watch-list-tabs button")).to_have_count(2)
+    expect(page.locator("#watch-list-tabs button.active")).to_contain_text("Perps")
+    expect(page.locator(".watch-list-table tbody tr")).to_have_count(1)
+
+    # Deleting the open list falls back to the next saved list.
+    page.once("dialog", lambda dialog: dialog.accept())
+    page.locator("#watch-list-delete").click()
+    expect(page.locator("#watch-list-tabs button")).to_have_count(1)
+    expect(page.locator("#watch-list-tabs button.active")).to_contain_text("Stocks")
+
+    # Charts mode is untouched by list membership.
+    page.locator('#watch-mode button[data-mode="charts"]').click()
+    expect(page.locator("#watch-grid .empty-state")).to_contain_text("Add up to 9 symbols")
+
+
 def test_trends_tab_renders_group_bands_and_links_to_markets(page: Page, base_url: str) -> None:
     page.goto(f"{base_url}/#view=trends", wait_until="domcontentloaded")
     expect(page.locator("#trends-view")).to_be_visible()
@@ -2157,6 +2229,31 @@ AI_HARDWARE_PAYLOAD: dict[str, Any] = {
 }
 
 
+def _lookup_payload(symbols: list[str]) -> dict[str, Any]:
+    """Deterministic /api/quotes/lookup stub: BTC quotes as a perp, rest equities."""
+    quotes: dict[str, Any] = {}
+    assets: dict[str, Any] = {}
+    for index, symbol in enumerate(symbols):
+        crypto = symbol == "BTC"
+        quotes[symbol] = {
+            "symbol": symbol,
+            "asset_type": "crypto_perp" if crypto else "equity",
+            "provider": "hyperliquid" if crypto else "yahoo",
+            "last": 64250.0 if crypto else 100.0 + index,
+            "previous_close": 60000.0 if crypto else 95.0,
+            "change_abs": 4250.0 if crypto else 5.0,
+            "change_pct": 7.08 if crypto else 5.26,
+            "timestamp": "2026-08-26T12:00:00+00:00",
+            "is_stale": False,
+        }
+        assets[symbol] = {
+            "type": "crypto_perp" if crypto else "equity",
+            "source": "hyperliquid" if crypto else "yahoo",
+            "name": None,
+        }
+    return {"quotes": quotes, "assets": assets}
+
+
 def _stub_board_apis(page: Page) -> None:
     quote_requests = 0
 
@@ -2210,6 +2307,10 @@ def _stub_board_apis(page: Page) -> None:
             _fulfill_json(route, EARNINGS_PAYLOAD)
         elif path == "/api/component-trends":
             _fulfill_json(route, COMPONENT_TRENDS_PAYLOAD)
+        elif path == "/api/quotes/lookup":
+            raw = parse_qs(parsed.query).get("symbols", [""])[0]
+            symbols = [item.strip().upper() for item in raw.split(",") if item.strip()]
+            _fulfill_json(route, _lookup_payload(symbols))
         elif path == "/api/ai/models":
             _fulfill_json(route, AI_MODELS_PAYLOAD)
         elif path == "/api/ai/token-index":

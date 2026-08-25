@@ -81,7 +81,7 @@ from app.services.macro import MACRO_TAPE_GROUP_NAME, with_macro_group
 from app.services.market_context import market_context_payload
 from app.services.news import NewsService
 from app.services.options import MarketDataOptionsService, OptionsDataError
-from app.services.quotes import QuoteService
+from app.services.quotes import QuoteService, quote_payload
 from app.services.sofr import SOFRError, SOFRService
 from app.services.trends import group_trends_payload
 
@@ -631,6 +631,69 @@ async def quotes() -> dict[str, object]:
     )
     _schedule_history_heal()
     return await board_payload_async(app.state, groups, grouped)
+
+
+async def _resolve_lookup_asset(symbol: str) -> AssetConfig:
+    """Best-effort asset identity for a free-typed watch-list symbol.
+
+    Board config wins (it carries curated type/source/exchange); otherwise the
+    Hyperliquid market map claims crypto perps and xyz TradFi synthetics; any
+    remaining ticker defaults to a Yahoo equity, which also covers ETFs,
+    futures ("GC=F") and FX the way Yahoo spells them.
+    """
+    asset = find_asset(app.state.groups, symbol)
+    if asset is not None:
+        return asset
+    hyperliquid = app.state.providers.get("hyperliquid")
+    if isinstance(hyperliquid, HyperliquidProvider):
+        try:
+            if await hyperliquid.has_market(symbol):
+                if hyperliquid.is_crypto_market(symbol):
+                    return AssetConfig(symbol=symbol, type="crypto_perp", source="hyperliquid")
+                if hyperliquid.is_tradfi_market(symbol):
+                    return AssetConfig(symbol=symbol, type="equity", source="hyperliquid")
+        except Exception:
+            logger.warning("hyperliquid lookup resolution failed for %s", symbol, exc_info=True)
+    return AssetConfig(symbol=symbol, type="equity", source="yahoo")
+
+
+@app.get("/api/quotes/lookup")
+async def quotes_lookup(
+    symbols: str = Query(min_length=1, max_length=1200),
+) -> dict[str, object]:
+    """Quotes for arbitrary symbols (personal named watch lists).
+
+    Unlike /api/quotes this is not tied to the board groups: each symbol is
+    resolved independently, so a list can mix crypto perps, equities, ETFs
+    and futures. Symbols that fail to quote are simply absent from the map.
+    """
+    requested: list[str] = []
+    for raw in symbols.split(","):
+        clean = clean_symbol(raw)
+        if not clean or len(clean) > 24 or "/" in clean or "\\" in clean:
+            continue
+        if clean not in requested:
+            requested.append(clean)
+    if not requested:
+        raise HTTPException(status_code=422, detail="symbols_invalid")
+    requested = requested[:60]
+    assets = [await _resolve_lookup_asset(symbol) for symbol in requested]
+    quotes_by_symbol = await app.state.quote_service.get_lookup_quotes(assets)
+    return {
+        "quotes": {
+            symbol: quote_payload(quotes_by_symbol[symbol])
+            for symbol in requested
+            if symbol in quotes_by_symbol
+        },
+        "assets": {
+            asset.symbol.upper(): {
+                "type": asset.type,
+                "source": asset.source,
+                "name": asset.name,
+            }
+            for asset in assets
+        },
+    }
 
 
 @app.get("/api/news")

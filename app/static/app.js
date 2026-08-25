@@ -45,6 +45,14 @@ const watchStatus = document.querySelector("#watch-status");
 const watchIntervalButtons = Array.from(document.querySelectorAll("#watch-intervals button"));
 const watchBrowseButton = document.querySelector("#watch-browse");
 const watchPicker = document.querySelector("#watch-picker");
+const watchModeButtons = Array.from(document.querySelectorAll("#watch-mode button"));
+const watchIntervalTabs = document.querySelector("#watch-intervals");
+const watchListControls = document.querySelector("#watch-list-controls");
+const watchListTabs = document.querySelector("#watch-list-tabs");
+const watchListNewButton = document.querySelector("#watch-list-new");
+const watchListRenameButton = document.querySelector("#watch-list-rename");
+const watchListDeleteButton = document.querySelector("#watch-list-delete");
+const watchListBoard = document.querySelector("#watch-list-board");
 const chartWatchToggle = document.querySelector("#chart-watch-toggle");
 const fringeBoard = document.querySelector("#fringe-board");
 const marketSearch = document.querySelector("#market-search");
@@ -201,6 +209,24 @@ let watchSymbols = [];
 let watchInterval = "1h";
 const watchCharts = new Map();
 let watchRenderToken = 0;
+// --- Named watch lists (Lists mode): personal screener-style lists. --------
+const WATCH_LISTS_KEY = "watch-lists-v1";
+const WATCH_MODE_KEY = "watch-mode-v1";
+const WATCH_LIST_MAX = 60; // matches the /api/quotes/lookup per-request cap
+let watchMode = "charts"; // "charts" (tile wall) | "lists" (named lists)
+let watchLists = []; // [{ id, name, symbols: [] }]
+let activeWatchListId = null;
+let watchListQuotes = new Map(); // SYMBOL -> quote payload from /api/quotes/lookup
+let watchListAssets = new Map(); // SYMBOL -> { type, source, name }
+let watchListFetchSeq = 0;
+let watchListFetchedAt = 0;
+
+const WATCH_LIST_TYPE_TAGS = {
+  crypto_perp: "PERP",
+  equity: "EQ",
+  etf: "ETF",
+  future: "FUT",
+};
 let chartLibPromise = null; // lazy lightweight-charts loader state (used from init-time deep links)
 let activeReportId = null;
 let reportOpenToken = 0;
@@ -579,6 +605,7 @@ function init() {
   // Watch state loads before URL restore: a #view=watch deep link renders
   // the grid during restoreUrlState and must see the persisted symbols.
   loadWatchState();
+  setWatchMode(watchMode, { render: false });
   restoreUrlState();
   window.addEventListener("popstate", restoreReportNavigation);
   restoreCachedBoard();
@@ -830,7 +857,8 @@ function init() {
   watchAddInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
-      addWatchSymbol(watchAddInput.value);
+      if (watchMode === "lists") addWatchListSymbol(watchAddInput.value);
+      else addWatchSymbol(watchAddInput.value);
     }
   });
   watchBrowseButton.addEventListener("click", () => toggleWatchPicker());
@@ -848,6 +876,30 @@ function init() {
   watchIntervalButtons.forEach((button) => {
     button.addEventListener("click", () => selectWatchInterval(button.dataset.interval || "1h"));
   });
+  watchModeButtons.forEach((button) => {
+    button.addEventListener("click", () => setWatchMode(button.dataset.mode || "charts"));
+  });
+  watchListTabs.addEventListener("click", (event) => {
+    const chip = event.target.closest("button[data-list-id]");
+    if (chip) selectWatchList(chip.dataset.listId || "");
+  });
+  watchListNewButton.addEventListener("click", createWatchList);
+  watchListRenameButton.addEventListener("click", renameWatchList);
+  watchListDeleteButton.addEventListener("click", deleteWatchList);
+  watchListBoard.addEventListener("click", (event) => {
+    const remove = event.target.closest(".watch-list-remove");
+    if (remove) {
+      removeWatchListSymbol(remove.dataset.symbol || "");
+      return;
+    }
+    const open = event.target.closest(".watch-list-open");
+    if (open) {
+      const symbol = open.dataset.symbol || "";
+      const asset = findAssetConfig(symbol);
+      if (asset) openChart(asset);
+      else openFringeTicker(symbol);
+    }
+  });
   watchGrid.addEventListener("click", (event) => {
     const remove = event.target.closest(".watch-remove");
     if (remove) {
@@ -862,9 +914,16 @@ function init() {
       else openFringeTicker(symbol);
     }
   });
-  // In-place candle refresh keeps zoom/scroll; only while the tab is open.
+  // In-place refresh keeps chart zoom/scroll; lists re-mark board symbols and
+  // re-fetch off-board quotes. Only while the tab is open.
   window.setInterval(() => {
-    if (!document.hidden && activeView === "watch" && watchCharts.size) refreshWatchData();
+    if (document.hidden || activeView !== "watch") return;
+    if (watchMode === "lists") {
+      renderWatchListBoard();
+      refreshWatchListQuotes(true);
+    } else if (watchCharts.size) {
+      refreshWatchData();
+    }
   }, WATCH_REFRESH_MS);
   window.addEventListener("resize", () => {
     if (activeView === "watch") resizeWatchCharts();
@@ -1242,6 +1301,25 @@ function loadWatchState() {
     }
     const interval = localStorage.getItem(WATCH_INTERVAL_KEY) || "";
     if (interval in WATCH_RANGES) watchInterval = interval;
+    const mode = localStorage.getItem(WATCH_MODE_KEY) || "";
+    if (mode === "lists" || mode === "charts") watchMode = mode;
+    const lists = JSON.parse(localStorage.getItem(WATCH_LISTS_KEY) || "null");
+    if (lists && Array.isArray(lists.lists)) {
+      watchLists = lists.lists
+        .map((list) => ({
+          id: String(list.id || "").slice(0, 40) || watchListId(),
+          name: String(list.name || "").trim().slice(0, 40) || "Untitled",
+          symbols: (Array.isArray(list.symbols) ? list.symbols : [])
+            .map((symbol) => String(symbol).trim().toUpperCase())
+            .filter((symbol) => /^[A-Z0-9.\-=^]{1,24}$/.test(symbol))
+            .slice(0, WATCH_LIST_MAX),
+        }))
+        .slice(0, 24);
+      activeWatchListId = String(lists.active || "") || null;
+    }
+    if (!watchLists.some((list) => list.id === activeWatchListId)) {
+      activeWatchListId = watchLists[0]?.id || null;
+    }
   } catch (error) {
     // Private browsing: the grid still works for the session.
   }
@@ -1256,6 +1334,11 @@ function persistWatchState() {
   try {
     localStorage.setItem(WATCH_STORAGE_KEY, JSON.stringify(watchSymbols));
     localStorage.setItem(WATCH_INTERVAL_KEY, watchInterval);
+    localStorage.setItem(WATCH_MODE_KEY, watchMode);
+    localStorage.setItem(
+      WATCH_LISTS_KEY,
+      JSON.stringify({ active: activeWatchListId, lists: watchLists }),
+    );
   } catch (error) {
     /* best-effort */
   }
@@ -1335,7 +1418,7 @@ function renderWatchPicker() {
             <span>${escapeHtml(displayGroupName(group.name))}</span>
             <div>${(group.assets || [])
               .map((asset) => {
-                const active = watchSymbols.includes(asset.symbol);
+                const active = watchPickerSymbols().includes(asset.symbol);
                 return `<button type="button" class="watch-pick${active ? " active" : ""}" data-symbol="${escapeHtml(asset.symbol)}" aria-pressed="${active}" title="${escapeHtml(asset.name || asset.symbol)}">${escapeHtml(asset.symbol)}</button>`;
               })
               .join("")}</div>
@@ -1345,17 +1428,269 @@ function renderWatchPicker() {
       return `<div class="watch-picker-category"><em>${escapeHtml(category)}</em>${panels}</div>`;
     })
     .join("");
-  watchPicker.innerHTML = `<header>${watchSymbols.length}/${WATCH_MAX} on the grid · click to toggle</header>${sections}`;
+  const list = activeWatchList();
+  const header =
+    watchMode === "lists"
+      ? list
+        ? `${list.symbols.length}/${WATCH_LIST_MAX} in "${escapeHtml(list.name)}" · click to toggle`
+        : "Create a list first · New list"
+      : `${watchSymbols.length}/${WATCH_MAX} on the grid · click to toggle`;
+  watchPicker.innerHTML = `<header>${header}</header>${sections}`;
+}
+
+function watchPickerSymbols() {
+  if (watchMode === "lists") return activeWatchList()?.symbols || [];
+  return watchSymbols;
 }
 
 function toggleWatchSymbol(symbol) {
-  if (watchSymbols.includes(symbol)) {
+  if (watchMode === "lists") {
+    const list = activeWatchList();
+    if (list?.symbols.includes(symbol)) removeWatchListSymbol(symbol);
+    else addWatchListSymbol(symbol, { keepInput: true });
+  } else if (watchSymbols.includes(symbol)) {
     removeWatchSymbol(symbol);
   } else {
     addWatchSymbol(symbol);
   }
   renderWatchPicker();
   updateChartWatchToggle();
+}
+
+// --- Named watch lists (Lists mode): screener-style personal lists. --------
+// Multiple named lists (e.g. "Crypto", "AI stocks"), each holding any mix of
+// symbols the board, Hyperliquid, or Yahoo can quote. Rendered as a clean
+// table; persisted per browser next to the chart wall.
+function watchListId() {
+  return `wl-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function activeWatchList() {
+  return watchLists.find((list) => list.id === activeWatchListId) || null;
+}
+
+function setWatchMode(mode, { render = true } = {}) {
+  watchMode = mode === "lists" ? "lists" : "charts";
+  const lists = watchMode === "lists";
+  watchModeButtons.forEach((button) => {
+    const active = button.dataset.mode === watchMode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  watchGrid.hidden = lists;
+  watchListBoard.hidden = !lists;
+  watchIntervalTabs.hidden = lists;
+  watchListControls.hidden = !lists;
+  watchAddInput.placeholder = lists
+    ? "Add symbol to list (Enter)"
+    : "Add symbol (Enter) — max 9";
+  const label = lists ? "Add a symbol to the open list" : "Add a symbol to the watch grid";
+  watchAddInput.setAttribute("aria-label", label);
+  watchAddInput.closest(".watch-add-label")?.setAttribute("title", label);
+  persistWatchState();
+  setWatchStatus("");
+  if (!watchPicker.hidden) renderWatchPicker();
+  if (render) renderWatchView();
+}
+
+function renderWatchView() {
+  if (watchView.hidden) return;
+  if (watchMode === "lists") {
+    destroyWatchCharts();
+    watchGrid.innerHTML = "";
+    renderWatchLists();
+  } else {
+    renderWatchGrid();
+  }
+}
+
+function createWatchList() {
+  const name = window.prompt('Name the new list (e.g. "Crypto", "AI stocks"):', "");
+  const clean = String(name || "").trim().slice(0, 40);
+  if (!clean) return;
+  const list = { id: watchListId(), name: clean, symbols: [] };
+  watchLists.push(list);
+  activeWatchListId = list.id;
+  persistWatchState();
+  setWatchStatus("");
+  renderWatchLists();
+  watchAddInput.focus();
+}
+
+function renameWatchList() {
+  const list = activeWatchList();
+  if (!list) return;
+  const name = window.prompt("Rename list:", list.name);
+  const clean = String(name || "").trim().slice(0, 40);
+  if (!clean || clean === list.name) return;
+  list.name = clean;
+  persistWatchState();
+  renderWatchLists();
+}
+
+function deleteWatchList() {
+  const list = activeWatchList();
+  if (!list) return;
+  const count = list.symbols.length;
+  if (!window.confirm(`Delete list "${list.name}"${count ? ` (${count} symbols)` : ""}?`)) return;
+  watchLists = watchLists.filter((item) => item !== list);
+  activeWatchListId = watchLists[0]?.id || null;
+  persistWatchState();
+  renderWatchLists();
+}
+
+function selectWatchList(id) {
+  if (id === activeWatchListId || !watchLists.some((list) => list.id === id)) return;
+  activeWatchListId = id;
+  persistWatchState();
+  setWatchStatus("");
+  renderWatchLists();
+}
+
+function addWatchListSymbol(rawSymbol, { keepInput = false } = {}) {
+  const list = activeWatchList();
+  if (!list) {
+    setWatchStatus("Create a list first — New list");
+    return;
+  }
+  const symbol = String(rawSymbol || "").trim().toUpperCase();
+  if (!symbol) return;
+  if (!/^[A-Z0-9.\-=^]{1,24}$/.test(symbol)) {
+    setWatchStatus(`"${symbol}" is not a valid symbol`);
+    return;
+  }
+  if (list.symbols.includes(symbol)) {
+    setWatchStatus(`${symbol} is already in "${list.name}"`);
+    return;
+  }
+  if (list.symbols.length >= WATCH_LIST_MAX) {
+    setWatchStatus(`"${list.name}" is full (max ${WATCH_LIST_MAX})`);
+    return;
+  }
+  list.symbols.push(symbol);
+  persistWatchState();
+  setWatchStatus("");
+  if (!keepInput) watchAddInput.value = "";
+  renderWatchLists();
+}
+
+function removeWatchListSymbol(symbol) {
+  const list = activeWatchList();
+  if (!list) return;
+  list.symbols = list.symbols.filter((item) => item !== symbol);
+  persistWatchState();
+  setWatchStatus("");
+  renderWatchLists();
+}
+
+function renderWatchLists() {
+  if (watchView.hidden || watchMode !== "lists") return;
+  renderWatchListTabs();
+  renderWatchListBoard();
+  refreshWatchListQuotes();
+}
+
+function renderWatchListTabs() {
+  watchListTabs.hidden = !watchLists.length;
+  watchListRenameButton.hidden = !watchLists.length;
+  watchListDeleteButton.hidden = !watchLists.length;
+  watchListTabs.innerHTML = watchLists
+    .map((list) => {
+      const active = list.id === activeWatchListId;
+      return `<button type="button" data-list-id="${escapeHtml(list.id)}" class="${active ? "active" : ""}" aria-pressed="${active}">${escapeHtml(list.name)}<em>${list.symbols.length}</em></button>`;
+    })
+    .join("");
+}
+
+function watchListRowData(symbol) {
+  // Board symbols ride the live WS payload; everything else comes from the
+  // /api/quotes/lookup cache filled by refreshWatchListQuotes.
+  const asset = findAssetConfig(symbol);
+  if (asset?.quote && !asset.quote.error) {
+    return { name: asset.name || "", type: asset.type || "", quote: asset.quote };
+  }
+  const meta = watchListAssets.get(symbol) || {};
+  return {
+    name: asset?.name || meta.name || "",
+    type: asset?.type || meta.type || "",
+    quote: watchListQuotes.get(symbol) || null,
+  };
+}
+
+function watchListRow(symbol) {
+  const { name, type, quote } = watchListRowData(symbol);
+  const last = quote ? numericOrNull(displayQuoteValue(quote, "last")) : null;
+  const pct = quote ? numericOrNull(displayQuoteValue(quote, "change_pct")) : null;
+  const abs = quote ? numericOrNull(displayQuoteValue(quote, "change_abs")) : null;
+  const tone = pct === null ? "" : pct > 0 ? "positive" : pct < 0 ? "negative" : "";
+  const tag = WATCH_LIST_TYPE_TAGS[type] || "";
+  const stale = quote?.is_stale ? ' <em class="watch-list-stale" title="Last cached quote">◌</em>' : "";
+  const absText = abs === null ? "—" : `${abs > 0 ? "+" : ""}${formatPrice(abs)}`;
+  return `<tr data-list-symbol="${escapeHtml(symbol)}">
+    <td class="sym"><button type="button" class="watch-list-open" data-symbol="${escapeHtml(symbol)}" title="Open full ${escapeHtml(symbol)} chart"><strong>${escapeHtml(symbol)}</strong></button>${tag ? `<em class="watch-list-type">${tag}</em>` : ""}</td>
+    <td class="name">${escapeHtml(name)}${stale}</td>
+    <td class="num">${last === null ? '<span class="watch-list-missing">…</span>' : escapeHtml(formatPrice(last))}</td>
+    <td class="num ${tone}">${pct === null ? "—" : escapeHtml(formatSignedPct(pct))}</td>
+    <td class="num ${tone}">${escapeHtml(absText)}</td>
+    <td class="act"><button type="button" class="watch-list-remove" data-symbol="${escapeHtml(symbol)}" aria-label="Remove ${escapeHtml(symbol)} from list">&times;</button></td>
+  </tr>`;
+}
+
+function renderWatchListBoard() {
+  if (watchMode !== "lists") return;
+  const list = activeWatchList();
+  if (!list) {
+    watchListBoard.innerHTML =
+      '<div class="empty-state">Create your first list — hit "New list", name it (Crypto, AI stocks…), then add any symbols the board, Hyperliquid, or Yahoo knows</div>';
+    return;
+  }
+  if (!list.symbols.length) {
+    watchListBoard.innerHTML = `<div class="empty-state">"${escapeHtml(list.name)}" is empty — type a symbol above (SPY, BTC, NVDA, CL=F) or Browse the board sectors</div>`;
+    return;
+  }
+  const rows = list.symbols.map((symbol) => watchListRow(symbol)).join("");
+  watchListBoard.innerHTML = `<div class="watch-list-tablewrap"><table class="watch-list-table">
+    <thead><tr><th>Symbol</th><th>Name</th><th class="num">Last</th><th class="num">1D %</th><th class="num">1D Δ</th><th></th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>`;
+}
+
+async function refreshWatchListQuotes(force = false) {
+  const list = activeWatchList();
+  if (!list || !list.symbols.length) return;
+  const missing = list.symbols.filter((symbol) => {
+    const asset = findAssetConfig(symbol);
+    return !(asset?.quote && !asset.quote.error);
+  });
+  if (!missing.length) return;
+  if (
+    !force &&
+    Date.now() - watchListFetchedAt < WATCH_REFRESH_MS / 2 &&
+    missing.every((symbol) => watchListQuotes.has(symbol))
+  ) {
+    return;
+  }
+  const seq = ++watchListFetchSeq;
+  try {
+    const response = await fetch(
+      `/api/quotes/lookup?symbols=${encodeURIComponent(missing.join(","))}`,
+    );
+    if (!response.ok) throw new Error("lookup_failed");
+    const payload = await response.json();
+    if (seq !== watchListFetchSeq) return;
+    Object.entries(payload.quotes || {}).forEach(([symbol, quote]) => {
+      watchListQuotes.set(symbol, quote);
+    });
+    Object.entries(payload.assets || {}).forEach(([symbol, meta]) => {
+      if (!watchListAssets.has(symbol)) watchListAssets.set(symbol, meta);
+    });
+    watchListFetchedAt = Date.now();
+    renderWatchListBoard();
+  } catch (error) {
+    if (seq === watchListFetchSeq && missing.some((symbol) => !watchListQuotes.has(symbol))) {
+      setWatchStatus("Quote lookup failed — retrying on the next refresh");
+    }
+  }
 }
 
 // The chart modal's star: every Markets/tape/treemap row opens the modal,
@@ -1597,7 +1932,7 @@ function selectView(view) {
   if (activeView === "fringe") renderFringeView();
   if (activeView === "trends") renderTrendsView();
   if (activeView === "earnings") renderEarningsView();
-  if (activeView === "watch") renderWatchGrid();
+  if (activeView === "watch") renderWatchView();
   // The treemap sizes itself from board.clientWidth, which is 0 while the
   // markets view is hidden (a refresh landing on Daily still renders the
   // board): re-render on entry so the map lays out at the real width.
