@@ -19,7 +19,7 @@ from urllib.request import urlopen
 import pytest
 
 if TYPE_CHECKING:
-    from playwright.sync_api import Browser, Page
+    from playwright.sync_api import Browser, BrowserContext, Page
 
 
 E2E_ENABLED = bool(os.environ.get("RUN_PLAYWRIGHT") or os.environ.get("BOARD_E2E_BASE_URL"))
@@ -107,43 +107,47 @@ def browser() -> Iterator[Browser]:
             browser.close()
 
 
+# Silences the live WebSocket so route stubs fully control the data the page
+# sees; shared by the default page fixture and multi-context (multi-user)
+# tests that build their own pages.
+_QUIET_WS_SCRIPT = """
+(() => {
+  class QuietWebSocket {
+    static CONNECTING = 0;
+    static OPEN = 1;
+    static CLOSING = 2;
+    static CLOSED = 3;
+    constructor(url) {
+      this.url = url;
+      this.listeners = new Map();
+      window.__lastQuietWebSocket = this;
+      this.readyState = QuietWebSocket.CLOSED;
+    }
+    addEventListener(type, listener) {
+      if (!this.listeners.has(type)) this.listeners.set(type, []);
+      this.listeners.get(type).push(listener);
+    }
+    removeEventListener(type, listener) {
+      const listeners = this.listeners.get(type) || [];
+      this.listeners.set(type, listeners.filter((item) => item !== listener));
+    }
+    emit(type, event = {}) {
+      (this.listeners.get(type) || []).forEach((listener) => listener(event));
+    }
+    send() {}
+    close() { this.readyState = QuietWebSocket.CLOSED; }
+  }
+  window.WebSocket = QuietWebSocket;
+})();
+"""
+
+
 @pytest.fixture()
 def page(browser: Browser) -> Iterator[Page]:
     page = browser.new_page(viewport={"width": 1440, "height": 1100})
     page_errors: list[str] = []
     page.on("pageerror", lambda error: page_errors.append(str(error)))
-    page.add_init_script(
-        """
-        (() => {
-          class QuietWebSocket {
-            static CONNECTING = 0;
-            static OPEN = 1;
-            static CLOSING = 2;
-            static CLOSED = 3;
-            constructor(url) {
-              this.url = url;
-              this.listeners = new Map();
-              window.__lastQuietWebSocket = this;
-              this.readyState = QuietWebSocket.CLOSED;
-            }
-            addEventListener(type, listener) {
-              if (!this.listeners.has(type)) this.listeners.set(type, []);
-              this.listeners.get(type).push(listener);
-            }
-            removeEventListener(type, listener) {
-              const listeners = this.listeners.get(type) || [];
-              this.listeners.set(type, listeners.filter((item) => item !== listener));
-            }
-            emit(type, event = {}) {
-              (this.listeners.get(type) || []).forEach((listener) => listener(event));
-            }
-            send() {}
-            close() { this.readyState = QuietWebSocket.CLOSED; }
-          }
-          window.WebSocket = QuietWebSocket;
-        })();
-        """
-    )
+    page.add_init_script(_QUIET_WS_SCRIPT)
     _stub_board_apis(page)
     try:
         yield page
@@ -1773,6 +1777,58 @@ def test_watch_lists_mode_manages_named_screener_lists(page: Page, base_url: str
     # Charts mode is untouched by list membership.
     page.locator('#watch-mode button[data-mode="charts"]').click()
     expect(page.locator("#watch-grid .empty-state")).to_contain_text("Add up to 9 symbols")
+
+
+def test_watch_lists_are_private_per_browser_and_persist(browser: Browser, base_url: str) -> None:
+    """Lists live in the visitor's own browser (localStorage), never on the
+    server: a second visitor starts blank, builds their own lists, and each
+    visitor's next visit restores exactly their own lists."""
+
+    def open_watch_lists(context: BrowserContext) -> Page:
+        page = context.new_page()
+        page.add_init_script(_QUIET_WS_SCRIPT)
+        _stub_board_apis(page)
+        page.goto(f"{base_url}/#view=watch", wait_until="domcontentloaded")
+        page.locator('#watch-mode button[data-mode="lists"]').click()
+        return page
+
+    user_a = browser.new_context(viewport={"width": 1440, "height": 1100})
+    user_b = browser.new_context(viewport={"width": 1440, "height": 1100})
+    try:
+        page_a = open_watch_lists(user_a)
+        page_a.locator("#watch-list-new").click()
+        _dialog_prompt(page_a, "A Crypto")
+        page_a.locator("#watch-add").fill("SPY")
+        page_a.locator("#watch-add").press("Enter")
+        expect(page_a.locator(".watch-list-table tbody tr")).to_have_count(1)
+
+        # A different browser (user B) sees no trace of user A's lists.
+        page_b = open_watch_lists(user_b)
+        expect(page_b.locator("#watch-list-board .empty-state")).to_contain_text(
+            "Create your first list"
+        )
+        expect(page_b.locator("#watch-list-tabs button")).to_have_count(0)
+
+        # B builds their own list without affecting A.
+        page_b.locator("#watch-list-new").click()
+        _dialog_prompt(page_b, "B Stocks")
+        page_b.locator("#watch-add").fill("TSLA")
+        page_b.locator("#watch-add").press("Enter")
+        expect(page_b.locator(".watch-list-table tbody tr")).to_have_count(1)
+
+        # Each visitor's next visit restores exactly their own lists.
+        page_a.goto(f"{base_url}/?revisit=1#view=watch", wait_until="domcontentloaded")
+        expect(page_a.locator("#watch-list-tabs button.active")).to_contain_text("A Crypto")
+        expect(page_a.locator('.watch-list-table tr[data-list-symbol="SPY"]')).to_have_count(1)
+        expect(page_a.locator('.watch-list-table tr[data-list-symbol="TSLA"]')).to_have_count(0)
+
+        page_b.goto(f"{base_url}/?revisit=1#view=watch", wait_until="domcontentloaded")
+        expect(page_b.locator("#watch-list-tabs button.active")).to_contain_text("B Stocks")
+        expect(page_b.locator('.watch-list-table tr[data-list-symbol="TSLA"]')).to_have_count(1)
+        expect(page_b.locator('.watch-list-table tr[data-list-symbol="SPY"]')).to_have_count(0)
+    finally:
+        user_a.close()
+        user_b.close()
 
 
 def test_trends_tab_renders_group_bands_and_links_to_markets(page: Page, base_url: str) -> None:
