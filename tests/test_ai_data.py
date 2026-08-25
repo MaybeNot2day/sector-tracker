@@ -40,6 +40,7 @@ MODELS = [
             "output_modalities": ["text"],
         },
         "pricing": {"prompt": "0.000002", "completion": "0.000004"},
+        "benchmarks": {"artificial_analysis": {"intelligence_index": 55}},
     },
     {
         "id": "image/only",
@@ -127,6 +128,7 @@ async def test_token_index_prices_observed_mix_and_persists_history(tmp_path: Pa
         "index_price": 2.0,
         "open_price": 1.5,
         "proprietary_price": 3.0,
+        "frontier_price": 3.0,
         "total_tokens": 600,
         "priced_tokens": 600,
         "coverage_pct": 100.0,
@@ -206,6 +208,7 @@ async def test_new_catalog_model_automatically_joins_next_index_refresh(
         "index_price": 3.5,
         "open_price": 1.5,
         "proprietary_price": 4.5,
+        "frontier_price": 3.0,
         "total_tokens": 1200,
         "priced_tokens": 1200,
         "coverage_pct": 100.0,

@@ -18,6 +18,22 @@ from app import db
 MODELS_URL = "https://openrouter.ai/api/v1/models"
 RANKINGS_URL = "https://openrouter.ai/api/frontend/v1/rankings/models?view=week"
 REQUEST_TIMEOUT_SECONDS = 20.0
+# Frontier tier: proprietary models at the capability frontier. The main rule
+# is data-driven — an Artificial Analysis intelligence index of 45 or above —
+# because the leading labs' flagship model families (GPT, Claude Opus,
+# Gemini, Grok) score at least that high while cheap minis/lites stay out.
+# The explicit roots cover freshly shipped flagship variants (and "Pro"/"Fast"
+# editions of the current release) before their AA index row lands.
+FRONTIER_INTELLIGENCE_MIN = 45.0
+FRONTIER_EXTRA_PREFIXES = (
+    "openai/gpt-5.6-sol-pro",
+    "openai/gpt-5.6-terra-pro",
+    "openai/gpt-5.6-luna-pro",
+    "openai/gpt-5.5-pro",
+    "anthropic/claude-opus-latest",
+    "anthropic/claude-sonnet-latest",
+    "x-ai/grok-4.20",
+)
 _HEADERS = {
     "Accept": "application/json",
     "User-Agent": "SectorTracker/0.1 (+AI market dashboard)",
@@ -138,12 +154,17 @@ class AIDataService:
             segment = "open" if bool(model["is_open_weight"]) else "proprietary"
             bucket[f"{segment}_tokens"] += tokens
             bucket[f"{segment}_cost_usd"] += cost
+            is_frontier = _is_frontier(model)
+            if is_frontier:
+                bucket["frontier_tokens"] += tokens
+                bucket["frontier_cost_usd"] += cost
             detail_rows[day].append(
                 {
                     "id": model["id"],
                     "name": model["name"],
                     "provider": model["provider"],
                     "is_open_weight": model["is_open_weight"],
+                    "is_frontier": is_frontier,
                     "tokens": int(tokens),
                     "cost_usd": cost,
                     "effective_price": round(cost / tokens * 1_000_000, 4),
@@ -200,7 +221,10 @@ class AIDataService:
                     "tokenizer and are not standardized across providers. Open-weight is a "
                     "proxy based on a published Hugging Face ID. Proprietary is the "
                     "complement: every priced model without a published HF ID, not only "
-                    "Anthropic and OpenAI."
+                    "Anthropic and OpenAI. Frontier is the capability-leading subset of "
+                    "proprietary models — proprietary with an Artificial Analysis "
+                    "intelligence index of 45 or more, plus the newest flagship "
+                    "variants whose index row has not landed yet."
                 ),
                 "formula": (
                     "sum(prompt_tokens * input_price + completion_tokens * output_price) "
@@ -342,6 +366,8 @@ def _empty_index_bucket() -> dict[str, Any]:
         "open_cost_usd": 0.0,
         "proprietary_tokens": 0.0,
         "proprietary_cost_usd": 0.0,
+        "frontier_tokens": 0.0,
+        "frontier_cost_usd": 0.0,
         "model_ids": set(),
     }
 
@@ -353,6 +379,7 @@ def _index_point(day: str, bucket: dict[str, Any]) -> dict[str, object] | None:
         return None
     open_tokens = float(bucket["open_tokens"])
     proprietary_tokens = float(bucket["proprietary_tokens"])
+    frontier_tokens = float(bucket["frontier_tokens"])
     return {
         "date": day,
         "index_price": round(float(bucket["cost_usd"]) / priced_tokens * 1_000_000, 4),
@@ -366,12 +393,28 @@ def _index_point(day: str, bucket: dict[str, Any]) -> dict[str, object] | None:
             if proprietary_tokens > 0
             else None
         ),
+        "frontier_price": (
+            round(float(bucket["frontier_cost_usd"]) / frontier_tokens * 1_000_000, 4)
+            if frontier_tokens > 0
+            else None
+        ),
         "total_tokens": int(total_tokens),
         "priced_tokens": int(priced_tokens),
         "coverage_pct": round(priced_tokens / total_tokens * 100, 2),
         "open_share_pct": round(open_tokens / priced_tokens * 100, 2),
         "model_count": len(bucket["model_ids"]),
     }
+
+
+def _is_frontier(model: dict[str, Any]) -> bool:
+    """Whether a normalized model belongs to the proprietary capability frontier."""
+    if bool(model["is_open_weight"]):
+        return False
+    intelligence = _finite_number(model.get("intelligence_index"))
+    if intelligence is not None:
+        return intelligence >= FRONTIER_INTELLIGENCE_MIN
+    slug = str(model.get("canonical_slug") or model.get("id") or "")
+    return slug.startswith(FRONTIER_EXTRA_PREFIXES)
 
 
 def _finite_number(value: object) -> float | None:

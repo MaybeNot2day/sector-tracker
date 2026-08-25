@@ -356,11 +356,15 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
     page.locator("#ai-token-index-tab").click()
     expect(page.locator("#ai-token-index-panel")).to_be_visible()
     expect(page.locator("#ai-models-panel")).to_be_hidden()
-    expect(page.locator("#ai-index-board .ai-metric")).to_have_count(6)
-    proprietary_metric = page.locator("#ai-index-board .ai-metric").nth(1)
+    expect(page.locator("#ai-index-board .ai-metric")).to_have_count(7)
+    frontier_metric = page.locator("#ai-index-board .ai-metric").nth(1)
+    expect(frontier_metric).to_contain_text("Frontier price")
+    expect(frontier_metric).to_contain_text("$3.2")
+    proprietary_metric = page.locator("#ai-index-board .ai-metric").nth(2)
     expect(proprietary_metric).to_contain_text("Proprietary price")
     expect(proprietary_metric).to_contain_text("$3")
     expect(page.locator("#ai-index-board .series-main")).to_be_visible()
+    expect(page.locator("#ai-index-board .series-frontier")).to_be_visible()
     chart_box = page.locator("#ai-index-board .ai-index-chart").bounding_box()
     assert chart_box is not None
     assert chart_box["height"] >= 300
@@ -2007,6 +2011,7 @@ AI_TOKEN_INDEX_PAYLOAD: dict[str, Any] = {
         "index_price": 2.0,
         "open_price": 1.5,
         "proprietary_price": 3.0,
+        "frontier_price": 3.2,
         "total_tokens": 600,
         "priced_tokens": 600,
         "coverage_pct": 100.0,
@@ -2019,12 +2024,14 @@ AI_TOKEN_INDEX_PAYLOAD: dict[str, Any] = {
             "index_price": 2.2,
             "open_price": 1.7,
             "proprietary_price": 3.1,
+            "frontier_price": 3.4,
         },
         {
             "date": "2026-08-18",
             "index_price": 2.0,
             "open_price": 1.5,
             "proprietary_price": 3.0,
+            "frontier_price": 3.2,
         },
     ],
     "top_models": [

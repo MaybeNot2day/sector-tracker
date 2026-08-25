@@ -7289,6 +7289,11 @@ function renderAiTokenIndex() {
   const metrics = [
     aiMetric("Token price index", formatAiPrice(latest.index_price), "USD / 1M matched tokens"),
     aiMetric(
+      "Frontier price",
+      formatAiPrice(latest.frontier_price),
+      "capability-leading proprietary",
+    ),
+    aiMetric(
       "Proprietary price",
       formatAiPrice(latest.proprietary_price),
       "no published HF ID",
@@ -7321,6 +7326,7 @@ function renderAiTokenIndex() {
           <span><i class="main"></i>Broad</span>
           <span><i class="open"></i>Open-weight</span>
           <span><i class="proprietary"></i>Proprietary</span>
+          <span><i class="frontier"></i>Frontier</span>
         </div>
       </section>
       <section class="ai-index-side">
@@ -7344,7 +7350,7 @@ function renderAiTokenIndex() {
 function aiIndexChart(series) {
   const rows = series.slice(-90);
   if (!rows.length) return '<div class="empty-state">No index history yet</div>';
-  const keys = ["index_price", "open_price", "proprietary_price"];
+  const keys = ["index_price", "open_price", "proprietary_price", "frontier_price"];
   const values = rows.flatMap((row) => keys.map((key) => Number(row[key])).filter(Number.isFinite));
   if (!values.length) return '<div class="empty-state">No priced observations</div>';
   const width = 760;
@@ -7380,6 +7386,7 @@ function aiIndexChart(series) {
     <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
       ${grid}
       <polyline class="series-proprietary" points="${points("proprietary_price")}" />
+      <polyline class="series-frontier" points="${points("frontier_price")}" />
       <polyline class="series-open" points="${points("open_price")}" />
       <polyline class="series-main" points="${points("index_price")}" />
       <text x="${pad.left}" y="${height - 7}">${firstDate}</text>
