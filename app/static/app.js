@@ -3414,24 +3414,30 @@ function renderNewsMap() {
   renderNewsClusterPanel(activeVisible ? activeNewsClusterId : null);
 }
 
+function newsClusterAreaWeight(cluster) {
+  return Math.log1p(Math.max(Number(cluster.count) || 0, 1));
+}
+
 function layoutNewsTiles(clusters, x, y, width, height) {
   if (!clusters.length) return [];
   if (clusters.length === 1) return [{ cluster: clusters[0], x, y, width, height }];
-  const total = clusters.reduce((sum, cluster) => sum + cluster.count, 0);
+  const total = clusters.reduce((sum, cluster) => sum + newsClusterAreaWeight(cluster), 0);
   let midpoint = clusters.length - 1;
   let bestDifference = Number.POSITIVE_INFINITY;
   let leftTotal = 0;
+  let bestLeftTotal = 0;
   for (let index = 0; index < clusters.length - 1; index += 1) {
-    leftTotal += clusters[index].count;
+    leftTotal += newsClusterAreaWeight(clusters[index]);
     const difference = Math.abs(total - leftTotal * 2);
     if (difference < bestDifference) {
       bestDifference = difference;
       midpoint = index + 1;
+      bestLeftTotal = leftTotal;
     }
   }
   const left = clusters.slice(0, midpoint);
   const right = clusters.slice(midpoint);
-  const share = leftTotal / Math.max(total, 1);
+  const share = bestLeftTotal / Math.max(total, 1);
   if (width >= height) {
     const leftWidth = Math.max(width * share, 1);
     return [
@@ -7802,6 +7808,11 @@ function renderAiTokenIndex() {
       formatAiPrice(latest.proprietary_price),
       "no published HF ID",
     ),
+    aiMetric(
+      "China price index",
+      formatAiPrice(latest.china_price),
+      "mainland-China model creators",
+    ),
     aiMetric("Matched usage", formatAiCompact(latest.priced_tokens), "prompt + completion"),
     aiMetric("Price coverage", `${Number(latest.coverage_pct).toFixed(1)}%`, "of ranked tokens"),
     aiMetric("Open-weight share", `${Number(latest.open_share_pct).toFixed(1)}%`, "HF ID proxy"),
@@ -7831,6 +7842,7 @@ function renderAiTokenIndex() {
           <span><i class="open"></i>Open-weight</span>
           <span><i class="proprietary"></i>Proprietary</span>
           <span><i class="frontier"></i>Frontier</span>
+          <span><i class="china"></i>China</span>
         </div>
       </section>
       <section class="ai-index-side">
@@ -7854,7 +7866,7 @@ function renderAiTokenIndex() {
 function aiIndexChart(series) {
   const rows = series.slice(-90);
   if (!rows.length) return '<div class="empty-state">No index history yet</div>';
-  const keys = ["index_price", "open_price", "proprietary_price", "frontier_price"];
+  const keys = ["index_price", "open_price", "proprietary_price", "frontier_price", "china_price"];
   const values = rows.flatMap((row) => keys.map((key) => Number(row[key])).filter(Number.isFinite));
   if (!values.length) return '<div class="empty-state">No priced observations</div>';
   const width = 760;
@@ -7890,6 +7902,7 @@ function aiIndexChart(series) {
     <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
       ${grid}
       <polyline class="series-proprietary" points="${points("proprietary_price")}" />
+      <polyline class="series-china" points="${points("china_price")}" />
       <polyline class="series-frontier" points="${points("frontier_price")}" />
       <polyline class="series-open" points="${points("open_price")}" />
       <polyline class="series-main" points="${points("index_price")}" />

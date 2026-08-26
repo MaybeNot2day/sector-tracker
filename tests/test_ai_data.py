@@ -129,6 +129,7 @@ async def test_token_index_prices_observed_mix_and_persists_history(tmp_path: Pa
         "open_price": 1.5,
         "proprietary_price": 3.0,
         "frontier_price": 3.0,
+        "china_price": None,
         "total_tokens": 600,
         "priced_tokens": 600,
         "coverage_pct": 100.0,
@@ -148,6 +149,56 @@ async def test_token_index_prices_observed_mix_and_persists_history(tmp_path: Pa
     with sqlite3.connect(tmp_path / "board.sqlite3") as conn:
         assert conn.execute("SELECT COUNT(*) FROM ai_token_index").fetchone() == (2,)
 
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_token_index_prices_only_chinese_model_creators(tmp_path: Path) -> None:
+    models = [
+        {
+            "id": "qwen/qwen-test",
+            "canonical_slug": "qwen/qwen-test",
+            "name": "Qwen: Test",
+            "architecture": {"modality": "text->text", "output_modalities": ["text"]},
+            "pricing": {"prompt": "0.000001", "completion": "0.000003"},
+        },
+        {
+            "id": "openai/gpt-test",
+            "canonical_slug": "openai/gpt-test",
+            "name": "OpenAI: Test",
+            "architecture": {"modality": "text->text", "output_modalities": ["text"]},
+            "pricing": {"prompt": "0.000005", "completion": "0.000005"},
+        },
+    ]
+    rankings = [
+        {
+            "date": "2026-08-18 00:00:00",
+            "model_permaslug": model["id"],
+            "variant_permaslug": model["id"],
+            "total_prompt_tokens": 100,
+            "total_completion_tokens": 100,
+        }
+        for model in models
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/models":
+            return httpx.Response(200, json={"data": models})
+        if request.url.path == "/api/frontend/v1/rankings/models":
+            return httpx.Response(200, json={"data": rankings})
+        return httpx.Response(404)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = AIDataService(tmp_path / "board.sqlite3", client=client)
+
+    payload = await service.get_token_index()
+    latest = cast(dict[str, Any], payload["latest"])
+    methodology = cast(dict[str, Any], payload["methodology"])
+
+    assert latest["index_price"] == 3.5
+    assert latest["china_price"] == 2.0
+    assert "qwen" in methodology["china_provider_prefixes"]
+    assert "openai" not in methodology["china_provider_prefixes"]
     await client.aclose()
 
 
@@ -209,6 +260,7 @@ async def test_new_catalog_model_automatically_joins_next_index_refresh(
         "open_price": 1.5,
         "proprietary_price": 4.5,
         "frontier_price": 3.0,
+        "china_price": None,
         "total_tokens": 1200,
         "priced_tokens": 1200,
         "coverage_pct": 100.0,

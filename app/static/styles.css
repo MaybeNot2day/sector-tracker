@@ -6674,6 +6674,12 @@ a.key-date-row:focus-visible {
   stroke-width: 1.8;
   stroke-dasharray: 5 3;
 }
+.ai-index-chart .series-china {
+  fill: none;
+  stroke: var(--chart-ma-20);
+  stroke-width: 1.6;
+}
+
 
 .ai-index-chart text {
   fill: var(--chart-text);
@@ -6701,6 +6707,7 @@ a.key-date-row:focus-visible {
 .ai-index-legend .open { background: var(--green); }
 .ai-index-legend .proprietary { background: var(--chart-ma-50); }
 .ai-index-legend .frontier { background: var(--chart-ma-200); }
+.ai-index-legend .china { background: var(--chart-ma-20); }
 
 .ai-index-side {
   min-width: 0;

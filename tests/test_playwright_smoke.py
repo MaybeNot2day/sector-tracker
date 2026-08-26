@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import re
 import socket
@@ -335,15 +336,19 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
     page.locator("#ai-token-index-tab").click()
     expect(page.locator("#ai-token-index-panel")).to_be_visible()
     expect(page.locator("#ai-models-panel")).to_be_hidden()
-    expect(page.locator("#ai-index-board .ai-metric")).to_have_count(7)
+    expect(page.locator("#ai-index-board .ai-metric")).to_have_count(8)
     frontier_metric = page.locator("#ai-index-board .ai-metric").nth(1)
     expect(frontier_metric).to_contain_text("Frontier price")
     expect(frontier_metric).to_contain_text("$3.2")
     proprietary_metric = page.locator("#ai-index-board .ai-metric").nth(2)
     expect(proprietary_metric).to_contain_text("Proprietary price")
     expect(proprietary_metric).to_contain_text("$3")
+    china_metric = page.locator("#ai-index-board .ai-metric").nth(3)
+    expect(china_metric).to_contain_text("China price index")
+    expect(china_metric).to_contain_text("$1.8")
     expect(page.locator("#ai-index-board .series-main")).to_be_visible()
     expect(page.locator("#ai-index-board .series-frontier")).to_be_visible()
+    expect(page.locator("#ai-index-board .series-china")).to_be_visible()
     chart_box = page.locator("#ai-index-board .ai-index-chart").bounding_box()
     assert chart_box is not None
     assert chart_box["height"] >= 300
@@ -972,6 +977,14 @@ def test_news_semantic_map_tiles_and_cluster_drilldown(
             "link": "https://example.com/alpha/2",
             "text": "Nvidia reports record quarterly revenue",
         },
+        {
+            "id": "beta/2",
+            "channel": "beta",
+            "channel_title": "Beta",
+            "timestamp": "2026-08-20T12:01:30+00:00",
+            "link": "https://example.com/beta/2",
+            "text": "Treasury yields move after auction",
+        },
     ]
     feed_payload = {
         "updated_at": _iso(),
@@ -987,11 +1000,21 @@ def test_news_semantic_map_tiles_and_cluster_drilldown(
                 "id": "abcdef012345",
                 "label": "FED / Cuts",
                 "item_ids": ["alpha/1", "beta/1"],
-                "count": 2,
+                "count": 100,
                 "channels": 2,
                 "first_seen": "2026-08-20T12:00:00+00:00",
                 "latest_seen": "2026-08-20T12:01:00+00:00",
                 "sample": "Fed cuts interest rates by 25bp",
+            },
+            {
+                "id": "fedcba654321",
+                "label": "Treasury / Yields",
+                "item_ids": ["beta/2"],
+                "count": 10,
+                "channels": 1,
+                "first_seen": "2026-08-20T12:01:30+00:00",
+                "latest_seen": "2026-08-20T12:01:30+00:00",
+                "sample": "Treasury yields move after auction",
             },
             {
                 "id": "123456abcdef",
@@ -1013,13 +1036,20 @@ def test_news_semantic_map_tiles_and_cluster_drilldown(
 
     tiles = page.locator(".news-map-tile")
     expect(page.locator("#news-map-modal")).to_be_visible()
-    expect(tiles).to_have_count(2)
+    expect(tiles).to_have_count(3)
     expect(tiles.filter(has_text="FED / Cuts")).to_have_count(1)
     # The modal is fullscreen: tiles must be large enough to click comfortably.
     first_tile = tiles.filter(has_text="FED / Cuts").first
     box = first_tile.bounding_box()
     assert box is not None
     assert box["width"] >= 200 and box["height"] >= 80
+    singleton_tile = tiles.filter(has_text="Nvidia Reports Record Quarterly Revenue").first
+    singleton_box = singleton_tile.bounding_box()
+    assert singleton_box is not None
+    area_ratio = (box["width"] * box["height"]) / (
+        singleton_box["width"] * singleton_box["height"]
+    )
+    assert area_ratio == pytest.approx(math.log1p(100) / math.log1p(1), rel=0.02)
 
     first_tile.click()
     expect(page.locator("#news-cluster-title")).to_have_text("FED / Cuts")
@@ -2161,6 +2191,7 @@ AI_TOKEN_INDEX_PAYLOAD: dict[str, Any] = {
         "open_price": 1.5,
         "proprietary_price": 3.0,
         "frontier_price": 3.2,
+        "china_price": 1.8,
         "total_tokens": 600,
         "priced_tokens": 600,
         "coverage_pct": 100.0,
@@ -2174,6 +2205,7 @@ AI_TOKEN_INDEX_PAYLOAD: dict[str, Any] = {
             "open_price": 1.7,
             "proprietary_price": 3.1,
             "frontier_price": 3.4,
+            "china_price": 2.0,
         },
         {
             "date": "2026-08-18",
@@ -2181,6 +2213,7 @@ AI_TOKEN_INDEX_PAYLOAD: dict[str, Any] = {
             "open_price": 1.5,
             "proprietary_price": 3.0,
             "frontier_price": 3.2,
+            "china_price": 1.8,
         },
     ],
     "top_models": [

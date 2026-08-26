@@ -34,6 +34,25 @@ FRONTIER_EXTRA_PREFIXES = (
     "anthropic/claude-sonnet-latest",
     "x-ai/grok-4.20",
 )
+CHINA_MODEL_PROVIDER_PREFIXES = frozenset(
+    {
+        "baidu",
+        "bytedance",
+        "bytedance-seed",
+        "deepseek",
+        "dots-studio",
+        "inclusionai",
+        "kwaipilot",
+        "meituan",
+        "minimax",
+        "moonshotai",
+        "qwen",
+        "stepfun",
+        "tencent",
+        "xiaomi",
+        "z-ai",
+    }
+)
 _HEADERS = {
     "Accept": "application/json",
     "User-Agent": "SectorTracker/0.1 (+AI market dashboard)",
@@ -158,6 +177,10 @@ class AIDataService:
             if is_frontier:
                 bucket["frontier_tokens"] += tokens
                 bucket["frontier_cost_usd"] += cost
+            is_china = _is_china_model(model)
+            if is_china:
+                bucket["china_tokens"] += tokens
+                bucket["china_cost_usd"] += cost
             detail_rows[day].append(
                 {
                     "id": model["id"],
@@ -165,6 +188,7 @@ class AIDataService:
                     "provider": model["provider"],
                     "is_open_weight": model["is_open_weight"],
                     "is_frontier": is_frontier,
+                    "is_china": is_china,
                     "tokens": int(tokens),
                     "cost_usd": cost,
                     "effective_price": round(cost / tokens * 1_000_000, 4),
@@ -224,7 +248,8 @@ class AIDataService:
                     "Anthropic and OpenAI. Frontier is the capability-leading subset of "
                     "proprietary models — proprietary with an Artificial Analysis "
                     "intelligence index of 45 or more, plus the newest flagship "
-                    "variants whose index row has not landed yet."
+                    "variants whose index row has not landed yet. The China index includes "
+                    "only models from an explicit list of mainland-China model creators."
                 ),
                 "formula": (
                     "sum(prompt_tokens * input_price + completion_tokens * output_price) "
@@ -235,6 +260,7 @@ class AIDataService:
                     "text pricing joins automatically on refresh."
                 ),
                 "open_weight_proxy": True,
+                "china_provider_prefixes": sorted(CHINA_MODEL_PROVIDER_PREFIXES),
             },
             "latest": latest_live,
             "series": series,
@@ -368,6 +394,8 @@ def _empty_index_bucket() -> dict[str, Any]:
         "proprietary_cost_usd": 0.0,
         "frontier_tokens": 0.0,
         "frontier_cost_usd": 0.0,
+        "china_tokens": 0.0,
+        "china_cost_usd": 0.0,
         "model_ids": set(),
     }
 
@@ -380,6 +408,7 @@ def _index_point(day: str, bucket: dict[str, Any]) -> dict[str, object] | None:
     open_tokens = float(bucket["open_tokens"])
     proprietary_tokens = float(bucket["proprietary_tokens"])
     frontier_tokens = float(bucket["frontier_tokens"])
+    china_tokens = float(bucket["china_tokens"])
     return {
         "date": day,
         "index_price": round(float(bucket["cost_usd"]) / priced_tokens * 1_000_000, 4),
@@ -396,6 +425,11 @@ def _index_point(day: str, bucket: dict[str, Any]) -> dict[str, object] | None:
         "frontier_price": (
             round(float(bucket["frontier_cost_usd"]) / frontier_tokens * 1_000_000, 4)
             if frontier_tokens > 0
+            else None
+        ),
+        "china_price": (
+            round(float(bucket["china_cost_usd"]) / china_tokens * 1_000_000, 4)
+            if china_tokens > 0
             else None
         ),
         "total_tokens": int(total_tokens),
@@ -415,6 +449,13 @@ def _is_frontier(model: dict[str, Any]) -> bool:
         return intelligence >= FRONTIER_INTELLIGENCE_MIN
     slug = str(model.get("canonical_slug") or model.get("id") or "")
     return slug.startswith(FRONTIER_EXTRA_PREFIXES)
+
+
+def _is_china_model(model: dict[str, Any]) -> bool:
+    """Whether the model creator is based in mainland China."""
+    slug = str(model.get("id") or model.get("canonical_slug") or "")
+    provider_prefix = slug.partition("/")[0].removeprefix("~")
+    return provider_prefix in CHINA_MODEL_PROVIDER_PREFIXES
 
 
 def _finite_number(value: object) -> float | None:

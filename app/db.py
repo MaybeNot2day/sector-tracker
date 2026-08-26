@@ -174,6 +174,7 @@ CREATE TABLE IF NOT EXISTS ai_token_index (
     open_price REAL,
     proprietary_price REAL,
     frontier_price REAL,
+    china_price REAL,
     total_tokens INTEGER NOT NULL,
     priced_tokens INTEGER NOT NULL,
     coverage_pct REAL NOT NULL,
@@ -287,6 +288,7 @@ def init_db(path: Path) -> None:
             _seed_key_date_sources(conn)
             _quarantine_invalid_bars(conn)
             _ensure_column(conn, "ai_token_index", "frontier_price", "REAL")
+            _ensure_column(conn, "ai_token_index", "china_price", "REAL")
         _initialized_paths.add(resolved)
 
 
@@ -1650,6 +1652,7 @@ def save_ai_token_index_points(
             point.get("open_price"),
             point.get("proprietary_price"),
             point.get("frontier_price"),
+            point.get("china_price"),
             int(cast(int, point["total_tokens"])),
             int(cast(int, point["priced_tokens"])),
             float(cast(float, point["coverage_pct"])),
@@ -1664,14 +1667,15 @@ def save_ai_token_index_points(
             """
             INSERT INTO ai_token_index (
                 index_date, index_price, open_price, proprietary_price,
-                frontier_price, total_tokens, priced_tokens, coverage_pct,
-                open_share_pct, model_count, fetched_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                frontier_price, china_price, total_tokens, priced_tokens,
+                coverage_pct, open_share_pct, model_count, fetched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(index_date) DO UPDATE SET
                 index_price = excluded.index_price,
                 open_price = excluded.open_price,
                 proprietary_price = excluded.proprietary_price,
                 frontier_price = excluded.frontier_price,
+                china_price = excluded.china_price,
                 total_tokens = excluded.total_tokens,
                 priced_tokens = excluded.priced_tokens,
                 coverage_pct = excluded.coverage_pct,
@@ -1690,8 +1694,8 @@ def load_ai_token_index_points(path: Path, limit: int) -> list[dict[str, object]
         rows = conn.execute(
             """
             SELECT index_date, index_price, open_price, proprietary_price,
-                   frontier_price, total_tokens, priced_tokens, coverage_pct,
-                   open_share_pct, model_count
+                   frontier_price, china_price, total_tokens, priced_tokens,
+                   coverage_pct, open_share_pct, model_count
             FROM ai_token_index
             ORDER BY index_date DESC
             LIMIT ?
@@ -1705,6 +1709,7 @@ def load_ai_token_index_points(path: Path, limit: int) -> list[dict[str, object]
             "open_price": _optional_float(row["open_price"]),
             "proprietary_price": _optional_float(row["proprietary_price"]),
             "frontier_price": _optional_float(row["frontier_price"]),
+            "china_price": _optional_float(row["china_price"]),
             "total_tokens": int(row["total_tokens"]),
             "priced_tokens": int(row["priced_tokens"]),
             "coverage_pct": float(row["coverage_pct"]),
