@@ -166,9 +166,19 @@ def test_daily_board_loads_without_page_errors_and_renders_core_sections(
     _goto_board(page, base_url)
 
     expect(page.locator("#daily-view")).to_be_visible()
-    expect(page.locator("#status-strip")).to_be_visible()
+    # The permanent SYSTEM strip collapses once the feed is live; its
+    # telemetry rides on the LIVE pill (title + click popover) instead.
+    expect(page.locator("#status-strip")).to_be_hidden()
     expect(page.locator("#feed-mode")).to_contain_text(re.compile(r"WS Live|Poll 10s"))
     expect(page.locator("#live-freshness")).to_contain_text("Updated")
+    telemetry_pop = page.locator("#telemetry-pop")
+    expect(telemetry_pop).to_be_hidden()
+    page.locator("#live-badge").click()
+    expect(telemetry_pop).to_be_visible()
+    expect(telemetry_pop).to_contain_text("Quoted")
+    expect(telemetry_pop).to_contain_text("3/3")
+    page.keyboard.press("Escape")
+    expect(telemetry_pop).to_be_hidden()
     expect(page.locator("#daily-board").get_by_role("heading", name="Benchmarks")).to_be_visible()
     expect(
         page.locator("#daily-board").get_by_role("heading", name="Dominant Themes")
@@ -193,41 +203,6 @@ def test_daily_board_loads_without_page_errors_and_renders_core_sections(
     theme_rows = page.locator("#daily-board .theme-table tbody tr")
     expect(theme_rows.nth(0)).to_be_visible()
     assert theme_rows.count() >= 1
-
-    # Key Dates enrichment: one released print (figures + HIGH chip + neutral
-    # delta), one pending (ACT em dash), one non-macro event with release null.
-    key_date_rows = page.locator("#daily-board .key-date-row")
-    expect(key_date_rows).to_have_count(3)
-    cpi_row = key_date_rows.nth(0)
-    expect(cpi_row.locator(".key-date-figures")).to_have_text(
-        "EST -0.1% · PREV 1% · ACT -0.2% -0.10"
-    )
-    expect(cpi_row.locator(".key-tag-high")).to_have_text("HIGH")
-    expect(cpi_row.locator(".key-date-main > span:not(.key-date-figures)")).to_have_text(
-        "today · 14:30 CET · US · Consumer Price Index MoM"
-    )
-    expect(cpi_row).to_have_attribute(
-        "title", re.compile(r"Consumer Price Index.*Data source: U\.S\. Bureau")
-    )
-    expect(cpi_row).to_have_attribute(
-        "href", "https://www.tradingview.com/symbols/ECONOMICS-USCPI/"
-    )
-    expect(key_date_rows.nth(1).locator(".key-date-figures")).to_have_text(
-        "EST 0.3% · PREV 0.4% · ACT —"
-    )
-    expect(key_date_rows.nth(2).locator(".key-date-figures")).to_have_count(0)
-    # Unmatched events and enriched releases without a verified series URL
-    # remain plain rows. A generic calendar page is not evidence for the event.
-    assert key_date_rows.nth(1).evaluate("row => row.tagName") == "DIV"
-    assert key_date_rows.nth(1).get_attribute("href") is None
-    assert key_date_rows.nth(2).evaluate("row => row.tagName") == "DIV"
-    assert key_date_rows.nth(2).get_attribute("href") is None
-    # The pending future print ticks a countdown chip; released and untimed
-    # rows stay clean (a passed instant renders no timer).
-    countdown = key_date_rows.nth(1).locator(".key-date-countdown")
-    expect(countdown).to_have_text(re.compile(r"^in 1h 3[0-5]m$"))
-    expect(cpi_row.locator(".key-date-countdown")).to_have_count(0)
-    expect(key_date_rows.nth(2).locator(".key-date-countdown")).to_have_count(0)
 
     # The compact ribbon excludes today's already-released CPI, then surfaces
     # the next two actionable events without duplicating the full calendar.
@@ -528,9 +503,9 @@ def test_theme_toggle_persists_light_mode(page: Page, base_url: str) -> None:
     )
     assert colors == {
         "scheme": "light",
-        "body": "rgb(243, 244, 242)",
+        "body": "rgb(245, 242, 236)",
         "panel": "rgb(255, 255, 255)",
-        "text": "rgb(32, 36, 42)",
+        "text": "rgb(36, 33, 27)",
         "stored": "light",
     }
 
@@ -604,7 +579,11 @@ def test_equity_chart_renders_options_snapshot_and_controls(page: Page, base_url
     panel.locator('[data-options-mode="oi"]').click()
     expect(panel.locator('[data-options-mode="oi"]')).to_have_attribute("aria-pressed", "true")
     expect(panel.locator(".options-profile-chart.oi")).to_be_visible()
-    expect(panel.locator(".options-oi-bar")).to_have_count(6)
+    # OI mode draws one call and one put bar per stubbed strike (3 strikes).
+    oi_bars = panel.locator(".options-profile-chart.oi .options-profile-bars")
+    expect(oi_bars).to_have_count(3)
+    expect(oi_bars.locator("rect.call")).to_have_count(3)
+    expect(oi_bars.locator("rect.put")).to_have_count(3)
 
 
 def test_market_map_toggle_renders_treemap_and_opens_charts(page: Page, base_url: str) -> None:
@@ -1150,7 +1129,7 @@ def test_daily_board_rebuild_preserves_page_scroll(page: Page, base_url: str) ->
     assert result["after"] == result["before"]
 
 
-@pytest.mark.parametrize("selector", [".key-dates-list", ".fringe-scroll"])
+@pytest.mark.parametrize("selector", [".fringe-scroll"])
 def test_daily_board_inner_panels_chain_upward_wheel_to_page(
     page: Page, base_url: str, selector: str
 ) -> None:
@@ -1527,22 +1506,31 @@ def test_mobile_fringe_cards_prioritize_full_thesis_and_touch_targets(
     assert page.evaluate("() => document.documentElement.scrollWidth") == 390
 
 
-def test_benchmark_grid_uses_balanced_explicit_columns(
+def test_benchmark_table_renders_one_actionable_row_per_symbol(
     page: Page,
     base_url: str,
 ) -> None:
     _goto_board(page, base_url)
-    grid = page.locator(".benchmark-grid")
-    expect(grid.locator(".benchmark-card")).to_have_count(2)
-    column_tracks = grid.evaluate(
-        "(node) => getComputedStyle(node).gridTemplateColumns.split(' ').filter(Boolean)"
+    table = page.locator("#daily-board .benchmark-table")
+    expect(table).to_have_count(1)
+    expect(table.locator("thead th")).to_have_count(6)
+    rows = table.locator("tbody tr.benchmark-card")
+    expect(rows).to_have_count(2)
+    expect(rows.nth(0).locator("td")).to_have_count(6)
+    # Rows stay keyboard-activatable chart openers, and numeric columns keep
+    # the mono right-aligned layout the table replaced the card wall for.
+    expect(rows.nth(0)).to_have_attribute("role", "button")
+    expect(rows.nth(0)).to_have_attribute("tabindex", "0")
+    alignments = table.evaluate(
+        """table => Array.from(table.querySelectorAll('tbody tr:first-child td.num'))
+          .map(cell => getComputedStyle(cell).textAlign)"""
     )
-    assert len(column_tracks) == 3
+    assert alignments and set(alignments) == {"right"}
 
 
 def _goto_board(page: Page, base_url: str, fragment: str = "") -> None:
     page.goto(f"{base_url.rstrip('/')}/{fragment}", wait_until="domcontentloaded")
-    expect(page.locator("#status-copy")).to_contain_text("QUOTED", timeout=10_000)
+    expect(page.locator("#status-copy")).to_contain_text("Quoted", timeout=10_000)
 
 
 def _expect_chart_canvas_content(page: Page) -> None:
@@ -1988,7 +1976,11 @@ def test_malformed_websocket_frame_is_dropped_without_breaking_live_view(
 
     assert emitted is True
     expect(page.locator("#daily-view")).to_be_visible()
-    expect(page.locator("#status-strip")).to_be_visible()
+    # The strip only surfaces while connecting or on error; a dropped frame
+    # must leave the live board collapsed-strip state untouched.
+    expect(page.locator("#status-strip")).to_be_hidden()
+    expect(page.locator("#status-strip")).not_to_have_class(re.compile(r"\berror\b"))
+    expect(page.locator("#feed-mode")).to_contain_text(re.compile(r"WS Live|Poll 10s"))
 
 
 def test_trends_late_response_cannot_replace_newer_range_and_offline_keeps_grid(
@@ -2095,8 +2087,12 @@ def test_untrusted_external_urls_never_become_clickable_links(
     page.route("**/api/component-trends", lambda route: _fulfill_json(route, components))
 
     _goto_board(page, base_url)
-    unsafe_key_date = page.locator("#daily-board div.key-date-row").first
-    expect(unsafe_key_date).to_be_visible()
+    # Key dates now surface only on the catalyst ribbon, which renders plain
+    # text: the poisoned series_url must never materialize as an anchor.
+    catalyst_strip = page.locator("#catalyst-strip")
+    expect(catalyst_strip).to_be_visible()
+    expect(catalyst_strip.locator(".catalyst-item").first).to_be_visible()
+    expect(catalyst_strip.locator("a")).to_have_count(0)
 
     page.locator("#news-toggle").click()
     unsafe_news = page.locator("#news-list .news-item").first
