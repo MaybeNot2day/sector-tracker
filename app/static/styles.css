@@ -4050,8 +4050,8 @@ a.key-date-row:focus-visible {
   content: " ↑";
 }
 
-.group-title span,
-.asset-row span {
+.group-title > span,
+.asset-row > span {
   min-width: 0;
   overflow: hidden;
   padding: 7px 9px;
@@ -4059,8 +4059,8 @@ a.key-date-row:focus-visible {
   white-space: nowrap;
 }
 
-.group-title span:not(:first-child),
-.asset-row span:not(:first-child) {
+.group-title > span:not(:first-child),
+.asset-row > span:not(:first-child) {
   text-align: right;
 }
 
@@ -4144,6 +4144,20 @@ a.key-date-row:focus-visible {
   text-transform: uppercase;
   white-space: normal;
 }
+.group-panel:not(.tape-panel) .asset-row > span {
+  padding-block: 4px;
+}
+
+.group-panel:not(.tape-panel) .symbol-cell {
+  gap: 0;
+}
+
+.group-panel:not(.tape-panel) .symbol-cell small {
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 
 .sparkline-cell {
   display: flex;
