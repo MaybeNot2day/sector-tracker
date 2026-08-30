@@ -1221,7 +1221,7 @@ h1 {
 }
 
 .workspace {
-  width: min(1780px, 100%);
+  width: min(2560px, 100%);
   margin: 0 auto;
   padding: 16px;
 }
