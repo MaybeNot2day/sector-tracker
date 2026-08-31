@@ -13,6 +13,9 @@ from app.providers.hyperliquid import HyperliquidProvider
 
 CRYPTO_GROUP_NAME = "HYPERLIQUID_NEW_CRYPTO"
 XYZ_GROUP_NAME = "HYPERLIQUID_NEW_XYZ"
+# Runtime discovery groups are Markets-grid only: they must never rank as
+# curated themes or count toward universe breadth/regime.
+AUTO_GROUP_NAMES = frozenset({CRYPTO_GROUP_NAME, XYZ_GROUP_NAME})
 
 
 class HyperliquidDiscoveryService:

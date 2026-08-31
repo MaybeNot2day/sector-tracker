@@ -11,6 +11,7 @@ from typing import Any
 
 from app import db
 from app.models import AssetConfig, Bar, GroupConfig, ProviderName, Quote
+from app.services.hyperliquid_discovery import AUTO_GROUP_NAMES
 from app.services.macro import vix_read
 
 logger = logging.getLogger(__name__)
@@ -69,9 +70,18 @@ class DailyBoardService:
             symbol: _market_summary_prepared(asset, quotes.get(symbol), prepared[symbol])
             for symbol, asset in assets.items()
         }
-        themes = _theme_metrics(groups, metrics)
-        universe = _universe_metrics(metrics)
-        benchmarks = _benchmark_metrics(groups, metrics)
+        # Auto-discovered Hyperliquid listings are Markets-grid only: they
+        # must not form their own theme (Momentum Shifts / rotation / regime)
+        # or distort the curated universe breadth with day-old listings.
+        curated_groups = [group for group in groups if group.name not in AUTO_GROUP_NAMES]
+        curated_symbols = {
+            asset.symbol for group in curated_groups for asset in group.assets
+        }
+        themes = _theme_metrics(curated_groups, metrics)
+        universe = _universe_metrics(
+            {symbol: metric for symbol, metric in metrics.items() if symbol in curated_symbols}
+        )
+        benchmarks = _benchmark_metrics(curated_groups, metrics)
         regime = _regime_metrics(themes, universe, benchmarks, quotes.get("^VIX"))
         rotation = _rotation_metrics(themes)
         timestamps = [quote.timestamp for quote in quotes.values()]

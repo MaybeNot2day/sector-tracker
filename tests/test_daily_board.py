@@ -36,6 +36,46 @@ def test_daily_board_builds_regime_breadth_and_theme_ranking(tmp_path: Path) -> 
     assert len(payload["benchmarks"]) == 1  # type: ignore[arg-type]
 
 
+def test_auto_hyperliquid_groups_stay_out_of_themes_and_universe(tmp_path: Path) -> None:
+    """Discovery groups feed the Markets grid only: no own theme, no breadth."""
+    database = tmp_path / "board.sqlite3"
+    groups = [
+        GroupConfig(
+            name="TECH",
+            assets=[AssetConfig(symbol="NVDA", type="equity", source="yahoo")],
+        ),
+        GroupConfig(
+            name="HYPERLIQUID_NEW_CRYPTO",
+            assets=[AssetConfig(symbol="NEWCOIN", type="crypto_perp", source="hyperliquid")],
+        ),
+        GroupConfig(
+            name="HYPERLIQUID_NEW_XYZ",
+            assets=[AssetConfig(symbol="NEWSTOCK", type="equity", source="hyperliquid")],
+        ),
+    ]
+    db.save_bars(database, _rising_bars("NVDA"))
+    grouped_quotes = {
+        "TECH": [_quote("NVDA", "equity", 128.0, 124.0)],
+        "HYPERLIQUID_NEW_CRYPTO": [_quote("NEWCOIN", "crypto_perp", 2.0, 1.0)],
+        "HYPERLIQUID_NEW_XYZ": [_quote("NEWSTOCK", "equity", 3.0, 4.0)],
+    }
+
+    overview, summaries = DailyBoardService(database).build_board(groups, grouped_quotes)
+
+    theme_names = [theme["name"] for theme in overview["themes"]]  # type: ignore[index]
+    assert theme_names == ["TECH"]
+    assert overview["universe"]["total"] == 1  # type: ignore[index]
+    assert overview["universe"]["quoted"] == 1  # type: ignore[index]
+    rotation = overview["rotation"]
+    assert all(
+        theme["name"] == "TECH"
+        for bucket in rotation.values()  # type: ignore[union-attr]
+        for theme in bucket
+    )
+    # The listings themselves still reach the Markets grid.
+    assert "NEWCOIN" in summaries and "NEWSTOCK" in summaries
+
+
 def test_build_board_reuses_bars_until_the_table_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
