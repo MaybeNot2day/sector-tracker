@@ -67,13 +67,16 @@ DEFAULT_POSITION_FRACTION = 0.05  # OPEN without usable conf/stop inputs
 # --- Calibration and circuit breakers --------------------------------------
 # Sizing reads the book's own track record. While the realized win rate is
 # unproven, positions size off a fixed risk budget instead of the agent's
-# optimistic confidence; loss streaks throttle new risk, then halt it.
+# optimistic confidence; loss streaks throttle new risk, then halt it. A
+# negative all-time expectancy forces the calibration cap (not a halt): a
+# halt would freeze expectancy forever, deadlocking the book with no way to
+# trade its way back out.
 CALIBRATION_MIN_CLOSED = 5
 CALIBRATION_WIN_RATE = 0.35
 CALIBRATION_RISK_FRACTION = 0.0075  # max equity risked per OPEN while uncalibrated
 BREAKER_HALF_STREAK = 3
 BREAKER_HALT_STREAK = 5
-EXPECTANCY_VETO_MIN_CLOSED = 8
+EXPECTANCY_CAP_MIN_CLOSED = 8  # negative expectancy past this forces the cap
 GAP_RISK_STOP_PCT = 5.0  # wider stops gap through: linear notional haircut
 
 _HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
@@ -575,6 +578,8 @@ def _risk_mode(entries: list[tuple[str, int, float]]) -> dict[str, object]:
 
     Entries are (closed_date, id, realized_usd); ordering inside is derived,
     so callers pass them in any order. A zero-dollar close breaks a streak.
+    Only the loss streak halts new opens; negative expectancy demotes sizing
+    to the calibration cap so the book can keep earning its way out.
     """
     ordered = sorted(entries, key=lambda item: (item[0], item[1]), reverse=True)
     total = len(ordered)
@@ -595,12 +600,10 @@ def _risk_mode(entries: list[tuple[str, int, float]]) -> dict[str, object]:
             total >= CALIBRATION_MIN_CLOSED
             and win_rate is not None
             and win_rate < CALIBRATION_WIN_RATE
-        ),
+        )
+        or bool(total >= EXPECTANCY_CAP_MIN_CLOSED and expectancy < 0),
         "half_size": streak >= BREAKER_HALF_STREAK,
-        "no_new_opens": bool(
-            streak >= BREAKER_HALT_STREAK
-            or (total >= EXPECTANCY_VETO_MIN_CLOSED and expectancy < 0)
-        ),
+        "no_new_opens": streak >= BREAKER_HALT_STREAK,
     }
 
 
@@ -618,10 +621,11 @@ def _stop_distance_pct(row: dict[str, object]) -> float | None:
 def _position_notional(row: dict[str, object], bankroll: float, mode: dict[str, object]) -> float:
     """Notional for one new position under the current risk mode.
 
-    - Breaker halt: no new risk at all (the idea is tracked at $0).
+    - Breaker halt (5-loss streak): no new risk at all (the idea is tracked
+      at $0).
     - Calibration cap: fixed risk budget per trade (0.75% of bankroll at the
-      declared stop), because the realized win rate does not yet justify
-      trusting the agent's confidence.
+      declared stop), because the realized win rate or expectancy does not
+      yet justify trusting the agent's confidence.
     - Normal: half-Kelly, with a linear haircut for stops wider than 5%
       (gaps jump wide stops).
     - A loss streak at the half-size threshold halves either path.

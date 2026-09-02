@@ -289,8 +289,9 @@ life of the position — HOLD never resizes. Three risk gates sit on top:
   budget — 0.75% of the bankroll at the declared stop distance (2% floor with
   no usable stop).
 - **Circuit breakers**: 3 consecutive losses halve new sizes; 5 consecutive
-  losses, or a negative rolling expectancy over 8+ closed trades, size new
-  OPENs at $0.
+  losses size new OPENs at $0. A negative rolling expectancy over 8+ closed
+  trades forces the calibration cap (fixed 0.75% risk budget) instead of a
+  halt, so the book can trade its way back to positive expectancy.
 - **Gap-risk haircut**: stops wider than 5% scale the notional down linearly
   (`5% / stop distance`) — gaps jump wide stops.
 

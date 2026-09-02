@@ -6,8 +6,8 @@ calibration (win rate, expectancy, profit factor, losing streak, direction
 and asset buckets, open giveback-to-stops) and writes a compact risk-mode
 block into the job's notepad so the trading agent sees its own track record
 before composing new ideas. Breakers: HALF_SIZE at a 3-loss streak,
-NO_NEW_OPENS at 5 (or 8+ closed with negative expectancy), CALIBRATION_CAP
-below a 35% win rate once 5+ trades have closed.
+NO_NEW_OPENS at 5. CALIBRATION_CAP below a 35% win rate once 5+ trades have
+closed, or with negative expectancy once 8+ have closed.
 
 Config: ~/.config/sector-tracker/uploader.env (BOARD_URL; HERMES_BIN and
 FRINGE_JOB_ID optional). Notepad: `hermes cron notepad <job> set <key> <value>`.
@@ -139,10 +139,10 @@ def compute_giveback(open_items: list[dict[str, Any]], equity: float) -> tuple[f
 def compute_risk_modes(stats: dict[str, Any]) -> dict[str, bool]:
     """Calibration cap and circuit breakers from the rolling stats."""
     return {
-        "calibration_cap": stats["closed_count"] >= 5 and stats["win_rate_pct"] < 35.0,
-        "half_size": stats["losing_streak"] >= 3,
-        "no_new_opens": stats["losing_streak"] >= 5
+        "calibration_cap": (stats["closed_count"] >= 5 and stats["win_rate_pct"] < 35.0)
         or (stats["closed_count"] >= 8 and stats["expectancy_usd"] < 0),
+        "half_size": stats["losing_streak"] >= 3,
+        "no_new_opens": stats["losing_streak"] >= 5,
     }
 
 

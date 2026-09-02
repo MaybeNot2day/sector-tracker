@@ -1046,7 +1046,7 @@ def _entries(*usds: float) -> list[tuple[str, int, float]]:
     return [(f"2026-07-{10 + index:02d}", index + 1, usd) for index, usd in enumerate(usds)]
 
 
-def test_risk_mode_flags_calibration_breakers_and_veto() -> None:
+def test_risk_mode_flags_calibration_breakers_and_expectancy_cap() -> None:
     # 1 win + 4 losses, newest is the win: uncalibrated, no breaker.
     mode = _risk_mode(_entries(-10.0, -10.0, -10.0, -10.0, 5.0))
     assert mode["closed_count"] == 5
@@ -1054,7 +1054,7 @@ def test_risk_mode_flags_calibration_breakers_and_veto() -> None:
     assert mode["calibration_cap"] is True
     assert mode["loss_streak"] == 0
     assert mode["half_size"] is False
-    assert mode["no_new_opens"] is False  # below the 8-trade expectancy veto
+    assert mode["no_new_opens"] is False  # halt is streak-only
 
     # Three fresh losses after a win: half-size only.
     mode = _risk_mode(_entries(50.0, -10.0, -10.0, -10.0))
@@ -1067,11 +1067,12 @@ def test_risk_mode_flags_calibration_breakers_and_veto() -> None:
     assert mode["loss_streak"] == 5
     assert mode["no_new_opens"] is True
 
-    # Expectancy veto: 8 closed, streak broken by a win, still net-negative.
+    # Negative expectancy on 8 closed, streak broken by a win: capped, not
+    # halted — a halt would freeze expectancy forever.
     mode = _risk_mode(_entries(-100.0, -100.0, -100.0, -100.0, -100.0, 10.0, 10.0, 10.0))
     assert mode["loss_streak"] == 0
-    assert mode["calibration_cap"] is False  # 37.5% win rate
-    assert mode["no_new_opens"] is True
+    assert mode["calibration_cap"] is True  # 37.5% win rate, but expectancy < 0
+    assert mode["no_new_opens"] is False
 
     # Empty book: every gate open, no fake readings.
     mode = _risk_mode([])

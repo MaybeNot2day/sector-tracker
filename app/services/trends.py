@@ -1,10 +1,11 @@
 """Sector trend bands: normalized group performance over time.
 
-PCPartPicker-style trend graphs for every watchlist group: each
+PCPartPicker-style trend graphs for curated watchlist groups: each
 constituent's daily closes are indexed to 100 at the window start, then
 every session aggregates to a min/max envelope plus the equal-weight
-average across members. Built entirely from the daily bars the history
-service already caches in SQLite — no new provider traffic.
+average across members. Auto-discovered Hyperliquid listing groups stay
+Markets-only. Built entirely from the daily bars the history service
+already caches in SQLite — no new provider traffic.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from pathlib import Path
 
 from app import db
 from app.models import GroupConfig
+from app.services.hyperliquid_discovery import AUTO_GROUP_NAMES
 
 # A member must cover this share of the window's sessions to join the band;
 # recently listed or sparsely-barred symbols would otherwise fake envelope
@@ -33,7 +35,7 @@ def group_category(group: GroupConfig) -> str:
 
 
 def group_trends_payload(path: Path, groups: list[GroupConfig], days: int) -> dict[str, object]:
-    """The /api/trends payload: one min/avg/max band series per group."""
+    """The /api/trends payload: one min/avg/max band per curated group."""
     days = max(MIN_DAYS, min(days, MAX_DAYS))
     # Weekends and holidays thin the calendar; over-fetch so `days` sessions
     # survive, then trim to the trailing window per group.
@@ -48,6 +50,8 @@ def group_trends_payload(path: Path, groups: list[GroupConfig], days: int) -> di
 
     payload_groups = []
     for group in groups:
+        if group.name in AUTO_GROUP_NAMES:
+            continue
         trend = _group_band(group, closes, days)
         if trend is not None:
             payload_groups.append(trend)

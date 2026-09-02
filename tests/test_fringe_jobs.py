@@ -194,10 +194,11 @@ def test_calibration_cap_needs_five_closed_below_35pct() -> None:
     assert _modes(5, 35.0, 0, -5.0)["calibration_cap"] is False
 
 
-def test_expectancy_veto_needs_eight_closed() -> None:
-    assert _modes(7, 40.0, 0, -1.0)["no_new_opens"] is False
-    assert _modes(8, 40.0, 0, -1.0)["no_new_opens"] is True
-    assert _modes(8, 40.0, 0, 0.0)["no_new_opens"] is False
+def test_negative_expectancy_caps_instead_of_halting_after_eight_closed() -> None:
+    assert _modes(7, 40.0, 0, -1.0)["calibration_cap"] is False
+    assert _modes(8, 40.0, 0, -1.0)["calibration_cap"] is True
+    assert _modes(8, 40.0, 0, -1.0)["no_new_opens"] is False
+    assert _modes(8, 40.0, 0, 0.0)["calibration_cap"] is False
 
 
 def test_stats_block_shape_and_mode_labels() -> None:

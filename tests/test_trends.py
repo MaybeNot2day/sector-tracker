@@ -15,6 +15,7 @@ from typing import Any, cast
 
 from app import db
 from app.models import AssetConfig, Bar, GroupConfig
+from app.services.hyperliquid_discovery import CRYPTO_GROUP_NAME, XYZ_GROUP_NAME
 from app.services.trends import group_trends_payload
 
 
@@ -58,12 +59,14 @@ def test_band_indexes_members_to_100_and_aggregates(tmp_path: Path) -> None:
     groups = [
         GroupConfig(name="Pair", assets=[_asset("AAA"), _asset("BBB"), _asset("CCC")]),
         GroupConfig(name="Ghost", assets=[_asset("ZZZ")]),
+        GroupConfig(name=CRYPTO_GROUP_NAME, assets=[_asset("AAA", "crypto_perp")]),
+        GroupConfig(name=XYZ_GROUP_NAME, assets=[_asset("BBB")]),
     ]
 
     payload = group_trends_payload(path, groups, days=14)
 
     assert payload["days"] == 14
-    (group,) = cast(list[dict[str, Any]], payload["groups"])  # Ghost has no bars and is dropped
+    (group,) = cast(list[dict[str, Any]], payload["groups"])
     assert group["name"] == "Pair"
     assert group["category"] == "tradfi"
     # CCC covers 2/5 sessions (40%) and stays out of the band.
