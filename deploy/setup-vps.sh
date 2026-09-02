@@ -64,6 +64,10 @@ else
   # dubious-ownership fatal and aborts the re-run under set -e.
   sudo -u "$APP_USER" git -C "$APP_DIR" remote set-url origin "$REPO_URL"
 fi
+# GitHub's smart-HTTP advertisement intermittently breaks git's protocol-v2
+# parse over HTTP/2 with Ubuntu's curl 8.5.0 ("expected flush after ref
+# listing", then a username prompt), wedging auto-deploy. HTTP/1.1 is stable.
+sudo -u "$APP_USER" git -C "$APP_DIR" config http.version HTTP/1.1
 chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 
 echo "==> Installing dependencies"
