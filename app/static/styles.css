@@ -3173,6 +3173,17 @@ a.key-date-row:focus-visible {
   gap: 12px;
 }
 
+/* Dense mode (>12 tiles): narrower, shorter cards so 30-50 charts stay
+   scannable instead of becoming a kilometer-long page. */
+.watch-grid.dense {
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 8px;
+}
+
+.watch-grid.dense .watch-chart {
+  height: 160px;
+}
+
 .watch-tile {
   display: flex;
   flex-direction: column;

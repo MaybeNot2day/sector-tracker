@@ -215,7 +215,7 @@ let aiHardwareHoursPerDay = 24;
 let aiHardwareDays = 30;
 const WATCH_STORAGE_KEY = "watch-symbols-v1";
 const WATCH_INTERVAL_KEY = "watch-interval-v1";
-const WATCH_MAX = 9;
+const WATCH_MAX = 50;
 const WATCH_REFRESH_MS = 60000;
 const WATCH_RANGES = { "15m": "1d", "1h": "1mo", "4h": "3mo", "1d": "1y" };
 let watchSymbols = [];
@@ -1914,9 +1914,11 @@ function renderWatchGrid() {
   if (watchView.hidden) return;
   const token = ++watchRenderToken;
   destroyWatchCharts();
+  // Dense mode: past a dozen tiles, shrink the cards so more fit per row.
+  watchGrid.classList.toggle("dense", watchSymbols.length > 12);
   if (!watchSymbols.length) {
     watchGrid.innerHTML =
-      '<div class="empty-state">Add up to 9 symbols to build your chart wall — Browse the board sectors or type anything Yahoo knows (SPY, NVDA, BTC, CL=F)</div>';
+      `<div class="empty-state">Add up to ${WATCH_MAX} symbols to build your chart wall — Browse the board sectors or type anything Yahoo knows (SPY, NVDA, BTC, CL=F)</div>`;
     return;
   }
   watchGrid.innerHTML = watchSymbols
