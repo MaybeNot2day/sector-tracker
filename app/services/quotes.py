@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from time import monotonic
 from typing import TypeAlias
@@ -226,12 +226,16 @@ class QuoteService:
         for group in groups:
             for asset in group.assets:
                 by_provider.setdefault(asset.source, []).append(asset)
+        fresh_by_symbol = await self._hl_first_quotes(groups)
         by_provider = {
             source: self._prioritize_uncached_assets(assets, cached_symbols)
             for source, assets in by_provider.items()
         }
+        by_provider = {
+            source: [asset for asset in assets if asset.symbol not in fresh_by_symbol]
+            for source, assets in by_provider.items()
+        }
 
-        fresh_by_symbol: dict[str, Quote] = {}
         tasks = [
             self._safe_provider_quotes(source, assets)
             for source, assets in by_provider.items()
@@ -256,6 +260,59 @@ class QuoteService:
 
         await self._overlay_hyperliquid_prices(groups, fresh_by_symbol)
         return fresh_by_symbol
+
+    async def _hl_first_quotes(self, groups: list[GroupConfig]) -> dict[str, Quote]:
+        """Quotes sourced entirely from Hyperliquid for equities/ETFs it lists.
+
+        The venue round-trip is skipped for covered symbols: last price is the
+        24/7 xyz mark, and the 1D baseline is the last COMPLETED official
+        session close from the cached daily bars (same semantics as the
+        overlay's `_official_close`). Symbols without a live mark or a usable
+        baseline fall through to the normal venue fetch.
+        """
+        hyperliquid = self.providers.get("hyperliquid")
+        if not isinstance(hyperliquid, HyperliquidProvider):
+            return {}
+        assets = {
+            asset.symbol.upper(): asset
+            for group in groups
+            for asset in group.assets
+            if asset.type in {"equity", "etf"} and asset.source != "hyperliquid"
+        }
+        if not assets:
+            return {}
+        try:
+            live_prices = await hyperliquid.live_prices(set(assets))
+        except Exception:
+            logger.warning("Hyperliquid-first quote probe failed", exc_info=True)
+            return {}
+        if not live_prices:
+            return {}
+        try:
+            tails = await asyncio.to_thread(
+                db.load_daily_close_tails, self.database_path, list(live_prices)
+            )
+        except Exception:
+            logger.warning("baseline close load failed", exc_info=True)
+            return {}
+        now = datetime.now(UTC)
+        quotes: dict[str, Quote] = {}
+        for symbol, live in live_prices.items():
+            asset = assets.get(symbol.upper())
+            baseline = _baseline_close(tails.get(symbol.upper(), []), now)
+            if asset is None or baseline is None:
+                continue  # no trustworthy official close: let the venue answer
+            quotes[asset.symbol] = Quote.from_last_and_prev_close(
+                symbol=asset.symbol,
+                asset_type=asset.type,
+                provider="hyperliquid",
+                last=live,
+                previous_close=baseline,
+                timestamp=now,
+                currency="USD",
+                official_close=baseline,
+            )
+        return quotes
 
     async def _overlay_hyperliquid_prices(
         self,
@@ -364,6 +421,29 @@ def _cached_quote_matches(asset: AssetConfig, cached: Quote) -> bool:
 # A listing-venue quote older than this means the session (incl. pre/post
 # prints) is over; its last price then IS the most recent official close.
 OFFICIAL_QUOTE_FRESH_SECONDS = 3600.0
+# US regular sessions end 20:00-21:00 UTC (DST shift); a daily bar counts as
+# the completed official close once its date's buffer passes.
+SESSION_CLOSE_BUFFER = time(21, 30)
+# Older baselines mean the venue history is broken; re-fetch via the venue.
+BASELINE_MAX_AGE = timedelta(days=5)
+
+
+def _baseline_close(tail: list[tuple[datetime, float]], now: datetime) -> float | None:
+    """Last completed official session close from a daily-bar close tail.
+
+    A bar dated today whose session has not ended yet is still forming, so the
+    baseline is the previous bar's close — the venue's `previous_close`.
+    """
+    if not tail:
+        return None
+    last_ts, last_close = tail[-1]
+    if last_ts.tzinfo is None:
+        last_ts = last_ts.replace(tzinfo=UTC)
+    if now - last_ts > BASELINE_MAX_AGE:
+        return None
+    session_end = datetime.combine(last_ts.date(), SESSION_CLOSE_BUFFER, tzinfo=UTC)
+    close = last_close if now >= session_end else (tail[-2][1] if len(tail) >= 2 else None)
+    return close if close is not None and close > 0 else None
 
 
 def _official_close(quote: Quote, now: datetime) -> float | None:

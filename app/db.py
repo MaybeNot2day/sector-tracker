@@ -790,6 +790,68 @@ def newest_bar_timestamps(path: Path, interval: str) -> dict[str, datetime]:
     return {str(row["symbol"]): _from_iso(str(row["newest"])) for row in rows if row["newest"]}
 
 
+def load_daily_close_tails(
+    path: Path, symbols: Sequence[str], *, tail: int = 2
+) -> dict[str, list[tuple[datetime, float]]]:
+    """Newest `tail` (timestamp, close) pairs per symbol from 1d bars.
+
+    Drives the Hyperliquid-first equity baseline ("last completed official
+    session close") without materializing full bar series. When several
+    providers store the same session, the venue feed wins; a provider's
+    series is never mixed with another's inside one symbol's tail.
+    """
+    normalized = sorted({symbol.upper() for symbol in symbols})
+    if not normalized:
+        return {}
+
+    init_db(path)
+    tails: dict[str, list[tuple[datetime, str, float]]] = {}
+    with _connect(path) as conn:
+        for offset in range(0, len(normalized), 500):
+            chunk = normalized[offset : offset + 500]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""
+                WITH ranked AS (
+                    SELECT symbol, provider, timestamp, close,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY symbol
+                               ORDER BY timestamp DESC,
+                                        CASE provider
+                                            WHEN 'yahoo' THEN 0
+                                            WHEN 'stooq' THEN 1
+                                            ELSE 2
+                                        END
+                           ) AS series_row
+                    FROM bars
+                    WHERE interval = '1d' AND symbol IN ({placeholders})
+                )
+                SELECT symbol, provider, timestamp, close
+                FROM ranked
+                WHERE series_row <= ?
+                ORDER BY symbol, timestamp DESC
+                """,
+                (*chunk, tail + 1),
+            ).fetchall()
+            for row in rows:
+                symbol = str(row["symbol"]).upper()
+                existing = tails.setdefault(symbol, [])
+                provider = str(row["provider"])
+                if existing and existing[0][1] != provider:
+                    # Only the freshest provider's series may contribute.
+                    continue
+                timestamp = _from_iso(str(row["timestamp"]))
+                if any(entry[0].date() == timestamp.date() for entry in existing):
+                    continue  # same session from a duplicate row
+                existing.append((timestamp, provider, float(str(row["close"]))))
+                if len(existing) > tail:
+                    existing.pop()
+    return {
+        symbol: [(timestamp, close) for timestamp, _, close in reversed(entries)]
+        for symbol, entries in tails.items()
+    }
+
+
 def save_board_snapshot(path: Path, snapshot_date: str, payload: dict[str, object]) -> None:
     """Upsert one condensed daily-board snapshot keyed by UTC date."""
     init_db(path)

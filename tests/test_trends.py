@@ -1,10 +1,10 @@
 """Contract tests for the /api/trends group performance bands.
 
-Each watchlist group aggregates its members' cached daily closes into a
-min/avg/max band, every member indexed to 100 at its first in-window
+Each curated watchlist group aggregates its members' cached daily closes
+into a min/avg/max band, every member indexed to 100 at its first in-window
 close. Sparse members (below 60% session coverage) stay out of the band,
-groups without any bars disappear from the payload, and the route caches
-by window length.
+groups without any bars disappear from the payload, and auto-discovered
+Hyperliquid listing groups stay out of Trends.
 """
 
 from __future__ import annotations

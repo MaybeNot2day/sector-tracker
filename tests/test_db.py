@@ -248,3 +248,46 @@ def test_load_bars_by_symbol_limits_each_partition_in_sql(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="must be positive"):
         db.load_bars_by_symbol(database, "1d", limit_per_series=0)
+
+
+def test_load_daily_close_tails_keeps_one_provider_series(tmp_path: Path) -> None:
+    database = tmp_path / "board.sqlite3"
+    start = datetime(2026, 1, 5, tzinfo=UTC)
+    bars = [
+        # Yahoo: three sessions, closes 10/11/12.
+        *[
+            Bar(
+                symbol="AAPL",
+                provider="yahoo",
+                interval="1d",
+                timestamp=start + timedelta(days=day),
+                open=9.0,
+                high=13.0,
+                low=9.0,
+                close=float(10 + day),
+            )
+            for day in range(3)
+        ],
+        # Stooq stores the SAME newest session with a slightly different
+        # close; it must neither mix into Yahoo's tail nor duplicate the date.
+        Bar(
+            symbol="AAPL",
+            provider="stooq",
+            interval="1d",
+            timestamp=start + timedelta(days=2),
+            open=9.0,
+            high=13.0,
+            low=9.0,
+            close=12.5,
+        ),
+    ]
+    db.save_bars(database, bars)
+
+    tails = db.load_daily_close_tails(database, ["aapl", "MISSING"])
+
+    assert set(tails) == {"AAPL"}
+    assert [(ts.date().isoformat(), close) for ts, close in tails["AAPL"]] == [
+        ("2026-01-06", 11.0),
+        ("2026-01-07", 12.0),
+    ]
+    assert db.load_daily_close_tails(database, []) == {}

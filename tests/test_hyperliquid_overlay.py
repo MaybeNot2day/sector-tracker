@@ -5,10 +5,11 @@ from typing import Any
 
 import pytest
 
+from app import db
 from app.models import AssetConfig, Bar, GroupConfig, Quote
 from app.providers.base import QuoteProvider
 from app.providers.hyperliquid import HyperliquidProvider
-from app.services.quotes import QuoteService, _official_close
+from app.services.quotes import QuoteService, _baseline_close, _official_close
 
 
 class ScriptedQuotes(QuoteProvider):
@@ -263,6 +264,133 @@ async def test_overlay_skips_non_usd_listings(tmp_path: Path) -> None:
     fresh = await service._fetch_fresh_quotes(groups)
 
     assert fresh["SMSN"] == original
+
+
+# --- Hyperliquid-first quotes ----------------------------------------------
+
+
+class RecordingQuotes(ScriptedQuotes):
+    def __init__(self, quotes: dict[str, Quote]) -> None:
+        super().__init__(quotes)
+        self.requested: list[str] = []
+
+    async def get_quotes(self, assets: list[AssetConfig]) -> list[Quote]:
+        self.requested.extend(asset.symbol for asset in assets)
+        return await super().get_quotes(assets)
+
+
+def seed_daily_bars(database: Path, closes: list[float], *, ages_days: list[int]) -> None:
+    """Daily bars `ages_days` before now (descending age = oldest first)."""
+    now = datetime.now(UTC)
+    db.save_bars(
+        database,
+        [
+            Bar(
+                symbol="AAPL",
+                provider="yahoo",
+                interval="1d",
+                timestamp=now - timedelta(days=age),
+                open=close - 0.5,
+                high=close + 1,
+                low=close - 1,
+                close=close,
+            )
+            for close, age in zip(closes, ages_days, strict=True)
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_hl_first_serves_covered_equity_without_yahoo(tmp_path: Path) -> None:
+    database = tmp_path / "board.sqlite3"
+    # Two completed sessions; the freshest (208.0) is the baseline.
+    seed_daily_bars(database, [200.0, 208.0], ages_days=[2, 1])
+    yahoo = RecordingQuotes({"AAPL": yahoo_quote("AAPL")})
+    service = QuoteService(
+        database,
+        {"yahoo": yahoo, "hyperliquid": hyperliquid_with(aapl_market(213.5))},
+    )
+
+    fresh = await service._fetch_fresh_quotes(equity_group("AAPL"))
+
+    quote = fresh["AAPL"]
+    assert quote.provider == "hyperliquid"
+    assert quote.last == 213.5
+    assert quote.previous_close == 208.0
+    assert quote.change_pct == pytest.approx(2.644231)
+    assert "AAPL" not in yahoo.requested
+
+
+@pytest.mark.asyncio
+async def test_hl_first_falls_back_to_yahoo_without_baseline(tmp_path: Path) -> None:
+    # No cached daily bars: the venue fetch + overlay path must still serve.
+    yahoo = RecordingQuotes(
+        {"AAPL": yahoo_quote("AAPL", last=210.0, previous_close=208.0, volume=99.0)}
+    )
+    service = QuoteService(
+        tmp_path / "board.sqlite3",
+        {"yahoo": yahoo, "hyperliquid": hyperliquid_with(aapl_market(213.5))},
+    )
+
+    fresh = await service._fetch_fresh_quotes(equity_group("AAPL"))
+
+    quote = fresh["AAPL"]
+    assert quote.provider == "hyperliquid"
+    assert quote.last == 213.5
+    assert quote.previous_close == 208.0
+    assert quote.volume == 99.0
+    assert "AAPL" in yahoo.requested
+
+
+@pytest.mark.asyncio
+async def test_hl_first_falls_back_when_stale_baseline(tmp_path: Path) -> None:
+    database = tmp_path / "board.sqlite3"
+    seed_daily_bars(database, [200.0, 208.0], ages_days=[8, 7])
+    yahoo = RecordingQuotes({"AAPL": yahoo_quote("AAPL")})
+    service = QuoteService(
+        database,
+        {"yahoo": yahoo, "hyperliquid": hyperliquid_with(aapl_market(213.5))},
+    )
+
+    fresh = await service._fetch_fresh_quotes(equity_group("AAPL"))
+
+    assert fresh["AAPL"].provider == "hyperliquid"  # overlay on the venue quote
+    assert "AAPL" in yahoo.requested
+
+
+# --- _baseline_close --------------------------------------------------------
+
+
+def test_baseline_close_uses_previous_session_while_today_is_forming() -> None:
+    tail = [
+        (datetime(2026, 7, 2, 13, 30, tzinfo=UTC), 208.0),
+        (datetime(2026, 7, 3, 13, 30, tzinfo=UTC), 210.0),  # still trading
+    ]
+    now = datetime(2026, 7, 3, 16, 0, tzinfo=UTC)
+
+    assert _baseline_close(tail, now) == 208.0
+
+
+def test_baseline_close_uses_last_bar_once_its_session_ends() -> None:
+    tail = [
+        (datetime(2026, 7, 2, 13, 30, tzinfo=UTC), 208.0),
+        (datetime(2026, 7, 3, 13, 30, tzinfo=UTC), 210.0),
+    ]
+    after_close = datetime(2026, 7, 3, 22, 0, tzinfo=UTC)
+    weekend = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
+
+    assert _baseline_close(tail, after_close) == 210.0
+    assert _baseline_close(tail, weekend) == 210.0
+
+
+def test_baseline_close_rejects_stale_or_thin_tails() -> None:
+    now = datetime(2026, 7, 10, 16, 0, tzinfo=UTC)
+    stale = [(datetime(2026, 6, 30, 13, 30, tzinfo=UTC), 208.0)]
+    forming_only = [(datetime(2026, 7, 10, 13, 30, tzinfo=UTC), 210.0)]
+
+    assert _baseline_close(stale, now) is None
+    assert _baseline_close(forming_only, now) is None
+    assert _baseline_close([], now) is None
 
 
 @pytest.mark.asyncio
