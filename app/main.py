@@ -62,6 +62,7 @@ from app.scheduler import (
 from app.services.ai_capex import AICapexError, AICapexService
 from app.services.ai_data import AIDataError, AIDataService
 from app.services.asset_profile import AssetProfileService
+from app.services.candle_stream import CandleStreamService
 from app.services.component_trends import (
     component_trends_payload,
     fetch_trend_image,
@@ -229,6 +230,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.sofr_service = SOFRService(settings.database_path)
     app.state.connection_manager = ConnectionManager()
+    hyperliquid = providers.get("hyperliquid")
+    app.state.candle_stream_service = (
+        # Duck-typed: lifespan tests patch the provider with plain doubles.
+        CandleStreamService(cast(HyperliquidProvider, hyperliquid))
+        if hyperliquid is not None and hasattr(hyperliquid, "candle_coin")
+        else None
+    )
     app.state.watchlist_lock = asyncio.Lock()
     app.state.trends_revision = 0
     app.state.poll_task = None
@@ -295,6 +303,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await stop_task(app.state.hyperliquid_discovery_task)
         if app.state.sofr_task is not None:
             await stop_task(app.state.sofr_task)
+        if app.state.candle_stream_service is not None:
+            await app.state.candle_stream_service.aclose()
         await asyncio.gather(
             *(provider.aclose() for provider in providers.values()),
             app.state.news_service.aclose(),
@@ -1297,6 +1307,37 @@ async def profile(symbol: str) -> dict[str, object]:
         raise HTTPException(status_code=404, detail="asset_not_found")
     service: AssetProfileService = app.state.asset_profile_service
     return await service.get_profile(asset)
+
+
+@app.websocket("/ws/candles")
+async def candles_ws(websocket: WebSocket, symbol: str, interval: str, asset_type: str = "") -> None:
+    """Live candle frames for one Hyperliquid market while its chart is open."""
+    service: CandleStreamService | None = app.state.candle_stream_service
+    await websocket.accept()
+    if service is None:
+        await websocket.close(code=1011)
+        return
+    queue = await service.subscribe(symbol, interval, asset_type)
+    if queue is None:
+        await websocket.close(code=4404)
+        return
+
+    async def pump() -> None:
+        while True:
+            frame = await queue.get()
+            await websocket.send_text(frame)
+
+    pump_task = asyncio.create_task(pump(), name="candle_pump")
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        pump_task.cancel()
+        await service.unsubscribe(symbol, interval, queue)
 
 
 @app.websocket("/ws/quotes")

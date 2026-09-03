@@ -176,6 +176,16 @@ class HyperliquidProvider(QuoteProvider):
         """Whether the cached market map classifies `symbol` as a crypto perp."""
         return symbol.upper() in self._crypto
 
+    async def candle_coin(self, symbol: str, asset_type: str) -> str | None:
+        """Exact API coin name (e.g. "xyz:AAPL") for candle subscriptions.
+
+        Routed through the type-aware market lookup so a colliding ticker
+        never subscribes the wrong dex's candles.
+        """
+        await self._refresh_markets()
+        market = self._market_for(symbol, asset_type)
+        return str(market["coin"]) if market is not None else None
+
     def is_tradfi_market(self, symbol: str) -> bool:
         """Whether the cached map lists `symbol` as an xyz TradFi synthetic."""
         return symbol.upper() in self._tradfi

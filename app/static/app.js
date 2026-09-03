@@ -2235,6 +2235,96 @@ function openSocket() {
   socket.addEventListener("error", () => setConnection("error"));
 }
 
+// --- Live candle stream (Hyperliquid) --------------------------------------
+// While a chart modal is open on a Hyperliquid-covered symbol, a dedicated
+// socket streams the forming candle; the initial REST history stays the
+// source of truth and the stream only patches its tail.
+let candleSocket = null;
+let candleStreamKey = "";
+let candleReconnectDelayMs = 3000;
+let chartLastBarTime = null;
+
+function closeCandleStream() {
+  candleStreamKey = "";
+  if (candleSocket) {
+    try {
+      candleSocket.close();
+    } catch (error) {
+      /* already closing */
+    }
+    candleSocket = null;
+  }
+}
+
+function openCandleStream(symbol, interval) {
+  closeCandleStream();
+  const provider = activeAsset?.quote?.provider || activeAsset?.provider || "";
+  if (provider !== "hyperliquid") return;
+  if (!INTRADAY_INTERVALS.has(interval)) return;
+  const assetType = activeAsset?.type || activeAsset?.asset_type || "";
+  const key = `${symbol}/${interval}`;
+  candleStreamKey = key;
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  const socket = new WebSocket(
+    `${protocol}://${window.location.host}/ws/candles?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&asset_type=${encodeURIComponent(assetType)}`
+  );
+  candleSocket = socket;
+  socket.addEventListener("open", () => {
+    candleReconnectDelayMs = 3000;
+  });
+  socket.addEventListener("message", (event) => {
+    let message;
+    try {
+      message = JSON.parse(event.data);
+    } catch (error) {
+      return;
+    }
+    if (message.type !== "candle" || !message.bar) return;
+    if (message.symbol !== activeSymbol || message.interval !== activeInterval) return;
+    applyStreamedCandle(message.bar, interval);
+  });
+  socket.addEventListener("close", () => {
+    if (candleSocket !== socket) return;
+    candleSocket = null;
+    if (
+      candleStreamKey === key &&
+      activeSymbol === symbol &&
+      modal.classList.contains("open")
+    ) {
+      window.setTimeout(() => {
+        if (candleStreamKey === key && modal.classList.contains("open")) {
+          openCandleStream(symbol, interval);
+        }
+      }, candleReconnectDelayMs);
+      candleReconnectDelayMs = Math.min(candleReconnectDelayMs * 2, 30000);
+    }
+  });
+}
+
+function applyStreamedCandle(bar, interval) {
+  if (!chartCandleSeries) return;
+  const open = numericOrNull(bar.open);
+  const high = numericOrNull(bar.high);
+  const low = numericOrNull(bar.low);
+  const close = numericOrNull(bar.close);
+  if (![open, high, low, close].every(Number.isFinite)) return;
+  const time = toChartTime(bar.timestamp, interval);
+  // lightweight-charts rejects out-of-order updates; a late frame from a
+  // just-closed socket must not rewind the series.
+  if (chartLastBarTime !== null && time < chartLastBarTime) return;
+  chartLastBarTime = time;
+  chartCandleSeries.update({ time, open, high, low, close });
+  const volume = numericOrNull(bar.volume);
+  if (chartVolumeSeries && volume !== null) {
+    const colors = chartThemeColors();
+    chartVolumeSeries.update({
+      time,
+      value: volume,
+      color: close >= open ? colors.volumeUp : colors.volumeDown,
+    });
+  }
+}
+
 function recoverStaleWebSocket() {
   if (
     feedMode !== "ws" ||
@@ -6227,6 +6317,7 @@ function updateIntradayAvailability(assetType) {
 
 function closeModal() {
   if (!closeDialog(modal)) return;
+  closeCandleStream();
   chartLoadToken += 1;
   optionsLoadToken += 1;
   optionsPanelState = null;
@@ -6271,6 +6362,8 @@ function ensureChartLibrary() {
 async function loadChart(symbol, range, interval) {
   const requestId = chartLoadToken + 1;
   chartLoadToken = requestId;
+  closeCandleStream();
+  chartLastBarTime = null;
   chartContextLoading = true;
   activeHistoryContext = null;
   chartError.hidden = true;
@@ -6315,6 +6408,8 @@ async function loadChart(symbol, range, interval) {
     if (!bars.length) throw new Error("No history available");
     chartElement.replaceChildren();
     renderChart(bars, interval);
+    chartLastBarTime = bars[bars.length - 1].time;
+    openCandleStream(symbol, interval);
     activeHistoryContext = profileMarketContextFromHistory(rawBars);
     chartContextLoading = false;
     updateProfileMarketContext();
