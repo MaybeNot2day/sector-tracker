@@ -49,6 +49,7 @@ const watchBrowseButton = document.querySelector("#watch-browse");
 const watchPicker = document.querySelector("#watch-picker");
 const watchModeButtons = Array.from(document.querySelectorAll("#watch-mode button"));
 const watchIntervalTabs = document.querySelector("#watch-intervals");
+const watchSyncButton = document.querySelector("#watch-sync-x");
 const watchListControls = document.querySelector("#watch-list-controls");
 const watchListTabs = document.querySelector("#watch-list-tabs");
 const watchListNewButton = document.querySelector("#watch-list-new");
@@ -221,9 +222,16 @@ let watchSymbols = [];
 let watchInterval = "1h";
 const watchCharts = new Map();
 let watchRenderToken = 0;
+// Sync X: every tile shares one visible time range; panning or zooming any
+// chart propagates to the rest. watchSyncRange is the last user-picked
+// window; null means "intersection of all loaded series".
+let watchSyncX = false;
+let watchSyncRange = null;
+let watchSyncApplying = false;
 // --- Named watch lists (Lists mode): personal screener-style lists. --------
 const WATCH_LISTS_KEY = "watch-lists-v1";
 const WATCH_MODE_KEY = "watch-mode-v1";
+const WATCH_SYNC_X_KEY = "watch-sync-x-v1";
 const WATCH_LIST_MAX = 60; // matches the /api/quotes/lookup per-request cap
 let watchMode = "charts"; // "charts" (tile wall) | "lists" (named lists)
 let watchLists = []; // [{ id, name, symbols: [] }]
@@ -914,6 +922,7 @@ function init() {
   watchIntervalButtons.forEach((button) => {
     button.addEventListener("click", () => selectWatchInterval(button.dataset.interval || "1h"));
   });
+  watchSyncButton?.addEventListener("click", toggleWatchSyncX);
   watchModeButtons.forEach((button) => {
     button.addEventListener("click", () => setWatchMode(button.dataset.mode || "charts"));
   });
@@ -1367,6 +1376,7 @@ function loadWatchState() {
     if (!watchLists.some((list) => list.id === activeWatchListId)) {
       activeWatchListId = watchLists[0]?.id || null;
     }
+    watchSyncX = localStorage.getItem(WATCH_SYNC_X_KEY) === "1";
   } catch (error) {
     // Private browsing: the grid still works for the session.
   }
@@ -1375,6 +1385,63 @@ function loadWatchState() {
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", String(active));
   });
+  updateWatchSyncButton();
+}
+
+function updateWatchSyncButton() {
+  if (!watchSyncButton) return;
+  watchSyncButton.classList.toggle("active", watchSyncX);
+  watchSyncButton.setAttribute("aria-pressed", String(watchSyncX));
+}
+
+function toggleWatchSyncX() {
+  watchSyncX = !watchSyncX;
+  watchSyncRange = null;
+  updateWatchSyncButton();
+  persistWatchState();
+  if (watchSyncX) alignWatchCharts();
+}
+
+// setVisibleRange echoes asynchronously through the change subscription;
+// the guard stops our own propagation pass from re-firing it.
+function alignWatchCharts(range = null) {
+  let target = range || watchSyncRange;
+  if (!target) {
+    let from = null;
+    let to = null;
+    watchCharts.forEach((entry) => {
+      // Bounds are tracked on the tile entry: ISeriesApi.data() only exists
+      // in lightweight-charts v5, and this bundle is v4.2.3.
+      if (entry.firstTime === undefined || entry.lastTime === undefined) return;
+      from = from === null || entry.firstTime > from ? entry.firstTime : from;
+      to = to === null || entry.lastTime < to ? entry.lastTime : to;
+    });
+    if (from === null || to === null || from >= to) return;
+    target = { from, to };
+  }
+  watchSyncApplying = true;
+  try {
+    watchCharts.forEach((entry) => {
+      entry.instance.timeScale().setVisibleRange(target);
+    });
+  } finally {
+    watchSyncApplying = false;
+  }
+}
+
+function wireWatchSync(symbol, entry) {
+  entry.instance.timeScale().subscribeVisibleTimeRangeChange((range) => {
+    if (!watchSyncX || watchSyncApplying || !range) return;
+    watchSyncRange = range;
+    watchSyncApplying = true;
+    try {
+      watchCharts.forEach((other, otherSymbol) => {
+        if (otherSymbol !== symbol) other.instance.timeScale().setVisibleRange(range);
+      });
+    } finally {
+      watchSyncApplying = false;
+    }
+  });
 }
 
 function persistWatchState() {
@@ -1382,6 +1449,7 @@ function persistWatchState() {
     localStorage.setItem(WATCH_STORAGE_KEY, JSON.stringify(watchSymbols));
     localStorage.setItem(WATCH_INTERVAL_KEY, watchInterval);
     localStorage.setItem(WATCH_MODE_KEY, watchMode);
+    localStorage.setItem(WATCH_SYNC_X_KEY, watchSyncX ? "1" : "0");
     localStorage.setItem(
       WATCH_LISTS_KEY,
       JSON.stringify({ active: activeWatchListId, lists: watchLists }),
@@ -1427,6 +1495,7 @@ function removeWatchSymbol(symbol) {
 function selectWatchInterval(interval) {
   if (!(interval in WATCH_RANGES) || interval === watchInterval) return;
   watchInterval = interval;
+  watchSyncRange = null; // bar spacing changes; the next align re-intersects
   persistWatchState();
   watchIntervalButtons.forEach((button) => {
     const active = button.dataset.interval === interval;
@@ -1904,6 +1973,10 @@ async function loadWatchChart(symbol, token) {
       timeScale: {
         borderColor: colors.border,
         timeVisible: !DATE_ONLY_INTERVALS.has(watchInterval),
+        // 24/7 symbols pack far more bars into a shared window than session
+        // symbols; the 0.5 floor would clamp the densest chart off the
+        // synced range and misalign the axes Sync X exists to unify.
+        minBarSpacing: 0.1,
       },
       crosshair: { mode: window.LightweightCharts.CrosshairMode.Normal },
     });
@@ -1917,7 +1990,15 @@ async function loadWatchChart(symbol, token) {
     });
     series.setData(bars);
     instance.timeScale().fitContent();
-    watchCharts.set(symbol, { instance, series, container });
+    watchCharts.set(symbol, {
+      instance,
+      series,
+      container,
+      firstTime: bars[0].time,
+      lastTime: bars[bars.length - 1].time,
+    });
+    wireWatchSync(symbol, watchCharts.get(symbol));
+    if (watchSyncX) alignWatchCharts();
   } catch (error) {
     if (token !== watchRenderToken) return;
     // Only a genuinely empty payload means the symbol has no history;
@@ -1952,7 +2033,11 @@ async function refreshWatchData() {
             close: numericOrNull(bar.close),
           }))
           .filter((bar) => Number.isFinite(bar.close) && Number.isFinite(bar.open));
-        if (bars.length) entry.series.setData(bars);
+        if (bars.length) {
+          entry.series.setData(bars);
+          entry.firstTime = bars[0].time;
+          entry.lastTime = bars[bars.length - 1].time;
+        }
       } catch (error) {
         /* keep the last good candles */
       }
