@@ -11,7 +11,9 @@ from typing import Any, cast
 
 from fastapi import WebSocket
 
+from app import db
 from app.providers.hyperliquid import HyperliquidProvider
+from app.runtime import polling_cycle
 from app.services.daily_board import crypto_breadth_metrics
 from app.services.earnings import week_start
 from app.services.econ_calendar import any_hot_release, key_dates_payload
@@ -87,15 +89,16 @@ async def quote_poll_loop(app_state: Any) -> None:
     while True:
         started = asyncio.get_running_loop().time()
         try:
-            # One groups snapshot per cycle: a watchlist edit completing
-            # mid-cycle must not zip NEW groups against OLD quotes.
-            groups = app_state.groups
-            grouped = await app_state.quote_service.get_board_quotes(with_macro_group(groups))
-            payload = {
-                "type": "quotes",
-                "data": await board_payload_async(app_state, groups, grouped),
-            }
-            await app_state.connection_manager.broadcast(payload)
+            with polling_cycle(app_state, "poll_task"):
+                # One groups snapshot per cycle: a watchlist edit completing
+                # mid-cycle must not zip NEW groups against OLD quotes.
+                groups = app_state.groups
+                grouped = await app_state.quote_service.get_board_quotes(with_macro_group(groups))
+                payload = {
+                    "type": "quotes",
+                    "data": await board_payload_async(app_state, groups, grouped),
+                }
+                await app_state.connection_manager.broadcast(payload)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -130,9 +133,10 @@ async def hyperliquid_discovery_loop(app_state: Any) -> None:
     await asyncio.sleep(HYPERLIQUID_DISCOVERY_INITIAL_DELAY_SECONDS)
     while True:
         try:
-            changed = await refresh_hyperliquid_discovery(app_state)
-            if changed:
-                logger.info("Hyperliquid discovery groups refreshed")
+            with polling_cycle(app_state, "hyperliquid_discovery_task"):
+                changed = await refresh_hyperliquid_discovery(app_state)
+                if changed:
+                    logger.info("Hyperliquid discovery groups refreshed")
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -145,9 +149,10 @@ async def sofr_refresh_loop(app_state: Any) -> None:
     await asyncio.sleep(2)
     while True:
         try:
-            changed = await app_state.sofr_service.refresh(force=True)
-            if changed:
-                logger.info("SOFR observation refreshed")
+            with polling_cycle(app_state, "sofr_task"):
+                changed = await app_state.sofr_service.refresh(force=True)
+                if changed:
+                    logger.info("SOFR observation refreshed")
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -164,16 +169,17 @@ async def earnings_warm_loop(app_state: Any) -> None:
     await asyncio.sleep(3)
     while True:
         try:
-            held = {
-                asset.symbol.upper()
-                for group in getattr(app_state, "groups", [])
-                for asset in group.assets
-            }
-            await app_state.earnings_service.get_week_cached(
-                week_start(datetime.now(UTC).date()),
-                held,
-                getattr(app_state, "options_service", None),
-            )
+            with polling_cycle(app_state, "earnings_task"):
+                held = {
+                    asset.symbol.upper()
+                    for group in getattr(app_state, "groups", [])
+                    for asset in group.assets
+                }
+                await app_state.earnings_service.get_week_cached(
+                    week_start(datetime.now(UTC).date()),
+                    held,
+                    getattr(app_state, "options_service", None),
+                )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -190,18 +196,30 @@ async def ai_data_warm_loop(app_state: Any) -> None:
     """Accrue AI catalog, token-index, capex, and cloud-GPU pricing unattended."""
     await asyncio.sleep(5)
     while True:
-        loaders = (
-            app_state.ai_data_service.get_models,
-            app_state.ai_data_service.get_token_index,
-            app_state.ai_capex_service.get_capex,
-            app_state.gpu_compute_service.get_hardware,
-        )
-        results = await asyncio.gather(*(loader() for loader in loaders), return_exceptions=True)
-        for loader, result in zip(loaders, results, strict=True):
-            if isinstance(result, asyncio.CancelledError):
-                raise result
-            if isinstance(result, BaseException):
-                logger.warning("AI data warm loader %s failed: %s", loader.__name__, result)
+        try:
+            with polling_cycle(app_state, "ai_data_task"):
+                loaders = (
+                    app_state.ai_data_service.get_models,
+                    app_state.ai_data_service.get_token_index,
+                    app_state.ai_capex_service.get_capex,
+                    app_state.gpu_compute_service.get_hardware,
+                )
+                results = await asyncio.gather(
+                    *(loader() for loader in loaders), return_exceptions=True
+                )
+                failure: Exception | None = None
+                for loader, result in zip(loaders, results, strict=True):
+                    if isinstance(result, asyncio.CancelledError):
+                        raise result
+                    if isinstance(result, Exception):
+                        logger.warning("AI data warm loader %s failed: %s", loader.__name__, result)
+                        failure = result
+                if failure is not None:
+                    raise failure
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("AI data warm cycle failed")
         await asyncio.sleep(AI_DATA_WARM_SECONDS)
 
 
@@ -209,7 +227,8 @@ async def history_refresh_loop(app_state: Any) -> None:
     await asyncio.sleep(2)
     while True:
         try:
-            await _refresh_daily_history(app_state)
+            with polling_cycle(app_state, "history_task"):
+                await _refresh_daily_history(app_state)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -227,12 +246,16 @@ async def news_poll_loop(app_state: Any) -> None:
     await asyncio.sleep(2)
     while True:
         try:
-            new_items = await app_state.news_service.refresh()
-            if new_items:
-                feed = app_state.news_service.feed_payload()
-                await app_state.connection_manager.broadcast(
-                    {"type": "news", "data": {**feed, "map": app_state.news_service.map_payload()}}
-                )
+            with polling_cycle(app_state, "news_task"):
+                new_items = await app_state.news_service.refresh()
+                if new_items:
+                    feed = app_state.news_service.feed_payload()
+                    await app_state.connection_manager.broadcast(
+                        {
+                            "type": "news",
+                            "data": {**feed, "map": app_state.news_service.map_payload()},
+                        }
+                    )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -258,18 +281,21 @@ async def econ_calendar_loop(app_state: Any) -> None:
     while True:
         sleep_seconds = ECON_IDLE_POLL_SECONDS
         try:
-            payload = await key_dates_payload(
-                app_state.settings.database_path, app_state.econ_calendar_service
-            )
-            items = cast(list[dict[str, Any]], payload["key_dates"])
-            state = _release_state(items)
-            # The first cycle only primes the baseline: WS clients get a
-            # full snapshot on connect, so there is nothing new to push.
-            if last_state is not None and _release_changed(last_state, state):
-                await app_state.connection_manager.broadcast({"type": "key_dates", "data": payload})
-            last_state = state
-            if any_hot_release(items):
-                sleep_seconds = ECON_HOT_POLL_SECONDS
+            with polling_cycle(app_state, "econ_calendar_task"):
+                payload = await key_dates_payload(
+                    app_state.settings.database_path, app_state.econ_calendar_service
+                )
+                items = cast(list[dict[str, Any]], payload["key_dates"])
+                state = _release_state(items)
+                # The first cycle only primes the baseline: WS clients get a
+                # full snapshot on connect, so there is nothing new to push.
+                if last_state is not None and _release_changed(last_state, state):
+                    await app_state.connection_manager.broadcast(
+                        {"type": "key_dates", "data": payload}
+                    )
+                last_state = state
+                if any_hot_release(items):
+                    sleep_seconds = ECON_HOT_POLL_SECONDS
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -316,33 +342,39 @@ async def _refresh_daily_history(app_state: Any) -> None:
                 symbol,
                 interval="1d",
                 range_="1y",
+                force_refresh=True,
             )
 
     await asyncio.gather(*(refresh(symbol) for symbol in symbols))
 
 
-# Memoized on the grouped-quotes snapshot: QuoteService returns the SAME
-# dict object for the whole cache window, so identity is a correct key and
-# the poll loop, HTTP route, and WS handshake share one build per window.
-# Holding each dict itself (not just id()) keeps identity valid across GC.
-_payload_cache: tuple[Any, dict[str, object]] | None = None
-_payload_tasks: dict[int, tuple[Any, asyncio.Task[dict[str, object]]]] = {}
+# Cache a quotes snapshot only while its underlying daily bars are unchanged.
+# Hold the grouped dict itself to keep identity valid across garbage collection.
+_payload_cache: tuple[Any, int, dict[str, object]] | None = None
+_payload_tasks: dict[tuple[int, int], tuple[Any, asyncio.Task[dict[str, object]]]] = {}
 _payload_generation = 0
 
 
 async def board_payload_async(app_state: Any, groups: Any, grouped: Any) -> dict[str, object]:
     global _payload_generation
-    if _payload_cache is not None and _payload_cache[0] is grouped:
-        return _payload_cache[1]
+    settings = getattr(app_state, "settings", None)
+    path = getattr(settings, "database_path", None)
+    revision = await asyncio.to_thread(db.bars_revision, path) if path is not None else 0
+    if (
+        _payload_cache is not None
+        and _payload_cache[0] is grouped
+        and _payload_cache[1] == revision
+    ):
+        return _payload_cache[2]
 
-    key = id(grouped)
+    key = (id(grouped), revision)
     in_flight = _payload_tasks.get(key)
     if in_flight is not None and in_flight[0] is grouped:
         task = in_flight[1]
     else:
         _payload_generation += 1
         task = asyncio.create_task(
-            _build_and_cache_payload(app_state, groups, grouped, _payload_generation)
+            _build_and_cache_payload(app_state, groups, grouped, revision, _payload_generation)
         )
         _payload_tasks[key] = (grouped, task)
         task.add_done_callback(lambda finished: _discard_payload_task(key, grouped, finished))
@@ -351,18 +383,18 @@ async def board_payload_async(app_state: Any, groups: Any, grouped: Any) -> dict
 
 
 async def _build_and_cache_payload(
-    app_state: Any, groups: Any, grouped: Any, generation: int
+    app_state: Any, groups: Any, grouped: Any, revision: int, generation: int
 ) -> dict[str, object]:
     global _payload_cache
     # build_board loads the full 1d bars table: keep that work off the event loop.
     payload = await asyncio.to_thread(_board_payload, app_state, groups, grouped)
     if generation == _payload_generation:
-        _payload_cache = (grouped, payload)
+        _payload_cache = (grouped, revision, payload)
     return payload
 
 
 def _discard_payload_task(
-    key: int,
+    key: tuple[int, int],
     grouped: Any,
     task: asyncio.Task[dict[str, object]],
 ) -> None:
@@ -395,5 +427,7 @@ def _board_payload(app_state: Any, groups: Any, grouped: Any) -> dict[str, objec
 
 async def stop_task(task: asyncio.Task[None]) -> None:
     task.cancel()
-    with suppress(asyncio.CancelledError):
+    # Failed tasks have already reported their error through the done callback;
+    # shutdown must still close the remaining loops and network clients.
+    with suppress(asyncio.CancelledError, Exception):
         await task

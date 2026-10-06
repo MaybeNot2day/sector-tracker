@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-from vault_report_uploader import load_config
+from vault_report_uploader import _is_secure_board_url, load_config
 
 HERMES_BIN = Path.home() / ".local/bin/hermes"
 FRINGE_JOB_ID = "fa74bf34781c"
@@ -44,11 +44,23 @@ def _num(value: Any) -> float | None:
 
 
 def fetch_book(base_url: str) -> dict[str, Any]:
+    if not _is_secure_board_url(base_url):
+        raise ValueError("BOARD_URL must use HTTPS (HTTP is allowed only for localhost)")
     request = urllib.request.Request(
-        base_url + "/api/fringe", headers={"Accept": "application/json"}
+        base_url + "/api/fringe",
+        headers={"Accept": "application/json", "X-Edit-Token": load_config().get("EDIT_TOKEN", "")},
     )
     with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:  # nosec B310
-        return cast(dict[str, Any], json.loads(response.read().decode("utf-8")))
+        payload = json.loads(response.read().decode("utf-8"))
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(payload.get("open"), list)
+        or not isinstance(payload.get("closed"), list)
+        or not isinstance(payload.get("summary"), dict)
+        or not isinstance(payload["summary"].get("portfolio"), dict)
+    ):
+        raise ValueError("malformed Fringe book payload")
+    return cast(dict[str, Any], payload)
 
 
 def signed_usd(value: float) -> str:
@@ -188,6 +200,8 @@ def format_stats_block(
         f"= {giveback_pct:.1f}% of equity",
         "- While CALIBRATION_CAP: conf cap 55, risk <= 0.75% equity per OPEN, "
         "planned RR >= 2 required",
+        "- Breaker policy: negative expectancy activates CALIBRATION_CAP, not "
+        "NO_NEW_OPENS; only 5+ consecutive losses halt entries",
         "- While NO_NEW_OPENS: manage the open book only; new OPENs are sized to zero",
     ]
     return "\n".join(lines)

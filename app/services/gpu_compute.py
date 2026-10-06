@@ -153,7 +153,10 @@ class GPUComputeService:
             headers={"Authorization": f"Bearer {self.api_key}"},
         )
         response.raise_for_status()
-        raw = response.json()
+        try:
+            raw = response.json()
+        except ValueError as exc:
+            raise GPUComputeError("API response is not valid JSON") from exc
         if not isinstance(raw, dict) or not isinstance(raw.get("data"), list):
             raise GPUComputeError("API response has no data array")
         raw_rows = cast(list[object], raw["data"])

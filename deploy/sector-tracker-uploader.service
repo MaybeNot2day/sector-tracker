@@ -9,4 +9,5 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 /home/ds/.local/bin/vault_report_uploader.py
+ExecStart=/usr/bin/python3 %h/.local/bin/vault_report_uploader.py
+UMask=0077

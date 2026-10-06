@@ -1,0 +1,42 @@
+name: Project checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.18"
+          enable-cache: true
+      - run: uv sync --locked --extra dev --python 3.12
+      - run: uv run --no-sync ruff check app scripts tests
+      - run: uv run --no-sync mypy app
+      - run: uv run --no-sync pytest -q -m 'not e2e'
+      - run: for script in deploy/*.sh scripts/*.sh; do bash -n "$script"; done
+
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.18"
+          enable-cache: true
+      - run: uv sync --locked --extra dev --python 3.12
+      - run: uv run --no-sync playwright install --with-deps chromium
+      - run: uv run --no-sync pytest tests/test_playwright_smoke.py -q
+        env:
+          RUN_PLAYWRIGHT: "1"

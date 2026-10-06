@@ -91,14 +91,17 @@ def _daily_bar(symbol: str, timestamp: datetime, close: float = 100.0) -> Bar:
 
 @pytest.mark.asyncio
 async def test_fresh_cached_daily_bars_skip_live_providers(tmp_path: Path) -> None:
-    """A chart open must not wait on a provider when SQLite already holds a
-    fresh (<26h) daily series — the hourly warm loop keeps it current."""
+    """A recent successful daily fetch can serve a chart without provider I/O."""
     database = tmp_path / "board.sqlite3"
     groups = [
         GroupConfig(name="TEST", assets=[AssetConfig(symbol="SPY", type="etf", source="yahoo")])
     ]
     now = datetime.now(UTC)
-    db.save_bars(database, [_daily_bar("SPY", now - timedelta(days=2)), _daily_bar("SPY", now)])
+    db.save_bars(
+        database,
+        [_daily_bar("SPY", now - timedelta(days=2)), _daily_bar("SPY", now)],
+        fetched_at=now,
+    )
     provider = CountingHistoryProvider()
     service = HistoryService(database, {"yahoo": provider})
 
@@ -223,19 +226,6 @@ async def test_sqlite_fallback_chooses_one_provider_series(
     assert [bar.close for bar in bars] == [100.0, 101.0]
 
 
-def test_history_cache_evicts_completed_old_keys(tmp_path: Path) -> None:
-    service = HistoryService(tmp_path / "board.sqlite3", {"yahoo": EmptyHistoryProvider()})
-    for index in range(history_module.HISTORY_CACHE_MAX + 1):
-        key: tuple[str, ProviderName, str, str] = (f"SYM{index}", "yahoo", "1d", "1y")
-        service._history_cache[key] = (float(index), [])
-        service._history_locks[key] = asyncio.Lock()
-
-    service._evict_history_cache()
-
-    assert len(service._history_cache) == history_module.HISTORY_CACHE_MAX
-    assert set(service._history_locks) == set(service._history_cache)
-
-
 @pytest.mark.asyncio
 async def test_self_heal_extends_backoff_when_newest_bar_does_not_advance(
     tmp_path: Path,
@@ -270,3 +260,142 @@ async def test_self_heal_extends_backoff_when_newest_bar_does_not_advance(
     await service.refresh_stale_daily_bars(groups)
 
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_daily_fetch_freshness_is_not_the_session_start(tmp_path: Path) -> None:
+    database = tmp_path / "board.sqlite3"
+    groups = [
+        GroupConfig(name="TEST", assets=[AssetConfig("SPY", "etf", "yahoo")])
+    ]
+    now = datetime.now(UTC)
+    closed_session = _daily_bar("SPY", now - timedelta(days=3))
+    db.save_bars(database, [closed_session], fetched_at=now)
+    provider = CountingHistoryProvider()
+    service = HistoryService(database, {"yahoo": provider})
+
+    assert await service.get_history(groups, "SPY", interval="1d", range_="1y") == [closed_session]
+    assert provider.calls == 0
+    # Conversely, a current-day candle fetched long ago is not fresh.
+    current = _daily_bar("SPY", now.replace(hour=0, minute=0, second=0, microsecond=0))
+    db.save_bars(database, [current], fetched_at=now - timedelta(hours=2))
+    await service.get_history(groups, "SPY", interval="1d", range_="1y")
+    assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_forced_refresh_bypasses_memory_and_current_day_sqlite(tmp_path: Path) -> None:
+    database = tmp_path / "board.sqlite3"
+    now = datetime.now(UTC)
+    groups = [GroupConfig("TEST", [AssetConfig("SPY", "etf", "yahoo")])]
+    db.save_bars(database, [_daily_bar("SPY", now)], fetched_at=now)
+
+    class CorrectingProvider(CountingHistoryProvider):
+        async def get_history(
+            self, asset: AssetConfig, *, interval: str, range_: str
+        ) -> list[Bar]:
+            self.calls += 1
+            return [_daily_bar(asset.symbol, now, 105.0)]
+
+    provider = CorrectingProvider()
+    service = HistoryService(database, {"yahoo": provider})
+    assert (await service.get_history(groups, "SPY", interval="1d", range_="1y"))[0].close == 100
+    refreshed = await service.get_history(
+        groups, "SPY", interval="1d", range_="1y", force_refresh=True
+    )
+    assert provider.calls == 1
+    assert refreshed[0].close == 105.0
+    assert db.load_bars(database, "SPY", "1d", "yahoo")[0].close == 105.0
+    assert (await service.get_history(groups, "SPY", interval="1d", range_="1y"))[0].close == 105.0
+
+
+@pytest.mark.asyncio
+async def test_history_memory_cache_observes_same_timestamp_correction_and_delete(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "board.sqlite3"
+    now = datetime.now(UTC)
+    groups = [GroupConfig("TEST", [AssetConfig("SPY", "etf", "yahoo")])]
+    db.save_bars(database, [_daily_bar("SPY", now)], fetched_at=now)
+    service = HistoryService(database, {"yahoo": EmptyHistoryProvider()})
+    assert (await service.get_history(groups, "SPY", interval="1d", range_="1y"))[0].close == 100.0
+    db.save_bars(database, [_daily_bar("SPY", now, 105.0)], fetched_at=now)
+    assert (await service.get_history(groups, "SPY", interval="1d", range_="1y"))[0].close == 105.0
+    with db._connect(database) as conn:
+        conn.execute("DELETE FROM bars WHERE symbol = 'SPY'")
+    assert await service.get_history(groups, "SPY", interval="1d", range_="1y") == []
+
+
+@pytest.mark.asyncio
+async def test_krx_fx_outage_keeps_one_usd_history_series(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.providers import yahoo
+
+    database = tmp_path / "board.sqlite3"
+    now = datetime.now(UTC)
+    asset = AssetConfig("005930.KS", "equity", "yahoo")
+    groups = [GroupConfig("KRX", [asset])]
+    fx_available = [True]
+    native = Bar(asset.symbol, "yahoo", "1d", now, 155_000, 170_500, 139_500, 155_000)
+    fx = Bar("KRW=X", "yahoo", "1d", now, 1550, 1550, 1550, 1550)
+
+    def raw_history(
+        requested: AssetConfig, interval: str, range_: str
+    ) -> list[Bar]:
+        if requested.symbol == "KRW=X":
+            return [fx] if fx_available[0] else []
+        return [native]
+
+    monkeypatch.setattr(yahoo, "_get_raw_history_sync", raw_history)
+    stooq = CountingHistoryProvider()
+    service = HistoryService(database, {"yahoo": yahoo.YahooProvider(), "stooq": stooq})
+    first = await service.get_history(
+        groups, asset.symbol, interval="1d", range_="1y", force_refresh=True
+    )
+    assert [bar.close for bar in first] == [100.0]
+    fx_available[0] = False
+    stale = await service.get_history(
+        groups, asset.symbol, interval="1d", range_="1y", force_refresh=True
+    )
+    assert [bar.close for bar in stale] == [100.0]
+    assert [bar.close for bar in db.load_bars(database, asset.symbol, "1d")] == [100.0]
+    assert stooq.calls == 0
+
+
+def test_daily_range_filters_use_calendar_month_and_year() -> None:
+    year_end = datetime(2026, 7, 31, tzinfo=UTC)
+    annual = [
+        _daily_bar("BTC", datetime(2025, 7, 30, tzinfo=UTC)),
+        _daily_bar("BTC", datetime(2025, 7, 31, tzinfo=UTC)),
+        _daily_bar("BTC", year_end),
+    ]
+    assert [bar.timestamp for bar in filter_bars_to_range(annual, "1y")] == [
+        datetime(2025, 7, 31, tzinfo=UTC), year_end
+    ]
+    monthly = [
+        _daily_bar("BTC", datetime(2026, 6, 14, tzinfo=UTC)),
+        _daily_bar("BTC", datetime(2026, 6, 15, tzinfo=UTC)),
+        _daily_bar("BTC", datetime(2026, 7, 15, tzinfo=UTC)),
+    ]
+    assert [bar.timestamp for bar in filter_bars_to_range(monthly, "1mo")] == [
+        datetime(2026, 6, 15, tzinfo=UTC), datetime(2026, 7, 15, tzinfo=UTC)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_krx_outage_does_not_switch_to_unlabelled_foreign_provider_cache(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "board.sqlite3"
+    now = datetime.now(UTC)
+    db.save_bars(
+        database,
+        [Bar("005930.KS", "stooq", "1d", now, 155_000, 170_500, 139_500, 155_000)],
+    )
+    asset = AssetConfig("005930.KS", "equity", "yahoo")
+    service = HistoryService(database, {"yahoo": EmptyHistoryProvider()})
+    assert await service.get_history(
+        [GroupConfig("KRX", [asset])], asset.symbol,
+        interval="1d", range_="1y", force_refresh=True,
+    ) == []

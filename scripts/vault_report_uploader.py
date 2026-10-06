@@ -12,9 +12,9 @@ Stdlib only and Python 3.9 compatible so it runs on macOS system python3.
 
 Config lives in ~/.config/sector-tracker/uploader.env (KEY=VALUE lines):
 
-    BOARD_URL=http://167.172.160.215:8787
+    BOARD_URL=https://your-board.example
     EDIT_TOKEN=...
-    VAULT_DIR=/Users/you/Desktop/Main/HERMES RESEARCH   # optional
+    VAULT_DIR=/home/you/hermes-research                 # optional
     MAX_AGE_DAYS=30                                     # optional
     REPORT_TITLES=Biotech Pharma Brief                  # optional, comma-separated
     NOTIFY_TARGET=slack:#market-briefs                  # optional, comma-separated
@@ -52,12 +52,20 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
+# The installer copies this same stdlib-only module beside standalone scripts.
+try:
+    from app.fringe_grammar import iter_fringe_actions
+except ModuleNotFoundError as exc:
+    if exc.name != "app":
+        raise
+    from fringe_grammar import iter_fringe_actions  # type: ignore[no-redef,import-not-found]
 CONFIG_PATH = Path.home() / ".config/sector-tracker/uploader.env"
 STATE_PATH = Path.home() / ".local/state/sector-tracker/vault-uploads.json"
 DATED_NAME = re.compile(r"^(\d{4}-\d{2}-\d{2}) (.+)\.md$")
 # Vault-writing cron jobs; extend via REPORT_TITLES instead of editing this.
 DEFAULT_REPORT_TITLES = (
-    "Biotech Pharma Brief, AI Semis Morning Brief, Macro Tape Brief, US Asia Close, Fringe Corner"
+    "Biotech Pharma Brief, AI Semis Morning Brief, Macro Tape Brief, US Asia Close, "
+    "Fringe Corner, Fringe Weekly Review"
 )
 HERMES_BIN = Path.home() / ".local/bin/hermes"
 NOTIFY_TIMEOUT = 20
@@ -154,30 +162,29 @@ REPORT_CONTRACT_EFFECTIVE_DATE = date(2026, 7, 22)
 # First run of the research-vetted Fringe prompt; older briefs predate the section.
 DUE_DILIGENCE_EFFECTIVE_DATE = date(2026, 7, 31)
 
-# Mirrors the board's bullet grammar: verbs case-insensitive, ticker strict
-# uppercase, separator required — bullets the board would skip are not gated.
-_FRINGE_OPEN_BULLET = re.compile(
-    r"^\s*[-*]\s+(?i:OPEN)\s+(?i:LONG|SHORT)\s+([A-Z0-9.\-=]{1,15})\s*[—:-]",
-    re.MULTILINE,
-)
-
 
 def _report_section(report: str, title: str) -> str | None:
     """Body of the first `## <title>` section; None when the heading is absent."""
     lines = report.splitlines()
-    heading = re.compile(rf"##\s+{re.escape(title)}\s*", re.IGNORECASE)
+    heading = re.compile(rf"\s{{0,3}}##\s+{re.escape(title)}\s*#*\s*", re.IGNORECASE)
     start = next((i + 1 for i, line in enumerate(lines) if heading.fullmatch(line)), None)
     if start is None:
         return None
     body = lines[start:]
-    end = next((j for j, line in enumerate(body) if line.startswith("## ")), len(body))
+    end = next(
+        (j for j, line in enumerate(body) if re.match(r"^\s{0,3}#{1,2}\s+", line)),
+        len(body),
+    )
     return "\n".join(body[:end])
 
 
 def _due_diligence_violation(report: str) -> str | None:
     """Every OPEN must carry a CONFIRMED, source-linked due-diligence block."""
-    fringe = _report_section(report, "Fringe Corner") or ""
-    tickers = list(dict.fromkeys(_FRINGE_OPEN_BULLET.findall(fringe)))
+    tickers = list(
+        dict.fromkeys(
+            ticker for action, _, ticker, _ in iter_fringe_actions(report) if action == "open"
+        )
+    )
     if not tickers:
         return None
     diligence = _report_section(report, "Due Diligence")
@@ -186,8 +193,9 @@ def _due_diligence_violation(report: str) -> str | None:
     blocks: dict[str, list[str]] = {}
     current: list[str] | None = None
     for line in diligence.splitlines():
-        if line.startswith("### "):
-            current = blocks.setdefault(line[4:].strip(), [])
+        heading_match = re.match(r"^\s{0,3}###\s+(.*?)\s*#*\s*$", line)
+        if heading_match:
+            current = blocks.setdefault(heading_match.group(1), [])
         if current is not None:
             current.append(line)
     for ticker in tickers:
@@ -197,17 +205,22 @@ def _due_diligence_violation(report: str) -> str | None:
         )
         if heading is None:
             return f"OPEN {ticker} has no due-diligence block"
-        if not re.search(r"\bCONFIRMED\b", heading, re.IGNORECASE):
+        verdict = heading[len(ticker) :].strip().lstrip("—–:-").strip()
+        if verdict.casefold() != "confirmed":
             return f"OPEN {ticker} due-diligence verdict is not CONFIRMED"
-        if "http" not in "\n".join(blocks[heading]):
+        if not re.search(r"https?://[^\s<>)]+", "\n".join(blocks[heading]), re.IGNORECASE):
             return f"due-diligence for OPEN {ticker} cites no source link"
     return None
 
 
 def validate_report_body(title: str, date_text: str, body: str) -> str | None:
-    """Return a contract violation for a current known cron report, otherwise None."""
+    """Gate every current Fringe OPEN, plus the known cron frontmatter contracts."""
     title_key = title.casefold()
     report_date = date.fromisoformat(date_text)
+    if report_date >= DUE_DILIGENCE_EFFECTIVE_DATE:
+        violation = _due_diligence_violation(body)
+        if violation:
+            return violation
     if title_key not in KNOWN_REPORT_TITLES or report_date < REPORT_CONTRACT_EFFECTIVE_DATE:
         return None
     if not body.startswith("---\n"):
@@ -248,8 +261,6 @@ def validate_report_body(title: str, date_text: str, body: str) -> str | None:
         and report.count("---FEED-STATUS---") != 1
     ):
         return "report must contain exactly one FEED-STATUS delimiter"
-    if title_key == "fringe corner" and report_date >= DUE_DILIGENCE_EFFECTIVE_DATE:
-        return _due_diligence_violation(report)
     return None
 
 
@@ -344,7 +355,7 @@ def run(argv: list[str] | None = None) -> int:
     config = load_config()
     base_url = config.get("BOARD_URL", "")
     token = config.get("EDIT_TOKEN", "")
-    vault = Path(config.get("VAULT_DIR") or Path.home() / "Desktop/Main/HERMES RESEARCH")
+    vault = Path(config.get("VAULT_DIR") or Path.home() / "hermes-research")
     try:
         max_age_days = int(config.get("MAX_AGE_DAYS", "30"))
     except ValueError:

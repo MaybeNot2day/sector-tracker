@@ -281,15 +281,18 @@ def _daily_bar(timestamp: datetime) -> Bar:
 
 
 @pytest.mark.parametrize(
-    ("range_", "window_days"),
-    [("6mo", 186), ("10y", 3660)],
+    ("range_", "end", "boundary"),
+    [
+        ("6mo", datetime(2024, 8, 31, tzinfo=UTC), datetime(2024, 2, 29, tzinfo=UTC)),
+        ("10y", datetime(2024, 2, 29, tzinfo=UTC), datetime(2014, 2, 28, tzinfo=UTC)),
+    ],
 )
-def test_filter_bars_to_range_supports_6mo_and_10y_windows(range_: str, window_days: int) -> None:
-    end = datetime(2026, 7, 1, tzinfo=UTC)
-    inside = end - timedelta(days=window_days)
-    outside = end - timedelta(days=window_days + 1)
-    bars = [_daily_bar(outside), _daily_bar(inside), _daily_bar(end)]
-
-    filtered = filter_bars_to_range(bars, range_)
-
-    assert [bar.timestamp for bar in filtered] == [inside, end]
+def test_calendar_chart_ranges_clamp_leap_day_anchors(
+    range_: str, end: datetime, boundary: datetime
+) -> None:
+    bars = [
+        _daily_bar(boundary - timedelta(days=1)),
+        _daily_bar(boundary),
+        _daily_bar(end),
+    ]
+    assert [bar.timestamp for bar in filter_bars_to_range(bars, range_)] == [boundary, end]

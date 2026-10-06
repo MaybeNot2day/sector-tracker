@@ -10,6 +10,7 @@ from typing import Any, cast
 
 import httpx
 
+from app.calendar_windows import range_start
 from app.models import AssetConfig, Bar, Quote, is_valid_bar
 from app.providers.base import QuoteProvider, ValidationStatus
 
@@ -98,6 +99,11 @@ class HyperliquidProvider(QuoteProvider):
         if market is None:
             return []
         start, end = _range_to_window(range_)
+        if interval == "1d":
+            # Keep a completed anchor before the requested calendar window:
+            # today's partial daily bar and a leap year need more than 365
+            # close observations for a genuine one-year return.
+            start = start.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=7)
         payload = await self._post_info(
             # Per-coin cooldown key: one symbol's failing candle request must
             # never black out every other symbol's chart.
@@ -408,22 +414,8 @@ def _bar_from_candle(asset: AssetConfig, raw: Any, interval: str) -> Bar | None:
 
 def _range_to_window(range_: str) -> tuple[datetime, datetime]:
     end = datetime.now(UTC)
-    today = end.date()
-    start = {
-        "10m": end - timedelta(minutes=10),
-        "30m": end - timedelta(minutes=30),
-        "1h": end - timedelta(hours=1),
-        "4h": end - timedelta(hours=4),
-        "1d": end - timedelta(days=1),
-        "1w": end - timedelta(days=7),
-        "1mo": end - timedelta(days=31),
-        "3mo": end - timedelta(days=93),
-        "6mo": end - timedelta(days=186),
-        "1y": end - timedelta(days=366),
-        "5y": end - timedelta(days=366 * 5),
-        "10y": end - timedelta(days=366 * 10),
-        "ytd": datetime(today.year, 1, 1, tzinfo=UTC),
-    }.get(range_, end - timedelta(days=366))
+    start = range_start(end, range_) or range_start(end, "1y")
+    assert start is not None
     return start, end
 
 

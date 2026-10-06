@@ -163,10 +163,17 @@ class YahooProvider(QuoteProvider):
             for asset in fx_assets
             if asset.name and asset.symbol in fx_quotes
         }
-        return {
-            symbol: _quote_with_usd_display(quote, fx_by_currency.get(quote.currency or ""))
-            for symbol, quote in quotes_by_symbol.items()
-        }
+        converted: dict[str, Quote] = {}
+        for symbol, quote in quotes_by_symbol.items():
+            fx_quote = fx_by_currency.get(quote.currency or "")
+            if quote.currency in YAHOO_USD_FX_SYMBOLS and (
+                fx_quote is None or not math.isfinite(fx_quote.last) or fx_quote.last <= 0
+            ):
+                # Let QuoteService retain the last coherent USD quote as
+                # stale; never overwrite it with a native-currency refresh.
+                continue
+            converted[symbol] = _quote_with_usd_display(quote, fx_quote)
+        return converted
 
     def _get_history_sync(self, asset: AssetConfig, interval: str, range_: str) -> list[Bar]:
         bars = _get_raw_history_sync(asset, interval, range_)
@@ -310,7 +317,9 @@ def _bars_with_usd_display(
     )
     fx_rates = _fx_rates(fx_bars)
     if not fx_rates:
-        return bars
+        # This series is persisted in USD. Returning KRW here contaminates
+        # both charts and every later cached calculation during an FX outage.
+        return []
     converted = [_bar_to_usd(bar, _matching_fx_rate(bar.timestamp, fx_rates)) for bar in bars]
     return [bar for bar in converted if is_valid_bar(bar)]
 
@@ -562,7 +571,7 @@ def _quote_from_chart_result(asset: AssetConfig, result: dict[str, Any]) -> Quot
         last=last,
         previous_close=previous_close,
         timestamp=market_price[1] if market_price else datetime.now(UTC),
-        currency=_currency(meta),
+        currency=_asset_listing_currency(asset) or _currency(meta),
         volume=_number(meta.get("regularMarketVolume")),
         open_price=_session_open(result),
         official_close=_official_regular_close(meta),

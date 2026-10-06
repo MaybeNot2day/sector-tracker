@@ -63,8 +63,11 @@ def save_state(state: dict[str, Any], path: Path = STATE_PATH) -> None:
 
 
 def fetch_book(base_url: str) -> dict[str, Any]:
+    if not _is_secure_board_url(base_url):
+        raise ValueError("BOARD_URL must use HTTPS (HTTP is allowed only for localhost)")
     request = urllib.request.Request(
-        base_url + "/api/fringe", headers={"Accept": "application/json"}
+        base_url + "/api/fringe",
+        headers={"Accept": "application/json", "X-Edit-Token": load_config().get("EDIT_TOKEN", "")},
     )
     with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:  # nosec B310
         return cast(dict[str, Any], json.loads(response.read().decode("utf-8")))

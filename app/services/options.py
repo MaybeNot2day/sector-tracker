@@ -53,6 +53,7 @@ class MarketDataOptionsService:
         # error code so cooled requests reproduce the client-visible contract.
         self._symbol_locks: dict[str, asyncio.Lock] = {}
         self._failure_until: dict[tuple[str, str], tuple[float, str]] = {}
+        self._expiration_failure_until: dict[str, tuple[float, OptionsDataError]] = {}
 
     async def get_snapshot(self, symbol: str, expiration: str | None = None) -> dict[str, object]:
         if not self.token:
@@ -137,16 +138,28 @@ class MarketDataOptionsService:
         cached = self._expirations_cache.get(symbol)
         if cached is not None and monotonic() - cached[0] < self.EXPIRATIONS_CACHE_SECONDS:
             return cached[1]
+        cooldown = self._expiration_failure_until.get(symbol)
+        if cooldown is not None and monotonic() < cooldown[0]:
+            if cached is not None:
+                return cached[1]
+            error = cooldown[1]
+            raise OptionsDataError(error.code, status_code=error.status_code)
         try:
             encoded_symbol = quote(symbol, safe=".-")
             payload = await self._get_json(f"/v1/options/expirations/{encoded_symbol}/", {})
-        except OptionsDataError:
+            expirations = _expiration_dates(payload)
+            if not expirations:
+                raise OptionsDataError("options_expirations_unavailable", status_code=404)
+        except OptionsDataError as exc:
+            self._expiration_failure_until[symbol] = (
+                monotonic() + self.FAILURE_COOLDOWN_SECONDS,
+                exc,
+            )
+            _evict_oldest(self._expiration_failure_until, self.EXPIRATIONS_CACHE_MAX)
             if cached is not None:
                 return cached[1]
             raise
-        expirations = _expiration_dates(payload)
-        if not expirations:
-            raise OptionsDataError("options_expirations_unavailable", status_code=404)
+        self._expiration_failure_until.pop(symbol, None)
         self._expirations_cache[symbol] = (monotonic(), expirations)
         _evict_oldest(self._expirations_cache, self.EXPIRATIONS_CACHE_MAX)
         return expirations

@@ -2,12 +2,11 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from threading import Lock
 from typing import cast
 
 import pytest
 
-from app import db
+from app import db, db_schema
 from app.models import Bar, ProviderName, Quote
 
 
@@ -140,38 +139,78 @@ def test_save_bars_quarantines_all_invalid_batch(tmp_path: Path) -> None:
     )
 
 
-def test_init_db_runs_schema_once_per_path_and_reinitializes_deleted_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_init_db_is_concurrent_and_recreates_replaced_database(tmp_path: Path) -> None:
     database = tmp_path / "board.sqlite3"
-    original_ensure_column = db._ensure_column
-    probe_count = 0
-    count_lock = Lock()
-
-    def counted_ensure_column(
-        conn: sqlite3.Connection,
-        table: str,
-        column: str,
-        definition: str,
-    ) -> None:
-        nonlocal probe_count
-        with count_lock:
-            probe_count += 1
-        original_ensure_column(conn, table, column, definition)
-
-    monkeypatch.setattr(db, "_ensure_column", counted_ensure_column)
     with ThreadPoolExecutor(max_workers=8) as executor:
         list(executor.map(db.init_db, [database] * 16))
+    quote = Quote.from_last_and_prev_close(
+        symbol="SPY",
+        asset_type="etf",
+        provider="yahoo",
+        last=105.0,
+        previous_close=100.0,
+        timestamp=datetime.now(UTC),
+        display_currency="USD",
+    )
+    db.save_quotes(database, [quote])
+    assert db.load_latest_quote(database, "SPY") == quote
+    with sqlite3.connect(database) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db_schema.SCHEMA_VERSION
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(latest_quotes)")}
+        assert {"display_currency", "funding_rate", "open_interest_usd"} <= columns
 
-    assert probe_count == 17
-    assert db.load_latest_quote(database, "MISSING") is None
-    assert probe_count == 17
-
+    # Replacing a file without an intervening init must not reuse path-only
+    # initialization state from the previous database.
+    replacement = tmp_path / "replacement.sqlite3"
+    replacement.touch()
+    replacement.replace(database)
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(db.init_db, [database] * 16))
+    assert db.load_latest_quote(database, "SPY") is None
+    db.save_quotes(database, [quote])
+    assert db.load_latest_quote(database, "SPY") == quote
     database.unlink()
     db.init_db(database)
+    assert db.load_latest_quote(database, "SPY") is None
 
-    assert database.exists()
-    assert probe_count == 34
+
+def test_unversioned_database_migrates_without_losing_quotes_or_reports(tmp_path: Path) -> None:
+    database = tmp_path / "board.sqlite3"
+    with sqlite3.connect(database) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE latest_quotes (
+                symbol TEXT PRIMARY KEY, asset_type TEXT NOT NULL,
+                provider TEXT NOT NULL, last REAL NOT NULL, previous_close REAL,
+                change_abs REAL, change_pct REAL, timestamp TEXT NOT NULL,
+                is_stale INTEGER NOT NULL DEFAULT 0, error TEXT
+            );
+            INSERT INTO latest_quotes VALUES (
+                'SPY', 'etf', 'yahoo', 105, 100, 5, 5,
+                '2026-01-01T00:00:00+00:00', 0, NULL
+            );
+            CREATE TABLE reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL,
+                report_date TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL,
+                created_at TEXT NOT NULL, UNIQUE (slug, report_date)
+            );
+            INSERT INTO reports (slug, report_date, title, body, created_at)
+            VALUES ('legacy', '2026-01-01', 'Legacy', 'Retain me', '2026-01-01');
+            """
+        )
+
+    db.init_db(database)
+    quote = db.load_latest_quote(database, "SPY")
+    assert quote is not None and quote.last == 105.0
+    report = db.load_report(database, 1)
+    assert report is not None
+    assert report["body"] == "Retain me"
+    assert report["updated_at"] == "2026-01-01"
+    db.init_db(database)
+    assert db.load_latest_quote(database, "SPY") == quote
+    with sqlite3.connect(database) as conn:
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db_schema.SCHEMA_VERSION
 
 
 def test_load_latest_quotes_batches_normalizes_and_deduplicates(
@@ -291,3 +330,47 @@ def test_load_daily_close_tails_keeps_one_provider_series(tmp_path: Path) -> Non
         ("2026-01-07", 12.0),
     ]
     assert db.load_daily_close_tails(database, []) == {}
+
+
+def test_bar_revision_tracks_upserts_deletes_and_rollback(tmp_path: Path) -> None:
+    database = tmp_path / "board.sqlite3"
+    stamp = datetime(2026, 1, 1, tzinfo=UTC)
+    bar = Bar("SPY", "yahoo", "1d", stamp, 100.0, 110.0, 90.0, 100.0)
+    db.save_bars(database, [bar])
+    inserted = db.bars_revision(database)
+    corrected = Bar("SPY", "yahoo", "1d", stamp, 100.0, 110.0, 90.0, 105.0)
+    db.save_bars(database, [corrected])
+    updated = db.bars_revision(database)
+    assert updated > inserted
+    assert db.load_bars(database, "SPY", "1d") == [corrected]
+
+    with sqlite3.connect(database) as conn:
+        conn.execute("DELETE FROM bars")
+        assert conn.execute("SELECT revision FROM bars_state").fetchone()[0] > updated
+        conn.rollback()
+    assert db.bars_revision(database) == updated
+    assert db.load_bars(database, "SPY", "1d") == [corrected]
+    with sqlite3.connect(database) as conn:
+        conn.execute("DELETE FROM bars")
+    assert db.bars_revision(database) > updated
+    assert db.load_bars(database, "SPY", "1d") == []
+
+
+def test_startup_quarantine_invalidates_bar_revision(tmp_path: Path) -> None:
+    database = tmp_path / "board.sqlite3"
+    bar = Bar(
+        "SPY", "yahoo", "1d", datetime(2026, 1, 1, tzinfo=UTC),
+        100.0, 110.0, 90.0, 100.0,
+    )
+    db.save_bars(database, [bar])
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE bars SET close = 1000")
+    corrupted = db.bars_revision(database)
+    with db._connect(database) as conn:
+        db_schema.initialize_schema(conn)
+    assert db.bars_revision(database) > corrupted
+    assert db.load_bars(database, "SPY", "1d") == []
+    with sqlite3.connect(database) as conn:
+        assert conn.execute("SELECT close, reason FROM invalid_bars").fetchone() == (
+            1000.0, "invalid_ohlc"
+        )

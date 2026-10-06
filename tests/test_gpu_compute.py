@@ -136,3 +136,60 @@ async def test_public_pages_supply_model_summary_provider_offers_and_stale_fallb
     assert db.load_latest_ai_gpu_compute_snapshot(database) is not None
 
     await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("persisted", [False, True], ids=["public-pages", "persisted-snapshot"])
+async def test_malformed_api_json_uses_usable_fallback(
+    tmp_path: Path, persisted: bool
+) -> None:
+    broken = not persisted
+    requested_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        if request.url.path == "/api/v1/gpu-prices":
+            if broken:
+                return httpx.Response(200, text="<html>upstream gateway</html>")
+            return httpx.Response(200, json={"data": API_ROWS})
+        if persisted:
+            return httpx.Response(503)
+        if request.url.path == "/gpu":
+            return httpx.Response(
+                200,
+                text=(
+                    '<table><tr><td><a href="/gpus/h100">H100 SXM</a></td>'
+                    "<td>80 GB</td><td>$2.49/hr</td><td>$2.49 – $3.00</td>"
+                    "<td>1</td></tr></table>"
+                ),
+            )
+        if request.url.path == "/gpus/h100":
+            return httpx.Response(
+                200,
+                text=(
+                    '<table><tr><td><a href="/providers/lambda">Lambda</a></td>'
+                    "<td>$2.49/hr</td><td>1×</td><td>8/19/2026</td>"
+                    '<td><a href="https://lambda.test/pricing">Source</a></td>'
+                    "</tr></table>"
+                ),
+            )
+        return httpx.Response(404)
+
+    database = tmp_path / "gpu.sqlite3"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        if persisted:
+            seed = GPUComputeService(database, api_key="key", client=client)
+            await seed.get_hardware()
+            broken = True
+        # A new service must fall through malformed JSON to real public
+        # scraping or the persisted data, not only an in-memory prior result.
+        service = GPUComputeService(database, api_key="key", client=client)
+        payload = await service.get_hardware()
+
+    assert "API response is not valid JSON" in str(payload["warning"])
+    assert "/gpu" in requested_paths
+    models = cast(list[dict[str, Any]], payload["models"])
+    assert models[0]["offers"][0]["provider"] in {"Runpod", "Lambda"}
+    assert models[0]["min_price"] == (2.19 if persisted else 2.49)
+    assert bool(payload.get("stale")) is persisted
+    assert db.load_latest_ai_gpu_compute_snapshot(database) is not None

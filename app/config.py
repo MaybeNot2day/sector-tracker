@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, cast, get_args
 
 import yaml  # type: ignore[import-untyped]  # PyYAML does not ship typing metadata.
-from pydantic import Field
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.models import AssetConfig, AssetType, GroupConfig, ProviderName
@@ -17,12 +17,15 @@ class Settings(BaseSettings):
     # Mutation and backup endpoints stay disabled until a token is configured.
     # Local open-mode requires an explicit opt-in; an omitted secret never fails open.
     edit_token: str = ""
+    # Optional private read access; an empty pair retains public read access.
+    read_username: str = ""
+    read_password: str = ""
     allow_unsafe_edits: bool = False
     database_path: Path = Path("./data/market_board.sqlite3")
     # The repo seed warms daily-board metrics on first boot in any fresh
     # environment; existing runtime databases are never overwritten.
     database_seed_path: Path = Path("./config/market_board_seed.sqlite3")
-    watchlist_path: Path = Path("./config/watchlists.yaml")
+    watchlist_path: Path = Path("./data/watchlists.yaml")
     watchlist_seed_path: Path = Path("./config/watchlists.yaml")
     quote_poll_seconds: int = Field(default=10, ge=5)
     history_refresh_seconds: int = Field(default=3600, ge=300)
@@ -46,6 +49,23 @@ class Settings(BaseSettings):
     )
     news_poll_seconds: int = Field(default=15, ge=5)
     enable_background_tasks: bool = True
+
+    @field_validator("watchlist_path", mode="before")
+    @classmethod
+    def migrate_legacy_watchlist_path(cls, value: Any) -> Any:
+        if Path(value) == Path("config/watchlists.yaml"):
+            return Path("data/watchlists.yaml")
+        return value
+
+    @model_validator(mode="after")
+    def validate_read_credentials(self) -> Settings:
+        if bool(self.read_username) != bool(self.read_password):
+            raise ValueError(
+                "READ_USERNAME and READ_PASSWORD must both be configured or both empty"
+            )
+        if ":" in self.read_username:
+            raise ValueError("READ_USERNAME must not contain ':' (HTTP Basic credential separator)")
+        return self
 
     @property
     def news_channels(self) -> list[str]:

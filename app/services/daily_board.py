@@ -3,13 +3,14 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from statistics import fmean, median
 from time import monotonic
 from typing import Any
 
 from app import db
+from app.calendar_windows import months_before
 from app.models import AssetConfig, Bar, GroupConfig, ProviderName, Quote
 from app.services.hyperliquid_discovery import AUTO_GROUP_NAMES
 from app.services.macro import vix_read
@@ -224,6 +225,12 @@ def _asset_metrics_prepared(
     bars = prepared.bars
     closes = prepared.closes
     current = prepared.current
+    continuous = _continuous_daily(asset, bars)
+    year_start = datetime.now(UTC) - timedelta(weeks=52)
+    has_year = bool(bars and bars[0].timestamp.date() <= year_start.date())
+    year_window = (
+        _calendar_window(bars, year_start) if continuous else bars
+    )
     one_day = _quote_change_pct(quote)
     five_day = _return_from_close(current, closes, 6)
     dma20 = _mean_tail(closes, 20)
@@ -245,8 +252,14 @@ def _asset_metrics_prepared(
         "atr_extension": _ratio_distance(current, dma50, atr14),
         "high_20d": _at_high(current, bars, 20),
         "low_20d": _at_low(current, bars, 20),
-        "high_52w": _at_high(current, bars, 252),
-        "low_52w": _at_low(current, bars, 252),
+        "high_52w": (
+            (_at_high(current, year_window, len(year_window) or 1) if has_year else None)
+            if continuous else _at_high(current, bars, 252)
+        ),
+        "low_52w": (
+            (_at_low(current, year_window, len(year_window) or 1) if has_year else None)
+            if continuous else _at_low(current, bars, 252)
+        ),
         "has_history": bool(bars),
         "is_stale": quote.is_stale if quote else True,
     }
@@ -268,20 +281,36 @@ def _market_summary_prepared(
     bars = prepared.bars
     closes = prepared.closes
     current = prepared.current
+    continuous = _continuous_daily(asset, bars)
+    as_of = datetime.now(UTC)
+    week_anchor = as_of - timedelta(weeks=1)
+    year_window = _calendar_window(bars, as_of - timedelta(weeks=52)) if continuous else bars
     return {
         "sparkline": _sparkline_values(current, closes),
         "performance": {
             "1D": _quote_change_pct(quote),
-            "1W": _return_from_close(current, closes, 6),
-            "1M": _return_from_close(current, closes, 22),
-            "3M": _return_from_close(current, closes, 64),
+            "1W": (
+                _calendar_return(current, bars, week_anchor)
+                if continuous else _return_from_close(current, closes, 6)
+            ),
+            "1M": (
+                _calendar_return(current, bars, months_before(as_of, 1))
+                if continuous else _return_from_close(current, closes, 22)
+            ),
+            "3M": (
+                _calendar_return(current, bars, months_before(as_of, 3))
+                if continuous else _return_from_close(current, closes, 64)
+            ),
             # No quote.timestamp here: a stale Dec-31-stamped quote in early
             # January would anchor the year backwards and report the entire
             # prior year's return as "YTD". Wall clock only.
             "YTD": _ytd_return(current, bars),
-            "1Y": _return_from_close(current, closes, 252),
+            "1Y": (
+                _calendar_return(current, bars, months_before(as_of, 12))
+                if continuous else _return_from_close(current, closes, 252)
+            ),
         },
-        "range_52w": _range_52w(current, bars),
+        "range_52w": _range_52w(current, year_window, continuous=continuous),
         # Yahoo's historical daily volume for futures is a different (much
         # smaller) counting regime than the live print, so the ratio is
         # meaningless there (GC=F showed 148x). No RVOL for futures.
@@ -438,10 +467,12 @@ def _sparkline_values(current: float | None, closes: list[float], count: int = 3
     return [round(value, 4) for value in values if value > 0]
 
 
-def _range_52w(current: float | None, bars: list[Bar]) -> dict[str, float] | None:
+def _range_52w(
+    current: float | None, bars: list[Bar], *, continuous: bool = False
+) -> dict[str, float] | None:
     if current is None or current <= 0 or not bars:
         return None
-    window = bars[-252:] if len(bars) >= 252 else bars
+    window = bars if continuous else bars[-252:]
     lows = [bar.low for bar in window if bar.low > 0]
     if not lows:
         return None
@@ -691,6 +722,33 @@ def _theme_status(score: int) -> str:
     if score >= 30:
         return "DETERIORATING"
     return "FADING"
+
+
+def _continuous_daily(asset: AssetConfig, bars: list[Bar]) -> bool:
+    # An xyz synthetic's daily candles trade through weekends too. A Yahoo
+    # equity quote overlaid with a live xyz mark still uses official sessions.
+    return asset.type in {"crypto_perp", "crypto_spot"} or bool(
+        bars and bars[-1].provider == "hyperliquid"
+    )
+
+
+def _calendar_window(bars: list[Bar], start: datetime) -> list[Bar]:
+    start_date = start.date()
+    return [bar for bar in bars if bar.timestamp.date() > start_date]
+
+
+def _calendar_return(
+    current: float | None, bars: list[Bar], anchor: datetime
+) -> float | None:
+    if current is None:
+        return None
+    anchor_date = anchor.date()
+    reference = next(
+        (bar.close for bar in reversed(bars) if bar.timestamp.date() <= anchor_date), None
+    )
+    if reference is None or reference <= 0:
+        return None
+    return round((current - reference) / reference * 100, 4)
 
 
 def _return_from_close(current: float | None, closes: list[float], offset: int) -> float | None:

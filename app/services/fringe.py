@@ -40,6 +40,7 @@ from time import monotonic
 from typing import cast
 
 from app import db
+from app.fringe_grammar import has_fringe_section, iter_fringe_actions
 from app.models import AssetConfig, ProviderName, Quote
 from app.providers.base import QuoteProvider
 from app.providers.hyperliquid import HyperliquidProvider
@@ -79,18 +80,6 @@ BREAKER_HALT_STREAK = 5
 EXPECTANCY_CAP_MIN_CLOSED = 8  # negative expectancy past this forces the cap
 GAP_RISK_STOP_PCT = 5.0  # wider stops gap through: linear notional haircut
 
-_HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
-_SECTION_TITLE = re.compile(r"fringe", re.IGNORECASE)
-_BULLET = re.compile(r"^\s{0,3}(?:[-*+]|\d{1,3}\.)\s+(.*\S)\s*$")
-# The ticker class is deliberately case-sensitive (the verbs around it are
-# not) so prose words never read as symbols; a bare `-` separates only when
-# spaced, because tickers like BRK-B contain it unspaced.
-_ACTION = re.compile(
-    r"^(?i:(?P<action>OPEN|HOLD|CLOSE))\s+(?i:(?P<direction>LONG|SHORT))\s+"
-    r"(?P<ticker>[A-Z0-9.\-=]{1,15})"
-    r"(?:\s*[—–:]\s*|\s+-+\s+|\s*$)"
-    r"(?P<text>.*)$"
-)
 # Trailing metadata tags, stripped right-to-left so both may appear in any
 # order; the rightmost occurrence of a duplicated key wins.
 _TRAILING_TAG = re.compile(
@@ -122,37 +111,18 @@ def parse_fringe_actions(body: str) -> list[FringeAction] | None:
     today's ideas) just because a brief skipped the section. An empty list
     means the section exists but carries no valid bullets.
     """
-    actions: list[FringeAction] | None = None
-    in_section = False
-    section_level = 0
-    for line in body.splitlines():
-        heading = _HEADING.match(line)
-        if heading is not None:
-            level, text = len(heading.group(1)), heading.group(2)
-            if in_section and level > section_level:
-                continue  # subheading inside the section
-            in_section = _SECTION_TITLE.search(text) is not None
-            if in_section:
-                section_level = level
-                if actions is None:
-                    actions = []
-            continue
-        if not in_section or actions is None:
-            continue
-        bullet = _BULLET.match(line)
-        if bullet is None:
-            continue
-        action = _parse_bullet(bullet.group(1))
-        if action is not None and len(actions) < MAX_ACTIONS:
-            actions.append(action)
+    if not has_fringe_section(body):
+        return None
+    actions: list[FringeAction] = []
+    for action, direction, ticker, text in iter_fringe_actions(body):
+        actions.append(_parse_bullet(action, direction, ticker, text))
+        if len(actions) >= MAX_ACTIONS:
+            break
     return actions
 
 
-def _parse_bullet(text: str) -> FringeAction | None:
-    match = _ACTION.match(text)
-    if match is None:
-        return None
-    remainder = match.group("text").strip()
+def _parse_bullet(action: str, direction: str, ticker: str, text: str) -> FringeAction:
+    remainder = text.strip()
     limits = {"horizon": _MAX_HORIZON, "target": _MAX_TARGET, "conf": 12, "stop": _MAX_STOP}
     tags: dict[str, str | None] = {"horizon": None, "target": None, "conf": None, "stop": None}
     while (tag := _TRAILING_TAG.search(remainder)) is not None:
@@ -161,9 +131,9 @@ def _parse_bullet(text: str) -> FringeAction | None:
             tags[key] = tag.group("value")[: limits[key]] or None
         remainder = remainder[: tag.start()].rstrip()
     return FringeAction(
-        action=match.group("action").lower(),
-        ticker=match.group("ticker"),
-        direction=match.group("direction").lower(),
+        action=action,
+        ticker=ticker,
+        direction=direction,
         text=remainder[:_MAX_TEXT],
         horizon=tags["horizon"],
         target=tags["target"],

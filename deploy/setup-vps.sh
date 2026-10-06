@@ -10,6 +10,7 @@
 # A timer polls origin/main every 2 minutes and health-gates each deployment.
 # Re-running the script is safe (idempotent).
 set -euo pipefail
+umask 077
 
 REPO_URL="${REPO_URL:-https://github.com/MaybeNot2day/sector-tracker.git}"
 APP_DIR="/opt/sector-tracker"
@@ -55,20 +56,25 @@ fi
 echo "==> Creating service user"
 id -u "$APP_USER" >/dev/null 2>&1 || useradd --system --create-home --shell /usr/sbin/nologin "$APP_USER"
 
+# Prevent a re-run racing an already-enabled updater.
+systemctl disable --now sector-tracker-update.timer 2>/dev/null || true
+systemctl stop sector-tracker-update.service 2>/dev/null || true
 echo "==> Fetching the app"
 if [ ! -d "$APP_DIR/.git" ]; then
   git clone --quiet "$REPO_URL" "$APP_DIR"
-else
-  # Re-runs may pass a different REPO_URL; keep origin pointed at it. Run as
-  # the owning user: root git in the board-owned worktree trips git's
-  # dubious-ownership fatal and aborts the re-run under set -e.
-  sudo -u "$APP_USER" git -C "$APP_DIR" remote set-url origin "$REPO_URL"
 fi
-# GitHub's smart-HTTP advertisement intermittently breaks git's protocol-v2
-# parse over HTTP/2 with Ubuntu's curl 8.5.0 ("expected flush after ref
-# listing", then a username prompt), wedging auto-deploy. HTTP/1.1 is stable.
-sudo -u "$APP_USER" git -C "$APP_DIR" config http.version HTTP/1.1
+# A fresh root clone must be transferred BEFORE any board-owned git command.
 chown -R "$APP_USER:$APP_USER" "$APP_DIR"
+sudo -u "$APP_USER" git -C "$APP_DIR" remote set-url origin "$REPO_URL"
+# Keep smart HTTP stable on Ubuntu's curl 8.5.0.
+sudo -u "$APP_USER" git -C "$APP_DIR" config http.version HTTP/1.1
+
+# Preserve an edited legacy seed before the first update resets tracked files.
+install -d -o "$APP_USER" -g "$APP_USER" -m 0700 "$APP_DIR/data"
+if [ ! -e "$APP_DIR/data/watchlists.yaml" ] && [ -f "$APP_DIR/config/watchlists.yaml" ]; then
+  install -o "$APP_USER" -g "$APP_USER" -m 0600 \
+    "$APP_DIR/config/watchlists.yaml" "$APP_DIR/data/watchlists.yaml"
+fi
 
 echo "==> Installing dependencies"
 sudo -u "$APP_USER" bash -ec "
@@ -78,23 +84,34 @@ sudo -u "$APP_USER" bash -ec "
     rm -rf .venv
   fi
   [ -d .venv ] || $PYTHON -m venv .venv
-  .venv/bin/pip install --quiet --upgrade pip
   .venv/bin/pip install --quiet --require-hashes -r requirements.txt
 "
 
 # First setup only: ship .env with a random EDIT_TOKEN. The token still guards
 # mutation endpoints even though the dashboard itself is publicly readable.
 if [ ! -f "$APP_DIR/.env" ]; then
-  if command -v openssl >/dev/null 2>&1; then
-    EDIT_TOKEN="$(openssl rand -hex 24)"
-  else
-    EDIT_TOKEN="$(od -vAn -N24 -tx1 /dev/urandom | tr -d ' \n')"
-  fi
-  sudo -u "$APP_USER" cp "$APP_DIR/.env.example" "$APP_DIR/.env"
-  sudo -u "$APP_USER" sed -i "s/^EDIT_TOKEN=.*/EDIT_TOKEN=$EDIT_TOKEN/" "$APP_DIR/.env"
-  echo "==> Generated EDIT_TOKEN=$EDIT_TOKEN"
-  echo "    Store it safely; it guards report edits on the board."
+  # Generate inside Python: no secret appears in logs or a subprocess argv.
+  python3 - "$APP_DIR" <<'PY'
+import re
+import secrets
+import sys
+from pathlib import Path
+
+directory = Path(sys.argv[1])
+template = (directory / ".env.example").read_text(encoding="utf-8")
+payload = re.sub(r"^EDIT_TOKEN=.*$", "EDIT_TOKEN=" + secrets.token_hex(24), template, flags=re.M)
+with (directory / ".env").open("x", encoding="utf-8") as stream:
+    stream.write(payload)
+PY
+  echo "==> Generated edit credentials in $APP_DIR/.env (not printed)"
 fi
+chown "$APP_USER:$APP_USER" "$APP_DIR/.env"
+chmod 0600 "$APP_DIR/.env"
+env_tmp="$(mktemp "$APP_DIR/.env.XXXXXX")"
+sed -E 's|^WATCHLIST_PATH=(\./)?config/watchlists\.yaml$|WATCHLIST_PATH=./data/watchlists.yaml|' "$APP_DIR/.env" > "$env_tmp"
+chown "$APP_USER:$APP_USER" "$env_tmp"
+chmod 0600 "$env_tmp"
+mv "$env_tmp" "$APP_DIR/.env"
 
 # The timer runs as root so it can restart the app service. Never execute the
 # app-user-owned repo copy directly: an app compromise could rewrite it.
@@ -125,7 +142,7 @@ ProtectHome=true
 ProtectKernelModules=true
 ProtectKernelTunables=true
 ProtectSystem=strict
-ReadWritePaths=$APP_DIR/data $APP_DIR/config
+ReadWritePaths=$APP_DIR/data
 RestrictSUIDSGID=true
 
 [Install]
@@ -157,6 +174,24 @@ EOF
 systemctl daemon-reload
 systemctl enable sector-tracker.service
 systemctl restart sector-tracker.service
+
+# Do not enable updates without a known, ready rollback target.
+READY=false
+for _ in {1..120}; do
+  if curl -fsS --max-time 2 "http://127.0.0.1:$PORT/api/ready" |
+    python3 -c 'import json,sys; raise SystemExit(json.load(sys.stdin).get("status") != "ok")'
+  then
+    READY=true
+    break
+  fi
+  sleep 1
+done
+if [ "$READY" != true ]; then
+  echo "Initial deployment is not ready; auto-deploy remains disabled." >&2
+  exit 1
+fi
+sudo -u "$APP_USER" git -C "$APP_DIR" rev-parse HEAD > "$APP_DIR/.deployed-rev"
+chown "$APP_USER:$APP_USER" "$APP_DIR/.deployed-rev"
 systemctl enable --now sector-tracker-update.timer
 
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then

@@ -515,3 +515,63 @@ async def test_quotes_route_schedules_history_heal_without_waiting(
 
     release.set()
     await main_module._heal_task
+
+
+@pytest.mark.asyncio
+async def test_krx_fx_outage_keeps_last_coherent_quote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.providers.yahoo import YahooProvider
+
+    database = tmp_path / "board.sqlite3"
+    asset = AssetConfig("005930.KS", "equity", "yahoo")
+    now = datetime.now(UTC)
+    native = Quote.from_last_and_prev_close(
+        symbol=asset.symbol, asset_type=asset.type, provider="yahoo",
+        last=155_000.0, previous_close=155_000.0, timestamp=now, currency="KRW",
+    )
+    fx = Quote.from_last_and_prev_close(
+        symbol="KRW=X", asset_type="index_proxy", provider="yahoo",
+        last=1550.0, previous_close=1550.0, timestamp=now, currency="KRW",
+    )
+    available = [True]
+    provider = YahooProvider()
+
+    def spark(assets: list[AssetConfig]) -> dict[str, Quote]:
+        if assets[0].symbol == "KRW=X":
+            return {"KRW=X": fx} if available[0] else {}
+        return {asset.symbol: native}
+
+    monkeypatch.setattr(provider, "_get_spark_quotes_sync", spark)
+    monkeypatch.setattr(provider, "_get_chart_quote_sync", lambda asset: None)
+    stooq = CountingProvider()
+    service = QuoteService(database, {"yahoo": provider, "stooq": stooq})
+    groups = [GroupConfig("KRX", [asset])]
+    fresh = (await service.get_board_quotes(groups))["KRX"][0]
+    assert fresh.display_last == 100.0
+    assert fresh.display_currency == "USD"
+    available[0] = False
+    stale = (await service.get_board_quotes(groups))["KRX"][0]
+    assert stale.is_stale is True
+    assert stale.display_last == 100.0
+    assert stale.display_currency == "USD"
+    persisted = db.load_latest_quote(database, asset.symbol)
+    assert persisted is not None and persisted.display_last == 100.0
+    assert stooq.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_krx_outage_does_not_serve_unconverted_legacy_quote(tmp_path: Path) -> None:
+    database = tmp_path / "board.sqlite3"
+    asset = AssetConfig("005930.KS", "equity", "yahoo")
+    native = Quote.from_last_and_prev_close(
+        symbol=asset.symbol, asset_type=asset.type, provider="yahoo",
+        last=155_000.0, previous_close=155_000.0,
+        timestamp=datetime.now(UTC), currency="KRW",
+    )
+    db.save_quotes(database, [native])
+    service = QuoteService(database, {"yahoo": EmptyProvider()})
+    quote = (await service.get_board_quotes([GroupConfig("KRX", [asset])]))["KRX"][0]
+    assert quote.last == 0.0
+    assert quote.error == "no_quote_available"
+    assert quote.is_stale is True

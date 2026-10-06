@@ -9,7 +9,7 @@ import secrets
 import shutil
 import tempfile
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from threading import Lock
@@ -34,6 +34,7 @@ from starlette.responses import Response
 from starlette.types import Message, Receive, Scope, Send
 
 from app import db
+from app.access import PrivateAccessMiddleware
 from app.config import (
     Settings,
     find_group,
@@ -46,7 +47,12 @@ from app.providers.base import QuoteProvider
 from app.providers.hyperliquid import HyperliquidProvider
 from app.providers.stooq import StooqProvider
 from app.providers.yahoo import YahooProvider
+from app.routes.analytics import router as analytics_router
+from app.routes.status import router as status_router
+from app.runtime import RuntimeMonitor
 from app.scheduler import (
+    AI_DATA_WARM_SECONDS,
+    EARNINGS_WARM_SECONDS,
     ConnectionManager,
     ai_data_warm_loop,
     board_payload_async,
@@ -59,8 +65,8 @@ from app.scheduler import (
     sofr_refresh_loop,
     stop_task,
 )
-from app.services.ai_capex import AICapexError, AICapexService
-from app.services.ai_data import AIDataError, AIDataService
+from app.services.ai_capex import AICapexService
+from app.services.ai_data import AIDataService
 from app.services.asset_profile import AssetProfileService
 from app.services.candle_stream import CandleStreamService
 from app.services.component_trends import (
@@ -75,7 +81,7 @@ from app.services.daily_board import DailyBoardService
 from app.services.earnings import EarningsCalendarService, week_start
 from app.services.econ_calendar import EconCalendarService, key_dates_payload
 from app.services.fringe import FringeService, parse_fringe_actions
-from app.services.gpu_compute import GPUComputeError, GPUComputeService
+from app.services.gpu_compute import GPUComputeService
 from app.services.history import HistoryService, bars_payload, find_asset
 from app.services.hyperliquid_discovery import HyperliquidDiscoveryService
 from app.services.key_dates import parse_key_dates
@@ -84,7 +90,7 @@ from app.services.market_context import market_context_payload
 from app.services.news import NewsService
 from app.services.options import MarketDataOptionsService, OptionsDataError
 from app.services.quotes import QuoteService, quote_payload
-from app.services.sofr import SOFRError, SOFRService
+from app.services.sofr import SOFRService
 from app.services.symbol_logos import LOGO_KINDS, fetch_symbol_logo
 from app.services.trends import group_trends_payload
 
@@ -247,7 +253,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.ai_data_task = None
     app.state.hyperliquid_discovery_task = None
     app.state.sofr_task = None
+    app.state.runtime_monitor = RuntimeMonitor()
     if settings.enable_background_tasks:
+        for name, interval in (
+            ("poll_task", settings.quote_poll_seconds),
+            ("history_task", getattr(settings, "history_refresh_seconds", 3600)),
+            ("news_task", settings.news_poll_seconds),
+            ("econ_calendar_task", 120),
+            ("earnings_task", EARNINGS_WARM_SECONDS),
+            ("ai_data_task", AI_DATA_WARM_SECONDS),
+            ("hyperliquid_discovery_task", settings.hyperliquid_discovery_seconds),
+            ("sofr_task", 900),
+        ):
+            app.state.runtime_monitor.register(name, interval)
         app.state.poll_task = asyncio.create_task(
             quote_poll_loop(app.state), name="quote_poll_loop"
         )
@@ -287,6 +305,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        if _heal_task is not None and not _heal_task.done():
+            _heal_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await _heal_task
         if app.state.poll_task is not None:
             await stop_task(app.state.poll_task)
         if app.state.history_task is not None:
@@ -364,10 +386,15 @@ class SecurityHeadersMiddleware:
 app = FastAPI(title="Cross-Asset Board", lifespan=lifespan)
 # Compress dynamic responses on the VPS; static assets are already compact.
 app.add_middleware(GZipMiddleware, minimum_size=1024)
+app.add_middleware(PrivateAccessMiddleware, state=app.state)
 app.add_middleware(SecurityHeadersMiddleware)
+app.include_router(status_router)
+app.include_router(analytics_router)
 
 
-_MINIFIED_SOURCES = ("app.js", "styles.css")
+_MINIFIED_SOURCES = (
+    "app.js", "styles.css", "formatting.js", "animations.js", "quote-freshness.js",
+)
 _MIN_HEADER = re.compile(rb"^/\*src=([0-9a-f]{64})\*/")
 
 
@@ -469,15 +496,6 @@ def favicon() -> FileResponse:
         media_type="image/svg+xml",
         headers={"Cache-Control": "public, max-age=86400"},
     )
-
-
-@app.get("/api/health")
-def health() -> dict[str, object]:
-    payload: dict[str, object] = {"status": "ok"}
-    service = getattr(app.state, "daily_board_service", None)
-    if isinstance(service, DailyBoardService):
-        payload["snapshots"] = service.snapshot_status()
-    return payload
 
 
 @app.get("/api/groups")
@@ -1105,56 +1123,6 @@ async def snapshots(days: int = Query(default=30, ge=1, le=365)) -> dict[str, ob
     return {"snapshots": rows}
 
 
-@app.get("/api/ai/models")
-async def ai_models() -> dict[str, object]:
-    """Current text-model catalog and normalized token prices."""
-    try:
-        service = cast(AIDataService, app.state.ai_data_service)
-        return await service.get_models()
-    except AIDataError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-
-@app.get("/api/ai/token-index")
-async def ai_token_index() -> dict[str, object]:
-    """Usage-weighted token-price proxy built from public OpenRouter data."""
-    try:
-        service = cast(AIDataService, app.state.ai_data_service)
-        return await service.get_token_index()
-    except AIDataError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-
-@app.get("/api/ai/capex")
-async def ai_capex() -> dict[str, object]:
-    """Reported hyperscaler capex used as an AI infrastructure proxy."""
-    try:
-        service = cast(AICapexService, app.state.ai_capex_service)
-        return await service.get_capex()
-    except AICapexError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-
-@app.get("/api/ai/hardware")
-async def ai_hardware() -> dict[str, object]:
-    """Current normalized cloud GPU rental prices and provider offers."""
-    try:
-        service = cast(GPUComputeService, app.state.gpu_compute_service)
-        return await service.get_hardware()
-    except GPUComputeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-
-@app.get("/api/sofr")
-async def sofr() -> dict[str, object]:
-    """Official SOFR rate distribution and history from the New York Fed."""
-    try:
-        service = cast(SOFRService, app.state.sofr_service)
-        return await service.get_payload()
-    except SOFRError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-
 # Trend bands aggregate every cached daily bar on each call; a short TTL
 # keeps tab switches and range flips from re-scanning SQLite.
 _trends_cache: dict[int, tuple[float, int, dict[str, object]]] = {}
@@ -1310,7 +1278,9 @@ async def profile(symbol: str) -> dict[str, object]:
 
 
 @app.websocket("/ws/candles")
-async def candles_ws(websocket: WebSocket, symbol: str, interval: str, asset_type: str = "") -> None:
+async def candles_ws(
+    websocket: WebSocket, symbol: str, interval: str, asset_type: str = ""
+) -> None:
     """Live candle frames for one Hyperliquid market while its chart is open."""
     service: CandleStreamService | None = app.state.candle_stream_service
     await websocket.accept()
@@ -1327,17 +1297,29 @@ async def candles_ws(websocket: WebSocket, symbol: str, interval: str, asset_typ
             frame = await queue.get()
             await websocket.send_text(frame)
 
-    pump_task = asyncio.create_task(pump(), name="candle_pump")
-    try:
+    async def receive() -> None:
         while True:
             await websocket.receive_text()
+
+    tasks = (
+        asyncio.create_task(pump(), name="candle_pump"),
+        asyncio.create_task(receive(), name="candle_receive"),
+    )
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()
     except WebSocketDisconnect:
         pass
     except Exception:
-        pass
+        logger.debug("candle client disconnected during streaming", exc_info=True)
     finally:
-        pump_task.cancel()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         await service.unsubscribe(symbol, interval, queue)
+        with suppress(Exception):
+            await websocket.close()
 
 
 @app.websocket("/ws/quotes")

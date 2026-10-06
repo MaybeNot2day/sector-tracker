@@ -595,3 +595,28 @@ async def test_candle_failure_cooldown_is_per_symbol() -> None:
     assert "candleSnapshot:BTC" in provider._cooldown_until
     assert await provider.get_history(eth, interval="1h", range_="1d") == []
     assert "candleSnapshot:ETH" not in provider._cooldown_until
+
+
+@pytest.mark.asyncio
+async def test_daily_year_fetch_includes_completed_calendar_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2024, 2, 29, 12, tzinfo=UTC)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            return now
+
+    monkeypatch.setattr(hl_module, "datetime", Clock)
+    provider, api = live_api()
+    try:
+        await provider.get_history(BTC_PERP, interval="1d", range_="1y")
+        candle_request = next(body["req"] for body in api.requests if body["type"] == CANDLE_KEY)
+        start = datetime.fromtimestamp(candle_request["startTime"] / 1000, UTC)
+        end = datetime.fromtimestamp(candle_request["endTime"] / 1000, UTC)
+        assert start < datetime(2023, 2, 28, tzinfo=UTC)
+        assert end == now
+        assert candle_request["interval"] == "1d"
+    finally:
+        await provider.aclose()

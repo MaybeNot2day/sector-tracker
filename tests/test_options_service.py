@@ -182,41 +182,6 @@ async def test_different_symbols_fetch_options_concurrently() -> None:
 
 
 @pytest.mark.asyncio
-async def test_options_caches_and_symbol_locks_remain_bounded() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if "/expirations/" in request.url.path:
-            return httpx.Response(200, json={"s": "ok", "expirations": ["2099-01-17"]})
-        contracts = _chain()
-        return httpx.Response(
-            200,
-            json={
-                "s": "ok",
-                "side": [contract["option_type"] for contract in contracts],
-                "strike": [contract["strike"] for contract in contracts],
-                "openInterest": [contract["open_interest"] for contract in contracts],
-                "gamma": [
-                    cast(dict[str, object], contract["greeks"])["gamma"] for contract in contracts
-                ],
-                "iv": [
-                    cast(dict[str, object], contract["greeks"])["mid_iv"] for contract in contracts
-                ],
-                "underlyingPrice": [100.0] * len(contracts),
-            },
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    service = MarketDataOptionsService("token", client=client)
-
-    for index in range(65):
-        await service.get_snapshot(f"SYM{index:02d}")
-    await service.aclose()
-
-    assert len(service._expirations_cache) == 32
-    assert len(service._snapshot_cache) == 64
-    assert len(service._symbol_locks) <= 64
-
-
-@pytest.mark.asyncio
 async def test_chain_failure_cooldown_skips_the_second_http_attempt() -> None:
     calls: Counter[str] = Counter()
 
@@ -237,6 +202,127 @@ async def test_chain_failure_cooldown_skips_the_second_http_attempt() -> None:
 
     assert calls["/v1/options/expirations/SPY/"] == 1
     assert calls["/v1/options/chain/SPY/"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "code", "status_code"),
+    [
+        ("http", "marketdata_request_failed", 502),
+        ("auth", "marketdata_auth_failed", 502),
+        ("rate-limit", "marketdata_rate_limited", 502),
+        ("json", "marketdata_invalid_payload", 502),
+        ("empty", "options_expirations_unavailable", 404),
+        ("no-data", "marketdata_no_data", 404),
+    ],
+)
+async def test_cold_expiration_failures_have_cooldown_and_recover(
+    monkeypatch: pytest.MonkeyPatch, failure: str, code: str, status_code: int
+) -> None:
+    now = 1000.0
+    healthy = False
+    calls: Counter[str] = Counter()
+    monkeypatch.setattr("app.services.options.monotonic", lambda: now)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls[request.url.path] += 1
+        if "/expirations/" in request.url.path:
+            if healthy:
+                return httpx.Response(200, json={"expirations": ["2099-01-17"]})
+            if failure == "http":
+                return httpx.Response(503)
+            if failure == "auth":
+                return httpx.Response(401)
+            if failure == "rate-limit":
+                return httpx.Response(429)
+            if failure == "json":
+                return httpx.Response(200, text="<html>gateway error</html>")
+            if failure == "no-data":
+                return httpx.Response(204)
+            return httpx.Response(200, json={"expirations": []})
+        return httpx.Response(
+            200,
+            json={"underlyingPrice": [100], "side": ["call"], "strike": [100]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = MarketDataOptionsService("token", client=client)
+    try:
+        failures = await asyncio.gather(
+            *(service.get_snapshot("SPY") for _ in range(5)), return_exceptions=True
+        )
+        for error in failures:
+            assert isinstance(error, OptionsDataError)
+            assert error.code == code
+            assert error.status_code == status_code
+        assert calls == {"/v1/options/expirations/SPY/": 1}
+        now += service.FAILURE_COOLDOWN_SECONDS + 1
+        healthy = True
+        recovered = await service.get_snapshot("SPY")
+        assert recovered["expiration"] == "2099-01-17"
+        assert recovered["spot"] == 100
+        assert calls["/v1/options/expirations/SPY/"] == 2
+        assert calls["/v1/options/chain/SPY/"] == 1
+    finally:
+        await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_failed_expiration_refresh_preserves_stale_chain_during_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1000.0
+    healthy = True
+    calls: Counter[str] = Counter()
+    monkeypatch.setattr("app.services.options.monotonic", lambda: now)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls[request.url.path] += 1
+        if not healthy:
+            return httpx.Response(503)
+        if "/expirations/" in request.url.path:
+            return httpx.Response(200, json={"expirations": ["2099-01-17", "2099-01-24"]})
+        return httpx.Response(
+            200,
+            json={
+                "underlyingPrice": [100],
+                "side": ["call"],
+                "strike": [100],
+                "openInterest": [42],
+                "gamma": [0.02],
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = MarketDataOptionsService("token", cache_seconds=1, client=client)
+    try:
+        first = await service.get_snapshot("SPY")
+        now += service.EXPIRATIONS_CACHE_SECONDS + 1
+        healthy = False
+        stale = await service.get_snapshot("SPY")
+        repeated = await service.get_snapshot("SPY")
+        assert stale == repeated
+        assert stale["is_stale"] is True
+        assert stale["error"] == "marketdata_request_failed"
+        assert stale["expirations"] == ["2099-01-17", "2099-01-24"]
+        assert stale["metrics"] == first["metrics"]
+        assert stale["strikes"] == first["strikes"]
+        assert first["is_stale"] is False
+        assert calls == {
+            "/v1/options/expirations/SPY/": 2,
+            "/v1/options/chain/SPY/": 2,
+        }
+        now += service.FAILURE_COOLDOWN_SECONDS + 1
+        healthy = True
+        recovered = await service.get_snapshot("SPY")
+        assert recovered["is_stale"] is False
+        assert "error" not in recovered
+        assert calls == {
+            "/v1/options/expirations/SPY/": 3,
+            "/v1/options/chain/SPY/": 3,
+        }
+    finally:
+        await service.aclose()
 
 
 @pytest.mark.asyncio

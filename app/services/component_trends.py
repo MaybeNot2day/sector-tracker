@@ -7,8 +7,9 @@ current day's chart images with titles ("DDR5-6000 2x32GB"). This service
 scrapes those lists, normalizes them into one payload, and caches it for
 hours — the source data only changes once a day.
 
-On refresh failure the last good payload keeps serving (stale-on-error):
-a broken scrape must never blank the dashboard section.
+On refresh failure the last good categories keep serving (stale-on-error).
+Partial scrapes merge fresh charts with failed categories' previous charts
+and retry after a short cooldown instead of blanking the rail for hours.
 """
 
 from __future__ import annotations
@@ -57,9 +58,8 @@ _IMAGE_ENTRY = re.compile(
     re.DOTALL,
 )
 
-# failed_at (None-monotonic sentinel, like news.py's _fetched): a scrape
-# round that produced nothing stamps it so every poll for the next
-# FAILURE_RETRY_SECONDS serves fallbacks instead of re-hitting Cloudflare.
+# Any failed category stamps failed_at so a partial or failed scrape uses
+# the short retry interval, not the successful scrape's six-hour cache.
 FAILURE_RETRY_SECONDS = 300.0
 _cache: dict[str, Any] = {"at": 0.0, "payload": None, "failed_at": None}
 _lock = asyncio.Lock()
@@ -113,7 +113,11 @@ async def component_trends_payload(store_path: Path | None = None) -> dict[str, 
     local development), then any stale fallback rather than an empty rail.
     """
     async with _lock:
-        if _cache["payload"] is not None and monotonic() - float(_cache["at"]) < CACHE_SECONDS:
+        if (
+            _cache["payload"] is not None
+            and _cache["failed_at"] is None
+            and monotonic() - float(_cache["at"]) < CACHE_SECONDS
+        ):
             return _cache["payload"]  # type: ignore[no-any-return]
         pushed = _load_store(store_path)
         if pushed is not None and _payload_age_seconds(pushed) < PUSH_FRESH_SECONDS:
@@ -124,31 +128,77 @@ async def component_trends_payload(store_path: Path | None = None) -> dict[str, 
         failed_at = _cache["failed_at"]
         if failed_at is not None and monotonic() - float(failed_at) < FAILURE_RETRY_SECONDS:
             return _fallback_payload(pushed)
+        previous = _fallback_payload(pushed)
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
             results = await asyncio.gather(
                 *(_fetch_category(client, slug, label) for slug, label in CATEGORIES)
             )
-        categories = [category for category in results if category is not None]
-        if not categories:
+        failed = [
+            slug
+            for (slug, _label), result in zip(CATEGORIES, results, strict=True)
+            if result is None
+        ]
+        if all(result is None for result in results):
+            previous["categories"] = [
+                {**category, "stale": True}
+                for category in cast(list[dict[str, object]], previous["categories"])
+            ]
+            previous["failed_categories"] = failed
             _cache["failed_at"] = monotonic()
-            return _fallback_payload(pushed)
+            _cache["payload"] = previous
+            return previous
+        previous_categories = {
+            str(category.get("slug")): category
+            for category in cast(list[dict[str, object]], previous["categories"])
+        }
+        refreshed_at = _now_iso()
+        categories: list[dict[str, object]] = []
+        for (slug, _label), result in zip(CATEGORIES, results, strict=True):
+            if result is not None:
+                categories.append({**result, "as_of": refreshed_at, "stale": False})
+            elif slug in previous_categories:
+                categories.append({**previous_categories[slug], "stale": True})
         payload: dict[str, object] = {
-            "as_of": _now_iso(),
+            # An overall timestamp must not imply that retained charts were
+            # refreshed today; each category carries its own timestamp too.
+            "as_of": (
+                min(str(category["as_of"]) for category in categories)
+                if all(category.get("as_of") for category in categories)
+                else None
+            ),
             "source": f"{BASE_URL}/trends/",
             "categories": categories,
+            "stale": bool(failed),
+            "failed_categories": failed,
         }
         _cache["payload"] = payload
         _cache["at"] = monotonic()
-        _cache["failed_at"] = None
+        _cache["failed_at"] = monotonic() if failed else None
         return payload
 
 
 def _fallback_payload(pushed: dict[str, object] | None) -> dict[str, object]:
-    """Best stale content when a scrape cannot run: pushed, memory, empty."""
-    for fallback in (pushed, _cache["payload"]):
-        if fallback is not None:
-            return cast(dict[str, object], fallback)
-    return {"as_of": _now_iso(), "source": f"{BASE_URL}/trends/", "categories": []}
+    """Newest usable fallback, preserving partial refreshes and their ages."""
+    candidates = [fallback for fallback in (_cache["payload"], pushed) if fallback is not None]
+    if not candidates:
+        return {"as_of": None, "source": f"{BASE_URL}/trends/", "categories": [], "stale": True}
+    # During a failure cooldown memory includes the latest successful
+    # categories, even when its oldest retained category predates the store.
+    fallback = (
+        candidates[0]
+        if _cache["payload"] is not None and _cache["failed_at"] is not None
+        else min(candidates, key=_payload_age_seconds)
+    )
+    categories = [
+        {
+            **category,
+            "as_of": category.get("as_of") or fallback.get("as_of"),
+            "stale": category.get("stale", True) if fallback.get("stale") else True,
+        }
+        for category in cast(list[dict[str, Any]], fallback["categories"])
+        if isinstance(category, dict)
+    ]
+    return {**fallback, "categories": categories, "stale": True}
 
 
 # --- pushed store ----------------------------------------------------------
@@ -223,6 +273,8 @@ def _load_store(store_path: Path | None) -> dict[str, object] | None:
 def _payload_age_seconds(payload: Mapping[str, Any]) -> float:
     try:
         as_of = datetime.fromisoformat(str(payload.get("as_of") or "").replace("Z", "+00:00"))
+        if as_of.tzinfo is None:
+            return float("inf")
     except ValueError:
         return float("inf")
     return (datetime.now(UTC) - as_of).total_seconds()

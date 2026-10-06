@@ -1,6 +1,6 @@
 # Cross-Asset Board
 
-A private Bloomberg-style market board for manual sector and narrative baskets.
+A Bloomberg-style cross-asset market board with optional private read access.
 
 The app runs a FastAPI backend with a static dashboard frontend. The Daily Board computes
 regime, breadth, benchmark, theme-strength, five-day rotation metrics, and BTC/ETH/SOL spot
@@ -63,7 +63,7 @@ volume, and recent history (`GET /api/sofr`). Observations accrue in
 09:30 ET on business days around the approximately 08:00 ET publication,
 then every 15 minutes for later revisions.
 
-The Watch tab has two modes. Charts is a DexScreener-style wall of up to nine
+The Watch tab has two modes. Charts is a DexScreener-style wall of up to 50
 interactive candlestick tiles sharing one timeframe. Lists is a personal
 screener: any number of named lists ("Crypto", "AI stocks", ...), each holding
 up to 60 free-typed symbols across asset classes, rendered as a dense table
@@ -83,9 +83,21 @@ to 'self'). Crypto icons come from Hyperliquid, ticker logos from Parqet;
 hits cache in memory for a week, misses negative-cache for six hours, and a
 failed load simply drops the icon so the symbol text stands alone.
 
-Watchlists live in YAML and can also be edited in the app. Quotes and OHLC bars are cached in
-SQLite, and market data providers are isolated behind a common interface so Yahoo, Hyperliquid,
-Stooq, and Farside can be swapped or extended.
+Runtime watchlists live in `data/watchlists.yaml` and can be edited in the app.
+`config/watchlists.yaml` is the first-boot seed, not mutable deployment state.
+Quotes and OHLC bars are cached in SQLite; providers sit behind a common interface.
+
+Daily history refreshes bypass chart-read caches, and freshness follows successful
+fetch time rather than a candle's opening timestamp. Transactional revision triggers
+invalidate analytics and HTTP/WebSocket payloads after candle corrections or deletions.
+Versioned SQLite migrations adopt existing databases without rebuilding accumulated data.
+During KRX FX outages, the board retains coherent cached USD prices instead of mixing
+native KRW and converted USD in one history series.
+
+Crypto and Hyperliquid synthetic daily histories use calendar week/month/quarter/year
+anchors and rolling 52-week ranges. Official equity histories retain trading-session
+semantics, including equities whose live quote is overlaid by a Hyperliquid synthetic.
+An asset without a genuine prior-year anchor has no invented one-year return.
 
 ## Quick Start
 
@@ -99,6 +111,9 @@ uvicorn app.main:app --reload
 
 Open http://127.0.0.1:8000.
 
+Run from the source checkout using the editable install above; standalone wheel-only
+deployment is not supported because the runtime also needs configuration seeds and static assets.
+
 The Trends tab draws PCPartPicker-style performance bands for every watchlist
 group from the cached daily bars: each member is indexed to 100 at the window
 start, the shaded envelope spans the min–max member, and the line is the
@@ -110,6 +125,9 @@ component price-trend charts (memory, CPUs, video cards, storage, PSUs, monitors
 street prices for DRAM/NAND lead the board's MEMORY equity theme. The backend
 scrapes the public gallery lists (`GET /api/component-trends`, cached 6h) and
 serves the PNGs same-origin through `GET /api/component-image`.
+Partial component-gallery failures retain previous charts with per-category timestamps
+and a cached-data indication; failed categories retry after 300 seconds rather than
+disappearing for the six-hour normal cache period.
 
 The Earnings tab shows the trading week's report calendar as Mon–Fri day
 cards (`GET /api/earnings`, optional `?start=` snaps to that date's week).
@@ -124,6 +142,8 @@ last-4-quarters beat/miss strip (Nasdaq earnings-surprise API) and, for held
 symbols only, an options-implied move (ATM IV from MarketData.app scaled to
 the first expiration after the report). Day lists and release times cache
 6h and surprise histories 24h with stale-on-error fallback.
+Options expiration failures are cooled for 30 seconds, including cold-cache failures;
+usable stale expirations and chains remain available during upstream outages.
 
 ## Tests
 
@@ -138,6 +158,10 @@ Chromium:
 python -m playwright install chromium
 RUN_PLAYWRIGHT=1 python -m pytest tests/test_playwright_smoke.py -q
 ```
+
+GitHub Actions runs the locked development environment, Ruff, mypy, backend regressions,
+shell syntax checks, and the complete Chromium suite. The browser fixture uses a
+temporary database and watchlist, never the working dashboard's accumulated state.
 
 To run the same smoke suite against an already-running board instead of the test fixture
 server:
@@ -326,8 +350,11 @@ Two housekeeping jobs feed the loop back into the agent. Before each weekday
 brief (13:45 Berlin) `scripts/fringe_stats_notepad.py` stamps the rolling track
 record — win rate, expectancy, streak, direction/asset buckets, open
 giveback-to-stops, and the active risk mode — into the Fringe cron job's
-durable notepad (`fringe_stats`), which the brief prompt reads first. On
-Fridays (15:30 Berlin) `scripts/fringe_weekly_review.py` writes a five-bullet
+durable notepad (`fringe_stats`), which the brief prompt reads first. The notepad
+repeats the breaker invariant explicitly: negative expectancy selects
+`CALIBRATION_CAP`; only a five-loss streak selects `NO_NEW_OPENS`. Keep the cron
+prompt aligned with that rule so a flat book can trade back toward positive expectancy.
+On Fridays (15:30 Berlin) `scripts/fringe_weekly_review.py` writes a five-bullet
 self-review into the vault and posts it to the board as the `Fringe Weekly
 Review` report. Both support `--dry-run`.
 
@@ -406,6 +433,10 @@ the filter). `NOTIFY_TARGET` announces each landed batch through the Hermes gate
 "New briefs on the dashboard: <titles> → <BOARD_URL>". Delivery failures are logged,
 never fatal. Run `--baseline` once at install to mark existing files as seen, and
 `--dry-run` to preview.
+Current Fringe OPEN actions share one grammar between uploader validation and ledger
+ingest, including `+`/numbered bullets and nested Fringe headings. Every accepted
+current OPEN requires a confirmed source-linked diligence block, including custom
+report titles. The documented pre-2026-07-31 historical archive exemption remains.
 
 The production wiring runs on the Hermes box (`hermes-ts`), which already receives the
 Obsidian vault at `/home/ds/hermes-research` via Syncthing (macOS TCC blocks launchd
@@ -429,18 +460,38 @@ units in `deploy/` (lingering is enabled, so they run unattended):
   backup: pulls a consistent snapshot from the token-gated `GET /api/backup`
   (`VACUUM INTO` on the droplet), verifies integrity and the irreplaceable tables,
   gzips it into the Syncthing-mirrored vault (`~/hermes-research/.board-backups/`,
-  14 kept), and alerts through Hermes on failure. Restore: gunzip a snapshot over
-  `data/market_board.sqlite3` and restart the service. The chain gives three copies:
+  14 kept), and alerts through Hermes on failure. The chain gives three copies:
   droplet (live) → Hermes box → Mac.
 
-`deploy/install-hermes.sh [host]` is the idempotent installer for everything above:
-it syncs the scripts and systemd user units from this repo to the Hermes box,
-verifies checksums, reloads systemd, and enables every trigger — the box matching
-git is a command, not a hope.
+Database snapshots do **not** include the runtime watchlist: back up
+`data/watchlists.yaml` separately whenever the universe changes.
+
+To restore, first decompress the chosen snapshot into a temporary file and verify
+SQLite `PRAGMA integrity_check` plus the required `reports`, `fringe_ideas`,
+`fringe_equity_history`, and `key_dates` tables. Stop both the auto-deploy timer and
+`sector-tracker.service` before replacing anything. Preserve the old database and
+any `-wal`/`-shm` sidecars together; never overwrite a running WAL database or replay
+old sidecars onto a restored snapshot. Install the verified database at
+`data/market_board.sqlite3` with owner `board:board` and mode `0600`, restore the
+matching runtime watchlist if needed, start the service, check `/api/ready`, and
+then re-enable the auto-deploy timer. Keep the previous files until recovery is verified.
+
+`deploy/install-hermes.sh [host]` syncs scripts, the shared Fringe grammar, and systemd
+user units into the SSH user's home rather than a hard-coded `/home/ds`.
+It requires Python 3.11+, Hermes, a configured `~/.config/sector-tracker/uploader.env`,
+an existing absolute vault directory, and a working systemd user manager; lingering
+is enabled when necessary (sudo may be required). The configured vault drives the
+watcher. Config is restricted to `0600`, installed files are checksum-verified, and
+triggers restart on installation. The default allowlist includes Fringe Weekly Review
+so a failed weekly POST can retry from its saved vault file; explicit `REPORT_TITLES`
+must include that title to retain this recovery path.
 
 ## Configuration
 
-Use the settings button in the app or edit `config/watchlists.yaml` to change groups and assets.
+Use the settings button or edit `data/watchlists.yaml` to change runtime groups/assets.
+First boot copies the seed only when no runtime watchlist exists. The exact legacy
+relative `WATCHLIST_PATH=./config/watchlists.yaml` migrates to the runtime path;
+custom paths remain explicit and need matching systemd writable-path overrides.
 The board supports:
 
 - `equity`
@@ -454,9 +505,11 @@ Environment variables:
 ```bash
 EDIT_TOKEN=                # required for mutations/backups; empty disables those endpoints
 ALLOW_UNSAFE_EDITS=false   # local-only explicit opt-in; never enable on a reachable server
+READ_USERNAME=            # configure BOTH READ_* values for private browser read access
+READ_PASSWORD=            # empty pair keeps the existing public dashboard mode
 DATABASE_PATH=./data/market_board.sqlite3
 DATABASE_SEED_PATH=./config/market_board_seed.sqlite3
-WATCHLIST_PATH=./config/watchlists.yaml
+WATCHLIST_PATH=./data/watchlists.yaml
 WATCHLIST_SEED_PATH=./config/watchlists.yaml
 QUOTE_POLL_SECONDS=10
 HISTORY_REFRESH_SECONDS=3600
@@ -472,6 +525,12 @@ ECON_CALENDAR_COUNTRIES=US,EU,DE,GB,JP,CN
 NEWS_TELEGRAM_CHANNELS=marketfeed,RetardFrens,tradehaven,AGGRNEWSWIRE,WalterBloomberg,StablewatchNews,cookiesreads,real_DonaldJTrump,ahboyashreads,thekobeissiletter   # public t.me handles; each gets a mute chip in the drawer
 NEWS_POLL_SECONDS=15
 ```
+
+Private mode uses HTTP Basic authentication over HTTPS for HTML, APIs, assets, and
+WebSockets. Reader credentials do not authorize mutations or database exports.
+Automation uses the configured `X-Edit-Token`, which grants read/write access; uploader,
+watchdog, stats, weekly-review, and stop-monitor requests send it without URL exposure.
+Loopback-only health/readiness probes remain available without read credentials.
 
 Hyperliquid discovery persists the first successful crypto and xyz universes as
 baselines. Later listings automatically appear in read-only
@@ -505,8 +564,15 @@ curl http://127.0.0.1:8000/api/snapshots
 curl http://127.0.0.1:8000/api/options/SPY   # requires MARKETDATA_TOKEN
 ```
 
-Diagnostics: `/api/hyperliquid-status` (feed cache freshness, 429 cooldowns) and
-`/api/yahoo-status` (curl presence, live spark probe).
+`/api/health` is liveness, not proof of fresh market data. `/api/ready` checks the
+existing database read-only and detects exited or overdue polling loops; it returns
+503 when those process prerequisites fail. Its diagnostics include last successful
+cycles, cycle errors, and quote/daily-bar timestamps and ages. Provider outages may
+still serve usable cached data; cycle success and an open WebSocket are not freshness
+claims. The header displays quote freshness separately from transport connectivity.
+
+Feed diagnostics: `/api/hyperliquid-status` (cache freshness, 429 cooldowns) and
+`/api/yahoo-status` (curl presence, live spark probe), both edit-token protected.
 
 ## Deployment
 
@@ -523,12 +589,24 @@ the server to your tailnet first. Then run:
 curl -fsSL https://raw.githubusercontent.com/MaybeNot2day/sector-tracker/main/deploy/setup-vps.sh | sudo bash
 ```
 
-The idempotent installer puts the app under `/opt/sector-tracker`, binds Uvicorn
-to loopback, and publishes it publicly through Tailscale Funnel HTTPS. The systemd
-unit runs as a dedicated, sandboxed user. Runtime installs use the hashed,
-fully pinned `requirements.txt`; the auto-deploy timer polls `origin/main`,
-restarts only after installing that lock, and rolls back any revision whose
-local `/api/health` check fails.
+The installer puts the app under `/opt/sector-tracker`, binds Uvicorn to loopback,
+and publishes it through Tailscale Funnel HTTPS. The service uses a sandboxed user
+and writes runtime state under `data/`. Dependency installs use the hashed, pinned
+`requirements.txt`. Initial readiness is verified before recording a rollback
+revision or enabling the updater. Updates are serialized, preserve legacy watchlist
+edits before resetting tracked files, and strictly gate candidates on `/api/ready`.
+A failed candidate rolls back to the recorded revision. Only a legacy baseline or
+rollback whose readiness endpoint returns 404 may use its old `/api/health` gate;
+a present-but-unready endpoint never falls through to liveness.
+
+Before rolling out to an older installation, stop its auto-deploy timer and running
+update job. Preserve its live `config/watchlists.yaml` into `data/watchlists.yaml`
+only if the runtime file is absent, with owner `board:board` and mode `0600`;
+the old updater resets tracked files before the new app can migrate them.
+Explicitly reinstall the root-owned updater from an updated trusted checkout:
+pulling app code does not replace `/usr/local/sbin/sector-tracker-update`.
+After confirming the preserved runtime state and ready baseline, re-enable updates.
+Do not execute an app-user-writable updater as root.
 
 ```bash
 # after setup
@@ -537,14 +615,29 @@ journalctl -u sector-tracker -f
 systemctl restart sector-tracker
 ```
 
-The setup generates a random `EDIT_TOKEN`; keep it in a password manager and
-configure the same value in the Hermes uploader. To rotate it:
+Setup creates a random `EDIT_TOKEN` in the `0600` server `.env`, without printing it
+or putting it in a subprocess argument. Retrieve it locally, store it in a password
+manager, and configure the same value in the Hermes uploader. To rotate it:
 
 ```bash
 sudo sed -i 's/^EDIT_TOKEN=.*/EDIT_TOKEN=NEW_RANDOM_VALUE/' /opt/sector-tracker/.env
 sudo systemctl restart sector-tracker
 ```
 
-Read access is public through Tailscale Funnel. Mutation endpoints still require
-`X-Edit-Token`; the browser keeps that token only for the current tab session.
+Read access stays public unless both `READ_USERNAME` and `READ_PASSWORD` are configured.
+For private use, set the pair in the server `.env` and restart the service.
+Mutation/backup endpoints require `X-Edit-Token` in either mode; the browser retains
+that token only for the current tab session.
 
+## Implementation boundaries
+
+`app/routes/analytics.py` and `app/routes/status.py` own their API domains;
+`app/runtime.py` tracks process progress, and `app/access.py` gates optional read access.
+`app/db_schema.py` owns versioned schema/migrations while `app/db.py` implements persistence.
+`app/fringe_grammar.py` is the stdlib-only grammar used by server ingest and standalone uploaders.
+
+The frontend entrypoint imports formatting, animation, and quote-freshness ES modules.
+After JavaScript or CSS changes, run `bash scripts/minify-static.sh` (Node/npm required).
+It pins helper imports and entrypoint/style URLs by content hash, then builds committed
+twins with pinned esbuild. The server serves a twin only when its source hash matches;
+otherwise it safely serves the current source.

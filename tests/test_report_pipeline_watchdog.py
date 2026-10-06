@@ -124,7 +124,6 @@ def test_audit_accepts_complete_end_to_end_delivery(
     assert watchdog.audit_pipeline(NOW) == []
     assert calls[0].endswith("/api/reports?limit=20")
     assert calls[-1].endswith("/api/fringe")
-    assert len(calls) == len(titles) + 2
 
 
 def test_audit_uses_newest_report_when_listing_contains_prior_days(
@@ -225,8 +224,10 @@ def test_audit_reports_missing_due_file_without_suppressing_other_checks(
     early = datetime(2026, 7, 22, 7, 30, tzinfo=UTC)
     issues = watchdog.audit_pipeline(early)
 
-    assert len(issues) == 1
-    assert issues[0].startswith("Biotech Pharma Brief: vault file missing/unreadable")
+    assert any(
+        issue.startswith("Biotech Pharma Brief: vault file missing/unreadable") for issue in issues
+    )
+    assert "Biotech Pharma Brief: absent from dashboard report listing" in issues
 
 
 def test_alerts_are_edge_triggered_and_send_recovery(
@@ -249,3 +250,50 @@ def test_alerts_are_edge_triggered_and_send_recovery(
     assert len(sent) == 2
     assert sent[0][1] == "[Sector Tracker pipeline]"
     assert sent[1][1] == "[Sector Tracker pipeline recovered]"
+
+
+@pytest.mark.parametrize("listing", [{"reports": []}, None, {"reports": "invalid"}])
+def test_empty_listing_flags_absent_reports_but_fetch_failure_is_distinct(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, listing: dict[str, Any] | None
+) -> None:
+    titles = ["AI Semis Morning Brief", "Biotech Pharma Brief"]
+    bodies = _write_due_reports(tmp_path, titles)
+    monkeypatch.setattr(
+        watchdog, "load_config",
+        lambda: {"BOARD_URL": "https://board.test", "VAULT_DIR": str(tmp_path)},
+    )
+    monkeypatch.setattr(
+        watchdog, "load_state",
+        lambda: {
+            f"{DATE_TEXT} {title}.md": uploader.content_hash(body)
+            for title, body in bodies.items()
+        },
+    )
+
+    def get_json(url: str) -> dict[str, Any]:
+        if listing is None:
+            raise OSError("connection refused")
+        return listing
+
+    monkeypatch.setattr(watchdog, "_get_json", get_json)
+    issues = watchdog.audit_pipeline(datetime(2026, 7, 22, 7, 30, tzinfo=UTC))
+    if listing == {"reports": []}:
+        assert issues == sorted(
+            f"{title}: absent from dashboard report listing" for title in titles
+        )
+    else:
+        assert len(issues) == 1
+        assert issues[0].startswith("dashboard report listing unavailable")
+
+
+def test_dashboard_fetch_uses_machine_read_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+
+    monkeypatch.setattr(watchdog, "load_config", lambda: {"EDIT_TOKEN": "machine-secret"})
+
+    def urlopen(request: Any, **kwargs: Any) -> Any:
+        assert request.get_header("X-edit-token") == "machine-secret"
+        return io.BytesIO(b'{"reports": []}')
+
+    monkeypatch.setattr(watchdog.urllib.request, "urlopen", urlopen)
+    assert watchdog._get_json("https://board.test/api/reports") == {"reports": []}

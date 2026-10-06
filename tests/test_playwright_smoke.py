@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -32,6 +33,8 @@ if E2E_ENABLED:
         )
         from playwright.sync_api import expect, sync_playwright
     except ModuleNotFoundError:
+        if os.environ.get("CI"):
+            pytest.fail("CI browser smoke tests require the 'playwright' package")
         pytest.skip(
             "Python Playwright smoke tests require the 'playwright' package",
             allow_module_level=True,
@@ -49,7 +52,7 @@ TAPE_SYMBOL = "ZEC"
 
 
 @pytest.fixture(scope="session")
-def base_url() -> Iterator[str]:
+def base_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     configured = os.environ.get("BOARD_E2E_BASE_URL")
     if configured:
         yield configured.rstrip("/")
@@ -58,10 +61,22 @@ def base_url() -> Iterator[str]:
     port = _free_port()
     python = Path(".venv/bin/python")
     executable = str(python) if python.exists() else sys.executable
+    isolated = tmp_path_factory.mktemp("browser-server")
+    seed = Path("config/watchlists.yaml").resolve()
+    watchlists = isolated / "watchlists.yaml"
+    shutil.copyfile(seed, watchlists)
     env = {
         **os.environ,
         "ENABLE_BACKGROUND_TASKS": "false",
         "RUN_PLAYWRIGHT": "1",
+        "DATABASE_PATH": str(isolated / "board.db"),
+        "DATABASE_SEED_PATH": str(isolated / "no-database-seed.db"),
+        "WATCHLIST_PATH": str(watchlists),
+        "WATCHLIST_SEED_PATH": str(seed),
+        "READ_USERNAME": "",
+        "READ_PASSWORD": "",
+        "EDIT_TOKEN": "",
+        "ALLOW_UNSAFE_EDITS": "true",
     }
     process = subprocess.Popen(
         [
@@ -98,6 +113,8 @@ def browser() -> Iterator[Browser]:
         try:
             browser = playwright.chromium.launch()
         except PlaywrightError as exc:
+            if os.environ.get("CI"):
+                pytest.fail(f"CI Playwright Chromium launch failed: {exc}")
             pytest.skip(
                 "Playwright Chromium is not installed; run `python -m playwright install chromium` "
                 f"to enable these smoke tests ({exc})"
@@ -136,11 +153,35 @@ _QUIET_WS_SCRIPT = """
       (this.listeners.get(type) || []).forEach((listener) => listener(event));
     }
     send() {}
-    close() { this.readyState = QuietWebSocket.CLOSED; }
+    close() {
+      this.readyState = QuietWebSocket.CLOSED;
+      this.emit("close");
+    }
   }
   window.WebSocket = QuietWebSocket;
 })();
 """
+
+
+def _emit_board_quotes(page: Page, payload: dict[str, Any]) -> None:
+    page.evaluate(
+        """(payload) => window.__lastQuietWebSocket.emit("message", {
+          data: JSON.stringify({ type: "quotes", data: payload }),
+        })""",
+        payload,
+    )
+
+
+def _refresh_news(page: Page) -> None:
+    # Exercise the public stream interface, never module-private functions.
+    page.evaluate(
+        """async () => {
+          const payload = await (await fetch("/api/news")).json();
+          window.__lastQuietWebSocket.emit("message", {
+            data: JSON.stringify({ type: "news", data: payload }),
+          });
+        }"""
+    )
 
 
 @pytest.fixture()
@@ -170,7 +211,7 @@ def test_daily_board_loads_without_page_errors_and_renders_core_sections(
     # The permanent SYSTEM strip collapses once the feed is live; its
     # telemetry rides on the LIVE pill (title + click popover) instead.
     expect(page.locator("#status-strip")).to_be_hidden()
-    expect(page.locator("#feed-mode")).to_contain_text(re.compile(r"WS Live|Poll 10s"))
+    expect(page.locator("#live-badge")).to_have_attribute("data-freshness", "fresh")
     expect(page.locator("#live-freshness")).to_contain_text("Updated")
     telemetry_pop = page.locator("#telemetry-pop")
     expect(telemetry_pop).to_be_hidden()
@@ -614,7 +655,7 @@ def test_market_map_toggle_renders_treemap_and_opens_charts(page: Page, base_url
     spy = page.locator('#board .map-tile[data-symbol="SPY"]')
     expect(spy).to_be_visible()
     spy.evaluate("(tile) => { tile.dataset.identityProbe = 'preserved'; }")
-    page.evaluate("(payload) => applyQuotes(payload)", json.loads(json.dumps(BOARD_PAYLOAD)))
+    _emit_board_quotes(page, json.loads(json.dumps(BOARD_PAYLOAD)))
     expect(spy).to_have_attribute("data-identity-probe", "preserved")
     spy.click()
     expect(page.locator("#chart-modal")).to_have_attribute("aria-hidden", "false")
@@ -748,7 +789,9 @@ def test_crypto_tape_reconciles_in_place_and_delegates_actions(
           );
         }"""
     )
-    page.evaluate("() => fetchQuotes()")
+    updated = json.loads(json.dumps(BOARD_PAYLOAD))
+    updated["crypto_tape"][0]["last"] = 49.7
+    _emit_board_quotes(page, updated)
     expect(row.locator(".last-cell")).to_have_text("49.70")
     identity = page.evaluate(
         """() => ({
@@ -827,7 +870,7 @@ def test_unchanged_news_keeps_nodes_and_refreshes_age_text(
         }"""
     )
 
-    page.evaluate("() => fetchNews()")
+    _refresh_news(page)
     identity = page.evaluate(
         """() => ({
           item: window.__newsItemBeforeRefresh === document.querySelector('#news-list .news-item'),
@@ -896,7 +939,7 @@ def test_news_relevance_deduplication_and_symbol_focus(
         ],
     }
     page.route("**/api/news", lambda route: _fulfill_json(route, payload))
-    page.evaluate("() => fetchNews()")
+    _refresh_news(page)
     page.locator("#news-toggle").click()
 
     rows = page.locator("#news-list .news-item")
@@ -1030,7 +1073,7 @@ def test_news_semantic_map_tiles_and_cluster_drilldown(
     }
     page.route("**/api/news", lambda route: _fulfill_json(route, feed_payload))
     page.route("**/api/news/map", lambda route: _fulfill_json(route, map_payload))
-    page.evaluate("() => fetchNews()")
+    _refresh_news(page)
     page.locator("#news-toggle").click()
     page.locator('button[data-news-view="map"]').click()
 
@@ -1060,10 +1103,23 @@ def test_news_semantic_map_tiles_and_cluster_drilldown(
     page.locator("#news-cluster-close").click()
     expect(page.locator("#news-cluster-panel")).to_be_hidden()
 
-    # The close button returns to the list view and hides the modal.
-    page.locator("#news-map-close").click()
+    # Both Tab directions stay in the shared modal lifecycle.
+    close = page.locator("#news-map-close")
+    close.focus()
+    page.keyboard.press("Shift+Tab")
+    expect(tiles.last).to_be_focused()
+    page.keyboard.press("Tab")
+    expect(close).to_be_focused()
+    page.keyboard.press("Escape")
     expect(page.locator("#news-map-modal")).to_be_hidden()
+    trigger = page.locator('button[data-news-view="map"]')
+    expect(trigger).to_be_focused()
     expect(page.locator("#news-list")).to_be_visible()
+    trigger.click()
+    expect(close).to_be_focused()
+    close.click()
+    expect(page.locator("#news-map-modal")).to_be_hidden()
+    expect(trigger).to_be_focused()
 
 
 def test_news_refresh_keeps_reading_position_when_items_prepend(
@@ -1092,7 +1148,7 @@ def test_news_refresh_keeps_reading_position_when_items_prepend(
         lambda route: _fulfill_json(route, news_payload(state["extra"])),
     )
     page.locator("#news-toggle").click()
-    page.evaluate("() => fetchNews()")
+    _refresh_news(page)
     expect(page.locator("#news-list .news-item")).to_have_count(24)
 
     # Read something below the fold, then let three new posts land.
@@ -1107,7 +1163,7 @@ def test_news_refresh_keeps_reading_position_when_items_prepend(
         }"""
     )
     state["extra"] = 3
-    page.evaluate("() => fetchNews()")
+    _refresh_news(page)
     expect(page.locator("#news-list .news-item")).to_have_count(27)
 
     after = page.evaluate(
@@ -1122,41 +1178,57 @@ def test_news_refresh_keeps_reading_position_when_items_prepend(
 
 
 def test_daily_board_rebuild_preserves_page_scroll(page: Page, base_url: str) -> None:
+    page.set_viewport_size({"width": 1440, "height": 700})
     _goto_board(page, base_url)
     expect(page.locator("#daily-view")).to_be_visible()
+    expect(page.locator("#daily-board .regime-call-value")).to_have_text("RISK-ON / BROAD")
 
-    result = page.evaluate(
+    before = page.evaluate(
         """() => {
           const scroller = document.scrollingElement;
           scroller.scrollTop = 400;
-          const before = scroller.scrollTop;
-          const board = document.querySelector('#daily-board');
-          const regime = board.querySelector('[data-panel="regime"]');
-          const rotation = board.querySelector('[data-panel="rotation"]');
-          // Identical data: reconcile must keep every panel node (a full
-          // DOM swap here is what used to kill scroll momentum).
-          lastDailyRenderKey = "";
-          renderDailyBoard(latestData.overview, latestCryptoEtfFlows);
-          const keptAll = board.querySelector('[data-panel="regime"]') === regime
-            && board.querySelector('[data-panel="rotation"]') === rotation;
-          // Changed regime data: only that chunk is replaced.
-          lastDailyRenderKey = "";
-          const overview = structuredClone(latestData.overview);
-          overview.regime = { ...(overview.regime || {}), label: 'SMOKE-REGIME' };
-          renderDailyBoard(overview, latestCryptoEtfFlows);
-          return {
-            before,
-            after: scroller.scrollTop,
-            keptAll,
-            regimeReplaced: board.querySelector('[data-panel="regime"]') !== regime,
-            rotationKept: board.querySelector('[data-panel="rotation"]') === rotation,
-          };
+          window.__dailyPanelsBeforeRefresh = Array.from(
+            document.querySelectorAll('#daily-board [data-panel]')
+          );
+          return scroller.scrollTop;
         }"""
     )
-    assert result["keptAll"] is True
-    assert result["regimeReplaced"] is True
-    assert result["rotationKept"] is True
-    assert result["after"] == result["before"]
+    assert before > 0
+
+    # A new public quote tick with unchanged panel data must keep every node
+    # and the reader's actual page position, without touching module state.
+    updated = json.loads(json.dumps(BOARD_PAYLOAD))
+    updated["overview"]["as_of"] = _iso(1)
+    _emit_board_quotes(page, updated)
+    unchanged = page.evaluate(
+        """() => ({
+          scroll: document.scrollingElement.scrollTop,
+          panelsKept: window.__dailyPanelsBeforeRefresh.every(panel =>
+            document.querySelector(
+              '#daily-board [data-panel="' + panel.dataset.panel + '"]'
+            ) === panel
+          ),
+        })"""
+    )
+    assert unchanged == {"scroll": before, "panelsKept": True}
+
+    # A subsequent tick changes the visible regime while unrelated panels
+    # keep their DOM identity and scrolling remains undisturbed.
+    updated["overview"]["as_of"] = _iso(2)
+    updated["overview"]["regime"]["label"] = "SMOKE-REGIME"
+    _emit_board_quotes(page, updated)
+    expect(page.locator("#daily-board .regime-call-value")).to_have_text("SMOKE-REGIME")
+    changed = page.evaluate(
+        """() => ({
+          scroll: document.scrollingElement.scrollTop,
+          unaffectedPanelsKept: window.__dailyPanelsBeforeRefresh
+            .filter(panel => panel.dataset.panel !== 'regime')
+            .every(panel => document.querySelector(
+              '#daily-board [data-panel="' + panel.dataset.panel + '"]'
+            ) === panel),
+        })"""
+    )
+    assert changed == {"scroll": before, "unaffectedPanelsKept": True}
 
 
 @pytest.mark.parametrize("selector", [".fringe-scroll"])
@@ -1216,25 +1288,132 @@ def test_editor_failed_save_preserves_typed_asset_fields(page: Page, base_url: s
     expect(page.locator("#editor-modal")).to_have_attribute("aria-hidden", "true")
 
 
+def test_editor_successful_mutations_reset_saved_fields(page: Page, base_url: str) -> None:
+    config = json.loads(json.dumps(WATCHLIST_PAYLOAD))
+
+    def groups(route: Any) -> None:
+        if route.request.method == "POST":
+            config["groups"].append({"name": route.request.post_data_json["name"], "assets": []})
+        _fulfill_json(route, config)
+
+    def assets(route: Any) -> None:
+        asset = route.request.post_data_json
+        next(group for group in config["groups"] if group["name"] == "QA_EQUITY")[
+            "assets"
+        ].append(asset)
+        _fulfill_json(route, config)
+
+    page.route("**/api/groups", groups)
+    page.route("**/api/groups/*/assets", assets)
+    _goto_board(page, base_url)
+    page.locator("#editor-open").click()
+    expect(page.locator("#editor-list .editor-group").first).to_be_visible()
+    expect(page.locator("#editor-status")).to_have_text("")
+    page.locator("#group-name").fill("Saved group")
+    page.locator('#group-form button[type="submit"]').click()
+    expect(page.locator("#group-name")).to_have_value("")
+    expect(page.locator("#editor-list")).to_contain_text("Saved group")
+    page.locator("#asset-group").select_option("QA_EQUITY")
+    page.locator("#asset-symbol").fill("NVDA")
+    page.locator("#asset-exchange").fill("NASDAQ")
+    page.locator("#asset-name").fill("Saved asset")
+    page.locator('#asset-form button[type="submit"]').click()
+    expect(page.locator("#asset-symbol")).to_have_value("")
+    expect(page.locator("#asset-exchange")).to_have_value("")
+    expect(page.locator("#asset-name")).to_have_value("")
+    expect(page.locator("#editor-list")).to_contain_text("NVDA")
+    expect(page.locator("#editor-status")).not_to_contain_text("not saved")
+
+
+def test_cached_first_paint_and_socket_open_do_not_claim_fresh_quotes(
+    page: Page, base_url: str
+) -> None:
+    cached = json.loads(json.dumps(BOARD_PAYLOAD))
+    page.add_init_script(
+        "localStorage.setItem('board-cache-v1', JSON.stringify({"
+        f"at: Date.now(), payload: {json.dumps(cached)}"
+        "}));"
+    )
+    # Hold HTTP so only the saved board can paint before a real stream frame.
+    page.route("**/api/quotes", lambda route: None)
+    _goto_board(page, base_url)
+    expect(page.locator("#daily-board .benchmark-card").first).to_be_visible()
+    expect(page.locator("#live-badge")).to_have_attribute("data-freshness", "cached")
+    page.evaluate(
+        """() => {
+          const socket = window.__lastQuietWebSocket;
+          socket.readyState = WebSocket.OPEN;
+          socket.emit("open");
+        }"""
+    )
+    expect(page.locator("#connection-state")).to_have_attribute("data-transport", "live")
+    expect(page.locator("#live-badge")).to_have_attribute("data-freshness", "cached")
+    expect(page.locator("#status-strip")).to_be_visible()
+
+    stale = json.loads(json.dumps(BOARD_PAYLOAD))
+    for group in stale["groups"]:
+        for asset in group["assets"]:
+            asset["quote"]["is_stale"] = True
+    _emit_board_quotes(page, stale)
+    expect(page.locator("#live-badge")).to_have_attribute("data-freshness", "stale")
+    page.evaluate(
+        """() => window.__lastQuietWebSocket.emit("message", {
+          data: JSON.stringify({ type: "heartbeat" }),
+        })"""
+    )
+    expect(page.locator("#live-badge")).to_have_attribute("data-freshness", "stale")
+    expect(page.locator("#status-strip")).to_be_visible()
+
+    fresh = json.loads(json.dumps(BOARD_PAYLOAD))
+    timestamp = datetime.now(UTC).isoformat()
+    for group in fresh["groups"]:
+        for asset in group["assets"]:
+            asset["quote"]["timestamp"] = timestamp
+    _emit_board_quotes(page, fresh)
+    expect(page.locator("#live-badge")).to_have_attribute("data-freshness", "fresh")
+    expect(page.locator("#status-strip")).to_be_hidden()
+    # The computation stamp remains old; the displayed quote update is not
+    # the unchanged board timestamp.
+    expected_time = page.evaluate(
+        """(stamp) => new Date(stamp).toLocaleTimeString([], {
+          timeZone: "Europe/Berlin", hour: "2-digit", minute: "2-digit", second: "2-digit",
+        })""",
+        timestamp,
+    )
+    expect(page.locator("#live-freshness")).to_contain_text(expected_time)
+
+
+def test_repeated_quote_moves_restart_cell_flash(page: Page, base_url: str) -> None:
+    _goto_board(page, base_url)
+    page.locator("#markets-tab").click()
+    cell = page.locator('#board .asset-row[data-symbol="SPY"] .last-cell')
+    for last in (633.0, 634.0):
+        updated = json.loads(json.dumps(BOARD_PAYLOAD))
+        updated["groups"][0]["assets"][0]["quote"] = _quote("SPY", last, 625.0)
+        _emit_board_quotes(page, updated)
+        expect(cell).to_have_class(re.compile(r"\bflash-up\b"))
+    expect(cell).not_to_have_class(re.compile(r"\bflash-(up|down)\b"))
+    expect(cell).to_have_text("634.00")
+
+
 def test_visible_zombie_websocket_triggers_poll_and_close(page: Page, base_url: str) -> None:
     _goto_board(page, base_url)
-
-    recovered = page.evaluate(
-        """
-        () => {
-          let closed = false;
-          activeSocket = {
-            readyState: WebSocket.OPEN,
-            close() { closed = true; },
-          };
-          feedMode = "ws";
-          lastWsFrameAt = Date.now() - WS_STALE_FRAME_MS - 1;
-          return { recovered: recoverStaleWebSocket(), closed };
-        }
-        """
+    page.evaluate(
+        """() => {
+          const socket = window.__lastQuietWebSocket;
+          socket.readyState = WebSocket.OPEN;
+          socket.emit("open");
+          const realNow = Date.now;
+          Date.now = () => realNow() + 31000;
+          document.dispatchEvent(new Event("visibilitychange"));
+          Date.now = realNow;
+        }"""
     )
-
-    assert recovered == {"recovered": True, "closed": True}
+    page.wait_for_function("window.__lastQuietWebSocket.readyState === WebSocket.CLOSED")
+    expect(page.locator("#feed-mode")).to_have_text("Poll 10s")
+    # Zombie detection resumes an HTTP quote request rather than waiting for
+    # a dead socket; the resulting board remains usable.
+    expect(page.locator("#daily-board .benchmark-card").first).to_be_visible()
 
 
 def test_reports_modal_lists_reports_and_renders_escaped_markdown_reader(
@@ -1468,16 +1647,6 @@ def test_tablet_market_toolbar_and_category_group_fit_viewport(
 ) -> None:
     page.set_viewport_size({"width": 800, "height": 900})
     _goto_board(page, base_url)
-    assert (
-        page.evaluate(
-            """() => assetSessionKey({
-              type: "equity",
-              exchange: "HYPERLIQUID",
-              quote: { provider: "hyperliquid" },
-            })"""
-        )
-        == "crypto"
-    )
     page.locator("#markets-tab").click()
 
     category_group = page.get_by_role("group", name="Market category")
@@ -1618,7 +1787,8 @@ def _visible_market_row_count(page: Page) -> int:
 def test_watch_tab_builds_persistent_interactive_chart_wall(page: Page, base_url: str) -> None:
     page.goto(f"{base_url}/#view=watch", wait_until="domcontentloaded")
     expect(page.locator("#watch-view")).to_be_visible()
-    expect(page.locator("#watch-grid .empty-state")).to_contain_text("Add up to 9 symbols")
+    expect(page.locator("#watch-grid .empty-state")).to_be_visible()
+    expect(page.locator(".watch-tile")).to_have_count(0)
 
     # Add two symbols; each tile builds a real lightweight-charts instance
     # (painted canvas, not the 300x150 default of an unrendered chart).
@@ -1636,7 +1806,7 @@ def test_watch_tab_builds_persistent_interactive_chart_wall(page: Page, base_url
     )
     assert painted > 310, f"chart canvas never painted (stuck at default: {painted})"
 
-    # Duplicates and the nine-tile cap are refused with a status message.
+    # Duplicate additions do not change membership.
     page.locator("#watch-add").fill("SPY")
     page.locator("#watch-add").press("Enter")
     expect(page.locator("#watch-status")).to_contain_text("already on the grid")
@@ -1689,17 +1859,130 @@ def test_watch_tab_builds_persistent_interactive_chart_wall(page: Page, base_url
     page.locator("#watch-browse").click()
     picker = page.locator("#watch-picker")
     expect(picker).to_be_visible()
-    expect(picker.locator("header")).to_contain_text("1/9 on the grid")
+    expect(picker.locator('.watch-pick[data-symbol="BTC"]')).to_have_attribute(
+        "aria-pressed", "true"
+    )
     picker.locator('.watch-pick[data-symbol="SPY"]').click()
     expect(page.locator(".watch-tile")).to_have_count(2)
     expect(picker.locator('.watch-pick[data-symbol="SPY"]')).to_have_attribute(
         "aria-pressed", "true"
     )
-    expect(picker.locator("header")).to_contain_text("2/9 on the grid")
 
     # Tile remove still works and the grid drops back down.
     page.locator('[data-watch-symbol="SPY"] .watch-remove').click()
     expect(page.locator(".watch-tile")).to_have_count(1)
+
+
+def test_watch_live_labels_preserve_chart_and_list_star_targets_list(
+    page: Page, base_url: str
+) -> None:
+    page.goto(f"{base_url}/#view=watch", wait_until="domcontentloaded")
+    for symbol in ("SPY", TAPE_SYMBOL):
+        page.locator("#watch-add").fill(symbol)
+        page.locator("#watch-add").press("Enter")
+    host = page.locator('[data-watch-symbol="SPY"] .watch-chart')
+    expect(host.locator("canvas").first).to_be_visible()
+    host.evaluate("(host) => { window.__watchCanvas = host.querySelector('canvas'); }")
+    updated = json.loads(json.dumps(BOARD_PAYLOAD))
+    asset = updated["groups"][0]["assets"][0]
+    assert asset["symbol"] == "SPY"
+    asset["quote"] = _quote("SPY", 650.0, 625.0)
+    updated["crypto_tape"][0]["last"] = 51.0
+    updated["crypto_tape"][0]["change_pct"] = 6.25
+    _emit_board_quotes(page, updated)
+    label = page.locator('[data-watch-symbol="SPY"] .watch-quote')
+    expect(label).to_contain_text("650.00")
+    expect(label).to_contain_text("+4.00%")
+    tape_label = page.locator(f'[data-watch-symbol="{TAPE_SYMBOL}"] .watch-quote')
+    expect(tape_label).to_contain_text("51.00")
+    expect(tape_label).to_contain_text("+6.25%")
+    assert host.evaluate("(host) => host.querySelector('canvas') === window.__watchCanvas")
+
+    # The grid already contains SPY; a new list does not. The modal's star
+    # must describe, inspect and mutate only the current target.
+    page.locator('#watch-mode button[data-mode="lists"]').click()
+    page.locator("#watch-list-new").click()
+    _dialog_prompt(page, "Focus list")
+    page.locator("#markets-tab").click()
+    page.locator('#board .asset-row[data-symbol="SPY"]').click()
+    star = page.locator("#chart-watch-toggle")
+    expect(star).to_have_attribute("aria-pressed", "false")
+    expect(star).to_have_attribute("aria-label", re.compile(r'list "Focus list"'))
+    star.click()
+    expect(star).to_have_attribute("aria-pressed", "true")
+    page.keyboard.press("Escape")
+    page.locator("#watch-tab").click()
+    expect(page.locator('.watch-list-table tr[data-list-symbol="SPY"]')).to_be_visible()
+    page.locator('.watch-list-open[data-symbol="SPY"]').click()
+    expect(star).to_have_attribute("aria-pressed", "true")
+    star.click()
+    expect(star).to_have_attribute("aria-pressed", "false")
+    page.keyboard.press("Escape")
+    expect(page.locator(".watch-list-table tbody tr")).to_have_count(0)
+    page.locator('#watch-mode button[data-mode="charts"]').click()
+    expect(page.locator('[data-watch-symbol="SPY"]')).to_be_visible()
+
+
+def test_watch_pending_chart_is_discarded_on_lists_switch(page: Page, base_url: str) -> None:
+    pending: list[Any] = []
+    page.route("**/api/history/**", lambda route: pending.append(route))
+    page.goto(f"{base_url}/#view=watch", wait_until="domcontentloaded")
+    with page.expect_request("**/api/history/SPY?**"):
+        page.locator("#watch-add").fill("SPY")
+        page.locator("#watch-add").press("Enter")
+    # The library loads alongside history, so waiting for it does not require
+    # releasing the delayed response. Function syntax also respects CSP.
+    page.wait_for_function("() => Boolean(window.LightweightCharts)")
+    page.evaluate(
+        """() => {
+          const createChart = window.LightweightCharts.createChart;
+          window.__detachedWatchCreates = 0;
+          window.LightweightCharts.createChart = (host, options) => {
+            if (!host.isConnected) window.__detachedWatchCreates += 1;
+            return createChart(host, options);
+          };
+        }"""
+    )
+    page.locator('#watch-mode button[data-mode="lists"]').click()
+    expect(page.locator(".watch-tile")).to_have_count(0)
+    with page.expect_response("**/api/history/SPY?**") as history_response:
+        _fulfill_json(pending[0], _history_payload("SPY"))
+    history_response.value.finished()
+    # A frame barrier lets the response's promise/microtasks finish before
+    # asserting that no removed host was handed to the real chart library.
+    page.evaluate(
+        "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
+    )
+    assert page.evaluate("window.__detachedWatchCreates") == 0
+    expect(page.locator("#watch-grid canvas")).to_have_count(0)
+    page.unroute("**/api/history/**")
+    page.locator('#watch-mode button[data-mode="charts"]').click()
+    expect(page.locator('[data-watch-symbol="SPY"] .watch-chart canvas').first).to_be_visible()
+
+
+def test_watch_grid_accepts_fiftieth_symbol_and_refuses_fifty_first(
+    page: Page, base_url: str
+) -> None:
+    symbols = [f"QA{index}" for index in range(49)]
+    page.add_init_script(
+        f"localStorage.setItem('watch-symbols-v1', {json.dumps(json.dumps(symbols))});"
+    )
+    # Boundary behavior does not need fifty heavyweight chart canvases.
+    page.route("**/api/history/**", lambda route: _fulfill_json(route, {"bars": []}))
+    page.goto(f"{base_url}/#view=watch", wait_until="domcontentloaded")
+    expect(page.locator(".watch-tile")).to_have_count(49)
+    page.locator("#watch-add").fill("QA49")
+    page.locator("#watch-add").press("Enter")
+    expect(page.locator(".watch-tile")).to_have_count(50)
+    page.locator("#watch-add").fill("QA50")
+    page.locator("#watch-add").press("Enter")
+    expect(page.locator(".watch-tile")).to_have_count(50)
+    expect(page.locator('[data-watch-symbol="QA50"]')).to_have_count(0)
+    expect(page.locator("#watch-status")).not_to_have_text("")
+    page.locator('[data-watch-symbol="QA0"] .watch-remove').click()
+    page.locator("#watch-add").press("Enter")
+    expect(page.locator('[data-watch-symbol="QA50"]')).to_be_visible()
+    expect(page.locator(".watch-tile")).to_have_count(50)
 
 
 def _dialog_prompt(page: Page, value: str) -> None:
@@ -1795,7 +2078,8 @@ def test_watch_lists_mode_manages_named_screener_lists(page: Page, base_url: str
 
     # Charts mode is untouched by list membership.
     page.locator('#watch-mode button[data-mode="charts"]').click()
-    expect(page.locator("#watch-grid .empty-state")).to_contain_text("Add up to 9 symbols")
+    expect(page.locator("#watch-grid .empty-state")).to_be_visible()
+    expect(page.locator(".watch-tile")).to_have_count(0)
 
 
 def test_watch_lists_are_private_per_browser_and_persist(browser: Browser, base_url: str) -> None:
@@ -2010,7 +2294,7 @@ def test_malformed_websocket_frame_is_dropped_without_breaking_live_view(
     # must leave the live board collapsed-strip state untouched.
     expect(page.locator("#status-strip")).to_be_hidden()
     expect(page.locator("#status-strip")).not_to_have_class(re.compile(r"\berror\b"))
-    expect(page.locator("#feed-mode")).to_contain_text(re.compile(r"WS Live|Poll 10s"))
+    expect(page.locator("#live-badge")).to_have_attribute("data-freshness", "fresh")
 
 
 def test_trends_late_response_cannot_replace_newer_range_and_offline_keeps_grid(

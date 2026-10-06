@@ -252,6 +252,8 @@ class QuoteService:
             if asset.symbol not in fresh_by_symbol
             and asset.source != "stooq"
             and asset.type in {"equity", "etf"}
+            and asset.exchange != "KRX"
+            and not asset.symbol.endswith((".KS", ".KQ"))
         ]
         stooq = self.providers.get("stooq")
         if stooq and missing_fallback_assets:
@@ -414,8 +416,16 @@ class QuoteService:
 
 
 def _cached_quote_matches(asset: AssetConfig, cached: Quote) -> bool:
-    """Reject symbol collisions after a watchlist asset changes identity."""
-    return cached.asset_type == asset.type
+    """Reject changed asset identities and unconverted legacy KRX quotes."""
+    if cached.asset_type != asset.type:
+        return False
+    if asset.exchange == "KRX" or asset.symbol.upper().endswith((".KS", ".KQ")):
+        return cached.currency == "USD" or (
+            cached.display_currency == "USD"
+            and cached.display_last is not None
+            and cached.display_last > 0
+        )
+    return True
 
 
 # A listing-venue quote older than this means the session (incl. pre/post

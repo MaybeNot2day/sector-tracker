@@ -5,4 +5,5 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 /home/ds/.local/bin/board_backup.py
+ExecStart=/usr/bin/python3 %h/.local/bin/board_backup.py
+UMask=0077

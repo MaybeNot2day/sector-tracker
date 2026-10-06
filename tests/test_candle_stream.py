@@ -22,12 +22,25 @@ class FakeTransport:
     def __init__(self) -> None:
         self.sent: list[dict[str, Any]] = []
         self.incoming: asyncio.Queue[str | Exception] = asyncio.Queue()
+        self.active: set[tuple[str, str]] = set()
 
     async def send(self, text: str) -> None:
         self.sent.append(json.loads(text))
+        frame = self.sent[-1]
+        subscription = frame["subscription"]
+        key = (subscription["coin"], subscription["interval"])
+        if frame["method"] == "subscribe":
+            self.active.add(key)
+        else:
+            self.active.discard(key)
 
     def kill(self) -> None:
         self.incoming.put_nowait(ConnectionError("dropped"))
+
+    def publish(self, coin: str, interval: str, close: float) -> None:
+        """Only subscribed markets can deliver frames, as on the real WS."""
+        if (coin, interval) in self.active:
+            self.incoming.put_nowait(candle_frame(coin, interval, close))
 
     def __aiter__(self) -> "FakeTransport":
         return self
@@ -201,3 +214,108 @@ def test_candle_bar_rejects_malformed_frames() -> None:
     assert bar is not None
     assert bar["timestamp"] == "2026-09-03T16:16:00+00:00"
     assert bar["close"] == 1.5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("keep_other_chart", [False, True])
+@pytest.mark.parametrize(
+    ("symbol", "asset_type", "coin"),
+    [("BTC", "crypto_perp", "BTC"), ("AAPL", "equity", "xyz:AAPL")],
+)
+async def test_subscribe_during_last_unsubscribe_keeps_streaming(
+    keep_other_chart: bool, symbol: str, asset_type: str, coin: str
+) -> None:
+    unsubscribe_started = asyncio.Event()
+    allow_unsubscribe = asyncio.Event()
+
+    class GatedTransport(FakeTransport):
+        async def send(self, text: str) -> None:
+            if json.loads(text)["method"] == "unsubscribe":
+                unsubscribe_started.set()
+                await allow_unsubscribe.wait()
+            await super().send(text)
+
+    connector = FakeConnector()
+
+    @asynccontextmanager
+    async def connect() -> Any:
+        transport = GatedTransport()
+        connector.connections.append(transport)
+        try:
+            yield transport
+        finally:
+            transport.kill()
+
+    service = CandleStreamService(provider_with_markets(), connector=connect)
+    old = await service.subscribe("BTC", "1m", "crypto_perp")
+    assert old is not None
+    if keep_other_chart:
+        assert await service.subscribe("BTC", "5m", "crypto_perp") is not None
+    await settled()
+    removing = asyncio.create_task(service.unsubscribe("BTC", "1m", old))
+    await asyncio.wait_for(unsubscribe_started.wait(), timeout=1)
+    replacing = asyncio.create_task(service.subscribe(symbol, "1m", asset_type))
+    # Put the new subscribe inside the upstream unsubscribe's suspension.
+    await asyncio.sleep(0)
+    allow_unsubscribe.set()
+    try:
+        await removing
+        replacement = await replacing
+        assert replacement is not None
+        await settled()
+        connector.connections[-1].publish(coin, "1m", 333.0)
+        frame = json.loads(await asyncio.wait_for(replacement.get(), timeout=1))
+        assert frame["symbol"] == symbol
+        assert frame["bar"]["close"] == 333.0
+    finally:
+        allow_unsubscribe.set()
+        await asyncio.gather(removing, replacing, return_exceptions=True)
+        await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_old_connection_cleanup_cannot_clear_replacement_connection() -> None:
+    closing_started = asyncio.Event()
+    allow_close = asyncio.Event()
+    connector = FakeConnector()
+
+    @asynccontextmanager
+    async def connect() -> Any:
+        transport = FakeTransport()
+        connector.connections.append(transport)
+        first = len(connector.connections) == 1
+        try:
+            yield transport
+        finally:
+            if first:
+                closing_started.set()
+                await allow_close.wait()
+            transport.kill()
+
+    service = CandleStreamService(provider_with_markets(), connector=connect)
+    old = await service.subscribe("BTC", "1m", "crypto_perp")
+    assert old is not None
+    await settled()
+    removing = asyncio.create_task(service.unsubscribe("BTC", "1m", old))
+    await asyncio.wait_for(closing_started.wait(), timeout=1)
+    try:
+        replacement = await service.subscribe("BTC", "1m", "crypto_perp")
+        assert replacement is not None
+        await settled()
+        allow_close.set()
+        await removing
+        # This chart uses the replacement transport after the old task's
+        # finally block finishes; clearing _ws there would lose this subscribe.
+        following = await service.subscribe("AAPL", "1m", "equity")
+        assert following is not None
+        upstream = connector.connections[-1]
+        upstream.publish("BTC", "1m", 80111.0)
+        upstream.publish("xyz:AAPL", "1m", 334.0)
+        replacement_frame = json.loads(await asyncio.wait_for(replacement.get(), timeout=1))
+        following_frame = json.loads(await asyncio.wait_for(following.get(), timeout=1))
+        assert replacement_frame["bar"]["close"] == 80111.0
+        assert following_frame["bar"]["close"] == 334.0
+    finally:
+        allow_close.set()
+        await asyncio.gather(removing, return_exceptions=True)
+        await service.aclose()

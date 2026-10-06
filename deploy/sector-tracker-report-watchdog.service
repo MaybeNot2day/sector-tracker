@@ -5,4 +5,5 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 /home/ds/.local/bin/report_pipeline_watchdog.py
+ExecStart=/usr/bin/python3 %h/.local/bin/report_pipeline_watchdog.py
+UMask=0077

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import json
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -233,3 +234,109 @@ async def test_failed_scrape_round_is_negatively_cached(
 
     assert first["categories"] == second["categories"] == []
     assert calls == len(component_trends.CATEGORIES)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fallback_source", ["memory", "pushed"])
+async def test_partial_scrape_keeps_failed_categories_and_retries_soon(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fallback_source: str
+) -> None:
+    now = 100_000.0
+    as_of = "2026-10-07T12:00:00Z"
+    cpu_healthy = False
+    requested: list[str] = []
+    previous = {
+        "as_of": "2000-01-01T00:00:00Z",
+        "source": "https://pcpartpicker.com/trends/",
+        "categories": [
+            {
+                "slug": slug,
+                "label": label,
+                "url": f"https://pcpartpicker.com/trends/price/{slug}/",
+                "charts": [{"title": f"Old {label}", "image": IMAGE_PREFIX + f"old-{slug}.png"}],
+            }
+            for slug, label in component_trends.CATEGORIES
+        ],
+    }
+    monkeypatch.setattr(component_trends, "monotonic", lambda: now)
+    monkeypatch.setattr(component_trends, "_now_iso", lambda: as_of)
+    monkeypatch.setattr(
+        component_trends,
+        "_cache",
+        {"at": 0.0, "payload": previous if fallback_source == "memory" else None, "failed_at": None},
+    )
+    store_path = tmp_path / "trends.json" if fallback_source == "pushed" else None
+    if store_path is not None:
+        store_path.write_text(json.dumps(previous), encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        slug = request.url.path.rstrip("/").rsplit("/", 1)[-1]
+        requested.append(slug)
+        if slug == "cpu" and not cpu_healthy:
+            return httpx.Response(503)
+        return httpx.Response(
+            200,
+            text=(
+                'var images = [{ src: "//cdna.pcpartpicker.com/static/forever/images/trends/'
+                f'fresh-{slug}.png", title: "Fresh {slug}" }}];'
+            ),
+        )
+
+    original_client = httpx.AsyncClient
+
+    def client_factory(**kwargs: Any) -> httpx.AsyncClient:
+        return original_client(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(component_trends.httpx, "AsyncClient", client_factory)
+    partial = await component_trends.component_trends_payload(store_path)
+    categories = {category["slug"]: category for category in partial["categories"]}
+    assert list(categories) == [slug for slug, _label in component_trends.CATEGORIES]
+    assert categories["cpu"]["charts"] == previous["categories"][1]["charts"]
+    assert categories["cpu"]["as_of"] == previous["as_of"]
+    assert categories["cpu"]["stale"] is True
+    assert categories["memory"]["charts"][0]["image"] == IMAGE_PREFIX + "fresh-memory.png"
+    assert categories["memory"]["as_of"] == as_of
+    assert categories["memory"]["stale"] is False
+    assert partial["stale"] is True
+    assert partial["failed_categories"] == ["cpu"]
+    assert partial["as_of"] == previous["as_of"]
+    assert await component_trends.component_trends_payload(store_path) == partial
+    assert len(requested) == len(component_trends.CATEGORIES)
+
+    now += component_trends.FAILURE_RETRY_SECONDS + 1
+    as_of = "2026-10-07T12:05:01Z"
+    cpu_healthy = True
+    recovered = await component_trends.component_trends_payload(store_path)
+    assert len(requested) == 2 * len(component_trends.CATEGORIES)
+    assert recovered["stale"] is False
+    assert recovered["failed_categories"] == []
+    assert recovered["as_of"] == as_of
+    assert all(not category["stale"] for category in recovered["categories"])
+    assert await component_trends.component_trends_payload(store_path) == recovered
+    assert len(requested) == 2 * len(component_trends.CATEGORIES)
+
+
+@pytest.mark.asyncio
+async def test_full_scrape_failure_marks_existing_charts_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous = {
+        "as_of": "2000-01-01T00:00:00Z",
+        "source": "https://pcpartpicker.com/trends/",
+        "categories": copy.deepcopy(VALID_PUSH["categories"]),
+    }
+    monkeypatch.setattr(
+        component_trends, "_cache", {"at": 0.0, "payload": previous, "failed_at": None}
+    )
+    monkeypatch.setattr(component_trends, "monotonic", lambda: 100_000.0)
+
+    async def fail_category(client: object, slug: str, label: str) -> None:
+        return None
+
+    monkeypatch.setattr(component_trends, "_fetch_category", fail_category)
+    stale = await component_trends.component_trends_payload()
+    assert stale["as_of"] == previous["as_of"]
+    assert stale["stale"] is True
+    assert stale["categories"][0]["charts"] == previous["categories"][0]["charts"]
+    assert stale["categories"][0]["stale"] is True
+    assert "stale" not in previous["categories"][0]

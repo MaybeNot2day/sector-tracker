@@ -10,286 +10,38 @@ from pathlib import Path
 from threading import Lock
 from typing import SupportsFloat, SupportsIndex, cast
 
+from app.db_schema import initialize_schema
 from app.models import AssetType, Bar, ProviderName, Quote, is_valid_bar
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS latest_quotes (
-    symbol TEXT PRIMARY KEY,
-    asset_type TEXT NOT NULL,
-    provider TEXT NOT NULL,
-    last REAL NOT NULL,
-    previous_close REAL,
-    change_abs REAL,
-    change_pct REAL,
-    timestamp TEXT NOT NULL,
-    is_stale INTEGER NOT NULL DEFAULT 0,
-    error TEXT,
-    currency TEXT,
-    display_last REAL,
-    display_previous_close REAL,
-    display_change_abs REAL,
-    display_change_pct REAL,
-    display_currency TEXT,
-    volume REAL,
-    funding_rate REAL,
-    open_interest_usd REAL
-);
-
-CREATE TABLE IF NOT EXISTS bars (
-    symbol TEXT NOT NULL,
-    provider TEXT NOT NULL,
-    interval TEXT NOT NULL,
-    timestamp TEXT NOT NULL,
-    open REAL NOT NULL,
-    high REAL NOT NULL,
-    low REAL NOT NULL,
-    close REAL NOT NULL,
-    volume REAL,
-    PRIMARY KEY (symbol, provider, interval, timestamp)
-);
-
-CREATE TABLE IF NOT EXISTS invalid_bars (
-    symbol TEXT NOT NULL,
-    provider TEXT NOT NULL,
-    interval TEXT NOT NULL,
-    timestamp TEXT NOT NULL,
-    open REAL NOT NULL,
-    high REAL NOT NULL,
-    low REAL NOT NULL,
-    close REAL NOT NULL,
-    volume REAL,
-    quarantined_at TEXT NOT NULL,
-    reason TEXT NOT NULL,
-    PRIMARY KEY (symbol, provider, interval, timestamp)
-);
-
-CREATE INDEX IF NOT EXISTS idx_bars_interval_symbol_provider_timestamp
-ON bars (interval, symbol, provider, timestamp DESC);
-
-CREATE TABLE IF NOT EXISTS board_snapshots (
-    snapshot_date TEXT PRIMARY KEY,
-    created_at TEXT NOT NULL,
-    payload TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS reports (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    slug TEXT NOT NULL,
-    report_date TEXT NOT NULL,
-    title TEXT NOT NULL,
-    body TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE (slug, report_date)
-);
-
-CREATE TABLE IF NOT EXISTS key_dates (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_date TEXT NOT NULL,
-    event_time TEXT,
-    title TEXT NOT NULL,
-    category TEXT NOT NULL,
-    source_slug TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    UNIQUE (event_date, title)
-);
-
-CREATE INDEX IF NOT EXISTS idx_key_dates_slug ON key_dates (source_slug);
-
-CREATE TABLE IF NOT EXISTS key_date_sources (
-    source_slug TEXT NOT NULL,
-    event_date TEXT NOT NULL,
-    event_time TEXT,
-    title TEXT NOT NULL,
-    category TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    PRIMARY KEY (source_slug, event_date, title)
-);
-
-CREATE INDEX IF NOT EXISTS idx_key_date_sources_event
-ON key_date_sources (event_date, title, created_at DESC);
-
-CREATE TABLE IF NOT EXISTS fringe_ideas (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ticker TEXT NOT NULL,
-    direction TEXT NOT NULL,
-    thesis TEXT NOT NULL,
-    horizon TEXT,
-    target TEXT,
-    confidence REAL,
-    stop TEXT,
-    size_notional REAL,
-    status TEXT NOT NULL DEFAULT 'open',
-    opened_date TEXT NOT NULL,
-    closed_date TEXT,
-    close_reason TEXT,
-    entry_price REAL,
-    exit_price REAL,
-    last_mentioned TEXT NOT NULL,
-    source_slug TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_fringe_ideas_status ON fringe_ideas (status, ticker, direction);
-
-CREATE TABLE IF NOT EXISTS fringe_equity_history (
-    date TEXT PRIMARY KEY,
-    equity REAL NOT NULL,
-    realized_usd REAL NOT NULL,
-    unrealized_usd REAL NOT NULL,
-    invested_notional REAL NOT NULL,
-    open_count INTEGER NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS etf_flow_history (
-    asset TEXT NOT NULL,
-    flow_date TEXT NOT NULL,
-    flow REAL NOT NULL,
-    PRIMARY KEY (asset, flow_date)
-);
-
-CREATE TABLE IF NOT EXISTS ai_model_snapshots (
-    snapshot_date TEXT NOT NULL,
-    model_id TEXT NOT NULL,
-    provider TEXT NOT NULL,
-    name TEXT NOT NULL,
-    input_price_per_million REAL NOT NULL,
-    output_price_per_million REAL NOT NULL,
-    cache_read_price_per_million REAL,
-    blended_price_per_million REAL NOT NULL,
-    context_length INTEGER,
-    is_open_weight INTEGER NOT NULL,
-    fetched_at TEXT NOT NULL,
-    PRIMARY KEY (snapshot_date, model_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_ai_model_snapshots_model_date
-ON ai_model_snapshots (model_id, snapshot_date DESC);
-
-CREATE TABLE IF NOT EXISTS ai_token_index (
-    index_date TEXT PRIMARY KEY,
-    index_price REAL NOT NULL,
-    open_price REAL,
-    proprietary_price REAL,
-    frontier_price REAL,
-    china_price REAL,
-    total_tokens INTEGER NOT NULL,
-    priced_tokens INTEGER NOT NULL,
-    coverage_pct REAL NOT NULL,
-    open_share_pct REAL NOT NULL,
-    model_count INTEGER NOT NULL,
-    fetched_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS ai_capex_history (
-    symbol TEXT NOT NULL,
-    period_end TEXT NOT NULL,
-    capex REAL NOT NULL,
-    revenue REAL,
-    fetched_at TEXT NOT NULL,
-    PRIMARY KEY (symbol, period_end)
-);
-
-CREATE INDEX IF NOT EXISTS idx_ai_capex_history_symbol_date
-ON ai_capex_history (symbol, period_end DESC);
-
-CREATE TABLE IF NOT EXISTS ai_gpu_compute_snapshots (
-    snapshot_date TEXT PRIMARY KEY,
-    fetched_at TEXT NOT NULL,
-    payload TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS hyperliquid_listings (
-    market_kind TEXT NOT NULL CHECK (market_kind IN ('crypto', 'xyz')),
-    symbol TEXT NOT NULL,
-    coin TEXT NOT NULL,
-    first_seen_at TEXT NOT NULL,
-    last_seen_at TEXT NOT NULL,
-    is_active INTEGER NOT NULL DEFAULT 1,
-    auto_added INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (market_kind, symbol)
-);
-
-CREATE INDEX IF NOT EXISTS idx_hyperliquid_listings_active_seen
-ON hyperliquid_listings (market_kind, auto_added, is_active, first_seen_at DESC);
-
-CREATE TABLE IF NOT EXISTS sofr_history (
-    effective_date TEXT PRIMARY KEY,
-    rate REAL NOT NULL,
-    percentile_1 REAL,
-    percentile_25 REAL,
-    percentile_75 REAL,
-    percentile_99 REAL,
-    volume_billions REAL,
-    revision_indicator TEXT NOT NULL DEFAULT '',
-    fetched_at TEXT NOT NULL
-);
-"""
-_initialized_paths: set[Path] = set()
+_initialized_paths: dict[Path, tuple[int, int]] = {}
 _init_lock = Lock()
-
-_VALID_BAR_SQL = """
-    open > 0 AND high > 0 AND low > 0 AND close > 0
-    AND open < 1.0e100 AND high < 1.0e100 AND low < 1.0e100 AND close < 1.0e100
-    AND high >= open AND high >= close
-    AND low <= open AND low <= close
-    AND low <= high
-"""
 
 
 def init_db(path: Path) -> None:
     resolved = path.expanduser().resolve()
-    if resolved in _initialized_paths and resolved.exists():
+    identity: tuple[int, int] | None
+    try:
+        stat = resolved.stat()
+        identity = (stat.st_dev, stat.st_ino)
+    except FileNotFoundError:
+        identity = None
+    if identity is not None and _initialized_paths.get(resolved) == identity:
         return
 
     with _init_lock:
-        if resolved in _initialized_paths and resolved.exists():
+        try:
+            stat = resolved.stat()
+            identity = (stat.st_dev, stat.st_ino)
+        except FileNotFoundError:
+            identity = None
+        if identity is not None and _initialized_paths.get(resolved) == identity:
             return
-        _initialized_paths.discard(resolved)
+        _initialized_paths.pop(resolved, None)
         resolved.parent.mkdir(parents=True, exist_ok=True)
         with _connect(resolved) as conn:
-            conn.executescript(SCHEMA)
-            _ensure_column(conn, "latest_quotes", "currency", "TEXT")
-            _ensure_column(conn, "latest_quotes", "display_last", "REAL")
-            _ensure_column(conn, "latest_quotes", "display_previous_close", "REAL")
-            _ensure_column(conn, "latest_quotes", "display_change_abs", "REAL")
-            _ensure_column(conn, "latest_quotes", "display_change_pct", "REAL")
-            _ensure_column(conn, "latest_quotes", "display_currency", "TEXT")
-            _ensure_column(conn, "latest_quotes", "volume", "REAL")
-            _ensure_column(conn, "latest_quotes", "funding_rate", "REAL")
-            _ensure_column(conn, "latest_quotes", "open_interest_usd", "REAL")
-            _ensure_column(conn, "reports", "updated_at", "TEXT")
-            conn.execute("UPDATE reports SET updated_at = created_at WHERE updated_at IS NULL")
-            _ensure_column(conn, "fringe_ideas", "target", "TEXT")
-            _ensure_column(conn, "fringe_ideas", "confidence", "REAL")
-            _ensure_column(conn, "fringe_ideas", "stop", "TEXT")
-            _ensure_column(conn, "fringe_ideas", "mae_pct", "REAL")
-            _ensure_column(conn, "fringe_ideas", "mfe_pct", "REAL")
-            sized_added = _ensure_column(conn, "fringe_ideas", "size_notional", "REAL")
-            if sized_added:
-                # Pre-capital open ideas are grandfathered at a flat $1,000
-                # of the $10k paper book.
-                conn.execute(
-                    "UPDATE fringe_ideas SET size_notional = 1000.0"
-                    " WHERE status = 'open' AND size_notional IS NULL"
-                )
-            # Pre-capital CLOSES get the same flat $1,000 so their realized
-            # dollars enter the bankroll. Safe to replay forever: under the
-            # sizing regime a position is sized in the same pass that stamps
-            # its entry, so "closed + priced + unsized" can only describe
-            # rows that predate the capital era.
-            conn.execute(
-                "UPDATE fringe_ideas SET size_notional = 1000.0"
-                " WHERE status = 'closed' AND size_notional IS NULL"
-                " AND entry_price IS NOT NULL AND exit_price IS NOT NULL"
-            )
-            _seed_key_date_sources(conn)
-            _quarantine_invalid_bars(conn)
-            _ensure_column(conn, "ai_token_index", "frontier_price", "REAL")
-            _ensure_column(conn, "ai_token_index", "china_price", "REAL")
-        _initialized_paths.add(resolved)
+            initialize_schema(conn)
+        stat = resolved.stat()
+        _initialized_paths[resolved] = (stat.st_dev, stat.st_ino)
 
 
 def sync_hyperliquid_listings(
@@ -471,38 +223,6 @@ def load_sofr_history(path: Path, *, limit: int = 90) -> list[dict[str, object]]
     ]
 
 
-def _seed_key_date_sources(conn: sqlite3.Connection) -> None:
-    """Preserve pre-migration calendar ownership as the first attribution."""
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO key_date_sources (
-            source_slug, event_date, event_time, title, category, created_at
-        )
-        SELECT source_slug, event_date, event_time, title, category, created_at
-        FROM key_dates
-        """
-    )
-
-
-def _quarantine_invalid_bars(conn: sqlite3.Connection) -> None:
-    """Move corrupt provider candles out of every downstream calculation."""
-    quarantined_at = datetime.now(UTC).isoformat()
-    conn.execute(
-        f"""
-        INSERT OR REPLACE INTO invalid_bars (
-            symbol, provider, interval, timestamp, open, high, low, close, volume,
-            quarantined_at, reason
-        )
-        SELECT symbol, provider, interval, timestamp, open, high, low, close, volume,
-               ?, 'invalid_ohlc'
-        FROM bars
-        WHERE NOT ({_VALID_BAR_SQL})
-        """,
-        (quarantined_at,),
-    )
-    conn.execute(f"DELETE FROM bars WHERE NOT ({_VALID_BAR_SQL})")
-
-
 def save_quotes(path: Path, quotes: Sequence[Quote]) -> None:
     if not quotes:
         return
@@ -612,9 +332,11 @@ def load_latest_quotes(path: Path, symbols: Sequence[str]) -> dict[str, Quote]:
     return quotes
 
 
-def save_bars(path: Path, bars: Sequence[Bar]) -> None:
+def save_bars(
+    path: Path, bars: Sequence[Bar], *, fetched_at: datetime | None = None
+) -> int | None:
     if not bars:
-        return
+        return None
     valid_bars = [bar for bar in bars if is_valid_bar(bar)]
     invalid_bars = [bar for bar in bars if not is_valid_bar(bar)]
     init_db(path)
@@ -692,6 +414,47 @@ def save_bars(path: Path, bars: Sequence[Bar]) -> None:
                     for bar in valid_bars
                 ],
             )
+            if fetched_at is not None:
+                newest: dict[tuple[str, ProviderName, str], datetime] = {}
+                for bar in valid_bars:
+                    key = (bar.symbol, bar.provider, bar.interval)
+                    stamp = _from_iso(_to_iso(bar.timestamp))
+                    newest[key] = max(newest.get(key, stamp), stamp)
+                conn.executemany(
+                    """
+                    INSERT INTO bar_refreshes (
+                        symbol, provider, interval, fetched_at, newest_timestamp
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(symbol, provider, interval) DO UPDATE SET
+                        fetched_at = excluded.fetched_at,
+                        newest_timestamp = excluded.newest_timestamp
+                    """,
+                    [
+                        (*key, _to_iso(fetched_at), _to_iso(stamp))
+                        for key, stamp in newest.items()
+                    ],
+                )
+        return int(conn.execute("SELECT revision FROM bars_state WHERE id = 1").fetchone()[0])
+
+
+def load_bar_refreshes(
+    path: Path, interval: str
+) -> dict[tuple[str, ProviderName], tuple[datetime, datetime]]:
+    """Successful fetch time and newest fetched candle start, separately."""
+    init_db(path)
+    with _connect(path) as conn:
+        rows = conn.execute(
+            "SELECT symbol, provider, fetched_at, newest_timestamp"
+            " FROM bar_refreshes WHERE interval = ?",
+            (interval,),
+        ).fetchall()
+    return {
+        (str(row["symbol"]), cast(ProviderName, row["provider"])): (
+            _from_iso(str(row["fetched_at"])),
+            _from_iso(str(row["newest_timestamp"])),
+        )
+        for row in rows
+    }
 
 
 def load_bars(
@@ -731,7 +494,7 @@ def load_bars_by_symbol(
     path: Path,
     interval: str,
     *,
-    limit_per_series: int = 260,
+    limit_per_series: int = 400,
 ) -> dict[tuple[str, ProviderName], list[Bar]]:
     """Load the newest bars per symbol/provider, with each series ascending."""
     if limit_per_series <= 0:
@@ -766,16 +529,10 @@ def load_bars_by_symbol(
 
 
 def bars_revision(path: Path) -> int:
-    """Cheap change marker for the bars table (one B-tree probe).
-
-    MAX(rowid) bumps on every INSERT and INSERT OR REPLACE (replace assigns a
-    fresh rowid), so callers can cache derived bar state and invalidate on any
-    write. Deletes only happen in the startup quarantine sweep, before any
-    cache exists.
-    """
+    """Read the transactional marker advanced by every bar insert/update/delete."""
     init_db(path)
     with _connect(path) as conn:
-        row = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM bars").fetchone()
+        row = conn.execute("SELECT revision FROM bars_state WHERE id = 1").fetchone()
         return int(row[0])
 
 
@@ -1919,20 +1676,6 @@ def _connect(path: Path) -> Iterator[sqlite3.Connection]:
             yield conn
     finally:
         conn.close()
-
-
-def _ensure_column(
-    conn: sqlite3.Connection,
-    table: str,
-    column: str,
-    definition: str,
-) -> bool:
-    """Add a missing column; True when this call performed the migration."""
-    columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
-    if column in columns:
-        return False
-    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-    return True
 
 
 def _to_iso(value: datetime) -> str:

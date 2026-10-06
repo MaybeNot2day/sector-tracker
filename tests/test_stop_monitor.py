@@ -306,3 +306,18 @@ def test_trail_entries_pruned_when_positions_leave_the_book(wired: dict[str, Any
     wired["book"]["open"] = [_idea(id=9, entry_price=500.0, stop_price=450.0, last=600.0)]
     assert monitor.run() == 0
     assert json.loads(wired["state"].read_text())["trail"] == {"AMD:long:9": 550.0}
+
+
+def test_book_fetch_uses_machine_read_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+
+    monkeypatch.setattr(monitor, "load_config", lambda: {"EDIT_TOKEN": "machine-secret"})
+
+    def urlopen(request: Any, **kwargs: Any) -> Any:
+        assert request.get_header("X-edit-token") == "machine-secret"
+        return io.BytesIO(b'{"open": []}')
+
+    monkeypatch.setattr(monitor.urllib.request, "urlopen", urlopen)
+    assert monitor.fetch_book("https://board.test") == {"open": []}
+    with pytest.raises(ValueError, match="must use HTTPS"):
+        monitor.fetch_book("http://board.test")

@@ -818,3 +818,80 @@ def test_notify_new_reports_survives_gateway_failure(
     ]
     message = commands[0][5]
     assert message == "New brief on the dashboard: Macro Tape Brief \u2192 https://board.test"
+
+
+@pytest.mark.parametrize("bullet", ["-", "*", "+", "1.", "999."])
+@pytest.mark.parametrize("separator", ["—", "–", ":", " -- "])
+@pytest.mark.parametrize("heading", ["## Fringe Corner", "# FRINGE ideas ###", "   ### fringe"])
+def test_every_consumer_open_grammar_requires_diligence(
+    bullet: str, separator: str, heading: str
+) -> None:
+    from app.services.fringe import parse_fringe_actions
+
+    action = f"   {bullet} open short MU{separator} HBM repricing\n"
+    body = f"{heading}\n#### nested\n{action}"
+    accepted = parse_fringe_actions(body)
+    assert accepted is not None and accepted[0].ticker == "MU"
+    assert uploader.validate_report_body("Custom brief", "2026-07-31", body) == (
+        "OPEN ideas require a '## Due Diligence' section"
+    )
+    assert uploader.validate_report_body(
+        "Custom brief", "2026-07-31", body + "\n## Rationale\n" + _MU_CONFIRMED
+    ) is None
+
+
+@pytest.mark.parametrize("bullet", ["-", "*", "+", "1.", "999."])
+@pytest.mark.parametrize("heading", ["## Fringe Corner", "# FRINGE ideas ###", "   ### fringe"])
+def test_consumer_open_without_thesis_requires_diligence(bullet: str, heading: str) -> None:
+    from app.services.fringe import parse_fringe_actions
+
+    body = f"{heading}\n#### nested\n   {bullet} open short MU\n"
+    accepted = parse_fringe_actions(body)
+    assert accepted is not None and accepted[0].ticker == "MU"
+    assert uploader.validate_report_body("Custom brief", "2026-07-31", body) == (
+        "OPEN ideas require a '## Due Diligence' section"
+    )
+    assert uploader.validate_report_body(
+        "Custom brief", "2026-07-31", body + "\n## Rationale\n" + _MU_CONFIRMED
+    ) is None
+
+
+@pytest.mark.parametrize("verdict", ["NOT CONFIRMED", "UNCONFIRMED", "REJECTED CONFIRMED"])
+def test_diligence_cannot_pass_with_a_negated_or_ambiguous_verdict(verdict: str) -> None:
+    body = _fringe_body(
+        "+ OPEN LONG MU – idea\n",
+        f"## Due Diligence\n### MU — {verdict}\n- https://source.test/evidence\n",
+    )
+    assert uploader.validate_report_body("Fringe Corner", "2026-07-31", body) == (
+        "OPEN MU due-diligence verdict is not CONFIRMED"
+    )
+
+
+def test_diligence_http_word_is_not_a_source_link() -> None:
+    body = _fringe_body(
+        "1. OPEN LONG MU\n", "## Due Diligence\n### MU — CONFIRMED\n- http protocol discussed\n"
+    )
+    assert uploader.validate_report_body("Fringe Corner", "2026-07-31", body) == (
+        "due-diligence for OPEN MU cites no source link"
+    )
+
+
+def test_standalone_uploader_imports_installed_shared_grammar(tmp_path: Path) -> None:
+    import shutil
+    import subprocess
+    import sys
+
+    installed = tmp_path / "bin"
+    installed.mkdir()
+    shutil.copyfile(_SCRIPT, installed / _SCRIPT.name)
+    shutil.copyfile(
+        _SCRIPT.parent.parent / "app/fringe_grammar.py", installed / "fringe_grammar.py"
+    )
+    result = subprocess.run(
+        [sys.executable, str(installed / _SCRIPT.name), "--dry-run"],
+        cwd=tmp_path,
+        env={**os.environ, "HOME": str(tmp_path), "PYTHONPATH": ""},
+        capture_output=True, text=True, check=False, timeout=10,
+    )
+    assert result.returncode == 2
+    assert "missing BOARD_URL/EDIT_TOKEN" in result.stderr

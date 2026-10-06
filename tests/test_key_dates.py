@@ -16,7 +16,7 @@ app.state with a tmp database path and TestClient is not entered.
 """
 
 from collections.abc import Callable, Iterator
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -26,6 +26,7 @@ from starlette.testclient import TestClient
 
 from app import db
 from app.main import app
+from app.services.econ_calendar import _event_moment_utc
 from app.services.key_dates import MAX_EVENTS, KeyDate, parse_key_dates
 
 EASTERN_TODAY = datetime.now(ZoneInfo("America/New_York")).date()
@@ -120,6 +121,36 @@ def test_report_without_key_dates_section_yields_nothing() -> None:
 )
 def test_bullet_grammar(bullet: str, expected: KeyDate) -> None:
     assert parse_key_dates(f"## Key Dates\n{bullet}\n") == [expected]
+
+
+@pytest.mark.parametrize(
+    ("heading_zone", "clock", "stored_time", "utc_time"),
+    [
+        ("CEST", "14:30", "14:30 CEST", "2026-07-15T12:30:00+00:00"),
+        ("ET", "08:30", "08:30 ET", "2026-07-15T12:30:00+00:00"),
+        ("CEST", "08:30 ET", "08:30 ET", "2026-07-15T12:30:00+00:00"),
+        ("ET", "09:45CET", "09:45CET", "2026-07-15T07:45:00+00:00"),
+    ],
+)
+def test_iso_calendar_bullet_inherits_zone_and_resolves_utc_instant(
+    heading_zone: str, clock: str, stored_time: str, utc_time: str
+) -> None:
+    events = parse_key_dates(
+        f"## Economic Calendar ({heading_zone})\n- 2026-07-15 {clock} — CPI [MACRO]\n"
+    )
+    assert events == [KeyDate("2026-07-15", stored_time, "CPI", "MACRO")]
+    moment = _event_moment_utc(date.fromisoformat(events[0].date), events[0].time)
+    assert moment is not None
+    assert moment.isoformat() == utc_time
+
+
+@pytest.mark.parametrize("time_text", ["AMC", "BMO", "09:30 HKT", None])
+def test_iso_calendar_bullet_preserves_sessions_explicit_zones_and_date_only(
+    time_text: str | None,
+) -> None:
+    clock = f" {time_text}" if time_text else ""
+    events = parse_key_dates(f"## Key Dates (CEST)\n- 2026-07-15{clock} — Event\n")
+    assert events == [KeyDate("2026-07-15", time_text, "Event", "EVENT")]
 
 
 def test_relative_calendar_bullets_anchor_to_the_report_date() -> None:

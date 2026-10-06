@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from app import db
+from app.calendar_windows import months_before
 from app.models import AssetConfig, Bar, GroupConfig, Quote
 from app.services import daily_board
 from app.services.daily_board import DailyBoardService, _sparkline_values
@@ -362,3 +363,136 @@ def _quote(symbol: str, asset_type: str, last: float, previous_close: float) -> 
         previous_close=previous_close,
         timestamp=datetime(2026, 1, 1, tzinfo=UTC),
     )
+
+
+def test_board_observes_same_timestamp_correction_and_delete(tmp_path: Path) -> None:
+    database = tmp_path / "board.sqlite3"
+    stamp = datetime.now(UTC)
+    asset = AssetConfig("SPY", "etf", "yahoo")
+    groups = [GroupConfig("TEST", [asset])]
+    db.save_bars(
+        database, [Bar("SPY", "yahoo", "1d", stamp, 100.0, 110.0, 90.0, 100.0)]
+    )
+    service = DailyBoardService(database)
+    assert service.market_summaries(groups, {})["SPY"]["range_52w"]["current"] == 100.0  # type: ignore[index]
+    db.save_bars(
+        database, [Bar("SPY", "yahoo", "1d", stamp, 100.0, 110.0, 90.0, 105.0)]
+    )
+    assert service.market_summaries(groups, {})["SPY"]["range_52w"]["current"] == 105.0  # type: ignore[index]
+    with db._connect(database) as conn:
+        conn.execute("DELETE FROM bars WHERE symbol = 'SPY'")
+    summary = service.market_summaries(groups, {})["SPY"]
+    assert summary["has_history"] is False
+    assert summary["range_52w"] is None
+
+
+@pytest.mark.parametrize(
+    ("asset_type", "provider"),
+    [("crypto_perp", "hyperliquid"), ("crypto_spot", "yahoo"), ("equity", "hyperliquid")],
+)
+def test_continuous_daily_metrics_use_calendar_windows(
+    asset_type: str, provider: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from typing import cast
+
+    from app.models import AssetType, ProviderName
+
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            return now
+
+    monkeypatch.setattr(daily_board, "datetime", Clock)
+    start = datetime(2025, 7, 1, tzinfo=UTC)
+    references = {
+        "2025-07-31": 60.0,  # true one-calendar-year anchor
+        "2026-07-24": 100.0,
+        "2026-06-30": 80.0,  # month-end clamp, not 22 sessions / 31 days
+        "2026-04-30": 75.0,
+    }
+    bars = []
+    for day in range((now.date() - start.date()).days + 1):
+        stamp = start + timedelta(days=day)
+        close = references.get(stamp.date().isoformat(), 110.0)
+        high, low = close + 1, close - 1
+        if stamp.date().isoformat() == "2025-07-30":
+            high, low = 200.0, 20.0  # outside the rolling 52-week range
+        if stamp.date().isoformat() == "2025-09-01":
+            high, low = 180.0, 40.0  # inside 52 weeks, outside 252 crypto bars
+        bars.append(
+            Bar("BTC", cast(ProviderName, provider), "1d", stamp, close, high, low, close)
+        )
+    asset = AssetConfig("BTC", cast(AssetType, asset_type), cast(ProviderName, provider))
+    quote = Quote.from_last_and_prev_close(
+        symbol="BTC", asset_type=asset.type, provider=asset.source,
+        last=120.0, previous_close=110.0, timestamp=now,
+    )
+    summary = daily_board._market_summary(asset, quote, bars)
+    performance = summary["performance"]
+    assert performance["1W"] == 20.0  # type: ignore[index]
+    assert performance["1M"] == 50.0  # type: ignore[index]
+    assert performance["3M"] == 60.0  # type: ignore[index]
+    assert performance["1Y"] == 100.0  # type: ignore[index]
+    assert summary["range_52w"]["high"] == 180.0  # type: ignore[index]
+    assert summary["range_52w"]["low"] == 40.0  # type: ignore[index]
+    assert daily_board._market_summary(asset, quote, bars[-300:])["performance"]["1Y"] is None  # type: ignore[index]
+    high_quote = Quote.from_last_and_prev_close(
+        symbol="BTC", asset_type=asset.type, provider=asset.source,
+        last=150.0, previous_close=110.0, timestamp=now,
+    )
+    assert daily_board._asset_metrics(asset, high_quote, bars)["high_52w"] is False
+    low_quote = Quote.from_last_and_prev_close(
+        symbol="BTC", asset_type=asset.type, provider=asset.source,
+        last=50.0, previous_close=110.0, timestamp=now,
+    )
+    assert daily_board._asset_metrics(asset, low_quote, bars)["low_52w"] is False
+
+
+def test_board_load_keeps_a_true_year_of_continuous_daily_history(tmp_path: Path) -> None:
+    database = tmp_path / "board.sqlite3"
+    today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    anchor = months_before(today, 12)
+    start = anchor - timedelta(days=7)
+    bars = [
+        Bar(
+            "BTC", "hyperliquid", "1d", start + timedelta(days=day),
+            100.0, 121.0, 99.0, 100.0,
+        )
+        for day in range((today - start).days + 1)
+    ]
+    db.save_bars(database, bars)
+    asset = AssetConfig("BTC", "crypto_perp", "hyperliquid")
+    quote = Quote.from_last_and_prev_close(
+        symbol="BTC", asset_type=asset.type, provider=asset.source,
+        last=120.0, previous_close=100.0, timestamp=datetime.now(UTC),
+    )
+    summary = DailyBoardService(database).market_summaries(
+        [GroupConfig("CRYPTO", [asset])], {"CRYPTO": [quote]}
+    )["BTC"]
+    assert summary["performance"]["1Y"] == 20.0  # type: ignore[index]
+
+
+def test_official_equity_history_retains_session_windows_with_hyperliquid_quote() -> None:
+    asset = AssetConfig("SPY", "etf", "yahoo")
+    now = datetime.now(UTC)
+    bars = []
+    stamp = now - timedelta(days=500)
+    while len(bars) < 260:
+        if stamp.weekday() < 5:
+            close = 100.0
+            bars.append(Bar("SPY", "yahoo", "1d", stamp, close, 150.0, 50.0, close))
+        stamp += timedelta(days=1)
+    for offset, close in ((6, 100.0), (22, 80.0), (64, 75.0), (252, 60.0)):
+        bar = bars[-offset]
+        bars[-offset] = Bar("SPY", "yahoo", "1d", bar.timestamp, close, 150.0, 50.0, close)
+    quote = Quote.from_last_and_prev_close(
+        symbol="SPY", asset_type="etf", provider="hyperliquid",
+        last=120.0, previous_close=100.0, timestamp=now,
+    )
+    summary = daily_board._market_summary(asset, quote, bars)
+    assert summary["performance"]["1W"] == 20.0  # type: ignore[index]
+    assert summary["performance"]["1M"] == 50.0  # type: ignore[index]
+    assert summary["performance"]["3M"] == 60.0  # type: ignore[index]
+    assert summary["performance"]["1Y"] == 100.0  # type: ignore[index]

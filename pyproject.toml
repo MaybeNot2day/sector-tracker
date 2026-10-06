@@ -1,7 +1,7 @@
 [project]
 name = "cross-asset-board"
 version = "0.1.0"
-description = "Private cross-asset market dashboard"
+description = "Cross-asset market dashboard with optional private read access"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.111.0",

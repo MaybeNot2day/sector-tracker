@@ -197,6 +197,12 @@ def _parse_bullet(text: str, current: date | None, zone: str | None) -> KeyDate 
     if not title:
         return None
     time_text = match.group("time")
+    if time_text:
+        time_text = " ".join(time_text.split())
+        # Only a bare clock inherits the heading. Explicit zones (including
+        # ones outside our known-zone set) and AMC/BMO remain as written.
+        if zone and re.fullmatch(r"\d{1,2}:\d{2}", time_text):
+            time_text = f"{time_text} {zone}"
     category = match.group("category")
     normalized_category = (
         " ".join(category.upper().split())[:_MAX_CATEGORY]
@@ -205,7 +211,7 @@ def _parse_bullet(text: str, current: date | None, zone: str | None) -> KeyDate 
     )
     return KeyDate(
         date=date_text,
-        time=" ".join(time_text.split())[:_MAX_TIME] if time_text else None,
+        time=time_text[:_MAX_TIME] if time_text else None,
         title=title,
         category=normalized_category,
     )

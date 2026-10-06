@@ -55,7 +55,7 @@ def parse_closed_day(item: dict[str, Any]) -> date | None:
 
 def week_trades(closed: list[dict[str, Any]], today: date) -> list[dict[str, Any]]:
     """Trades closed inside the trailing 7-day window ending today."""
-    start = today - timedelta(days=7)
+    start = today - timedelta(days=6)
     return [
         item
         for item in closed
@@ -106,7 +106,7 @@ def review_bullets(payload: dict[str, Any], today: date) -> list[str]:
 
 
 def compose_review(payload: dict[str, Any], today: date) -> tuple[str, str]:
-    """(frontmatter + body) for the vault, body alone for the board."""
+    """Return vault markdown and its plain report text."""
     stamp = today.isoformat()
     frontmatter = (
         "---\n"
@@ -154,7 +154,7 @@ def run(argv: list[str] | None = None) -> int:
         log(f"book unavailable: {exc}")
         return 1
     today = datetime.now(UTC).date()
-    markdown, body = compose_review(book, today)
+    markdown, _ = compose_review(book, today)
     if args.dry_run:
         print(markdown, end="")
         return 0
@@ -166,9 +166,9 @@ def run(argv: list[str] | None = None) -> int:
         log(f"wrote {path}")
     except OSError as exc:
         log(f"vault write failed: {exc}")
-        failed = True
+        return 1
     try:
-        status = post_report(base_url, token, today.isoformat(), body)
+        status = post_report(base_url, token, today.isoformat(), markdown)
         log(f"board response: HTTP {status}")
     except (OSError, ValueError, urllib.error.URLError, http.client.HTTPException) as exc:
         log(f"board post failed: {exc}")

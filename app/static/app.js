@@ -1,3 +1,11 @@
+import {
+  formatPrice, formatBoardPrice, formatCurrencyPrice, formatSigned,
+  formatBoardSignedChange, formatSignedPct, formatPlainPct, formatSignedNumber,
+  formatCompactPrice, currencyPrefix, formatUsdFlow, escapeHtml,
+} from "./formatting.js?v=016e638c1af8";
+import { flashCell } from "./animations.js?v=7cf11f1f25c1";
+import { quoteFreshness } from "./quote-freshness.js?v=3abd8feafb2a";
+
 const board = document.querySelector("#board");
 const dailyBoard = document.querySelector("#daily-board");
 const boardMeta = document.querySelector("#board-meta");
@@ -285,7 +293,7 @@ try {
 const BOARD_CACHE_MAX_AGE_MS = 24 * 3600 * 1000;
 let dataIsCached = false;
 // Monotonic guard: a slower /api/quotes response must never overwrite a
-// fresher one (or a WS frame). Declared here because init() runs above.
+// fresher one (or a WS frame).
 let quotesFetchSeq = 0;
 let quotesFetchApplied = 0;
 // Same monotonic guard, per fetch family (interval + visibility refetches
@@ -500,7 +508,6 @@ function setTheme(theme, persist = false) {
   }
 }
 
-init();
 
 // --- URL state ------------------------------------------------------------
 // View and filter changes replace in place; opening a report pushes one
@@ -754,9 +761,6 @@ function init() {
   });
   newsClusterClose.addEventListener("click", () => selectNewsCluster(null));
   newsMapClose.addEventListener("click", () => selectNewsView("list"));
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && newsView === "map") selectNewsView("list");
-  });
   newsResizeHandle.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
     event.preventDefault();
@@ -1032,6 +1036,7 @@ function init() {
         if (top === modal) closeModal();
         else if (top === editorModal) closeEditor();
         else if (top === reportsModal) closeReports();
+        else if (top === newsMapModal) selectNewsView("list");
         else if (top === boardDialog) settleBoardDialog(false);
         else closeDialog(top);
         return;
@@ -1274,7 +1279,8 @@ function selectTrendsRange(days) {
 // The source publishes daily-regenerated PNG charts (no data API); the
 // backend scrapes each category gallery and proxies its CDN images.
 async function loadComponentTrends(force = false) {
-  if (!force && latestComponents && Date.now() - componentsFetchedAt < COMPONENTS_TTL_MS) return;
+  const ttl = latestComponents?.stale ? 300000 : COMPONENTS_TTL_MS;
+  if (!force && latestComponents && Date.now() - componentsFetchedAt < ttl) return;
   if (componentsLoading) return;
   componentsLoading = true;
   if (!latestComponents) {
@@ -1325,7 +1331,14 @@ function renderComponentsSection() {
         "</a>",
       ]
     : ['<div class="component-card">', "</div>"];
-  componentsGrid.innerHTML = charts
+  const stale = Boolean(active?.stale || latestComponents?.stale);
+  const stamp = active?.as_of || latestComponents?.as_of;
+  const updated = stamp && Number.isFinite(Date.parse(stamp)) ? formatClock(new Date(stamp)) : "--";
+  const notice = stale
+    ? `<div class="empty-state" role="status">Cached component prices · Updated ${escapeHtml(updated)}</div>`
+    : "";
+  componentsGrid.dataset.freshness = stale ? "stale" : "fresh";
+  componentsGrid.innerHTML = notice + charts
     .map(
       (chart) =>
         `${cardOpen}
@@ -1343,9 +1356,8 @@ function selectComponentsCategory(slug) {
 }
 
 // --- Watch view --------------------------------------------------------------
-// DexScreener-style grid: up to six symbols, each on its own interactive
-// lightweight-charts candlestick tile, persisted per browser. Charts share
-// one timeframe; data refreshes in place every minute while the tab is open.
+// Interactive chart wall: each symbol has its own persisted candlestick tile.
+// Charts share one timeframe; data refreshes in place every minute.
 function loadWatchState() {
   try {
     const raw = JSON.parse(localStorage.getItem(WATCH_STORAGE_KEY) || "[]");
@@ -1599,13 +1611,14 @@ function setWatchMode(mode, { render = true } = {}) {
   watchListControls.hidden = !lists;
   watchAddInput.placeholder = lists
     ? "Add symbol to list (Enter)"
-    : "Add symbol (Enter) — max 9";
+    : `Add symbol (Enter) — max ${WATCH_MAX}`;
   const label = lists ? "Add a symbol to the open list" : "Add a symbol to the watch grid";
   watchAddInput.setAttribute("aria-label", label);
   watchAddInput.closest(".watch-add-label")?.setAttribute("title", label);
   persistWatchState();
   setWatchStatus("");
   if (!watchPicker.hidden) renderWatchPicker();
+  updateChartWatchToggle();
   if (render) renderWatchView();
 }
 
@@ -1668,6 +1681,7 @@ function selectWatchList(id) {
   activeWatchListId = id;
   persistWatchState();
   setWatchStatus("");
+  updateChartWatchToggle();
   renderWatchLists();
 }
 
@@ -1882,38 +1896,46 @@ async function refreshWatchListQuotes(force = false) {
 // so this is the "add from Markets" path without nesting buttons in rows.
 function updateChartWatchToggle() {
   const symbol = activeSymbol || "";
-  const active = Boolean(symbol) && watchSymbols.includes(symbol);
+  const active = Boolean(symbol) && watchPickerSymbols().includes(symbol);
   chartWatchToggle.classList.toggle("watch-starred", active);
   chartWatchToggle.setAttribute("aria-pressed", String(active));
-  const label = active ? `Remove ${symbol} from watch grid` : `Add ${symbol} to watch grid`;
+  const list = activeWatchList();
+  const hasTarget = watchMode !== "lists" || Boolean(list);
+  chartWatchToggle.disabled = !symbol || !hasTarget;
+  const target = watchMode === "lists" ? `list "${list?.name || ""}"` : "watch grid";
+  const label = !hasTarget ? "Create a watch list before adding this symbol" :
+    active ? `Remove ${symbol} from ${target}` : `Add ${symbol} to ${target}`;
   chartWatchToggle.setAttribute("aria-label", label);
   chartWatchToggle.title = label;
 }
 
 function destroyWatchCharts() {
+  watchRenderToken += 1;
   watchCharts.forEach((entry) => entry.instance.remove());
   watchCharts.clear();
 }
 
 function watchQuoteLine(symbol) {
-  const asset = findAssetConfig(symbol);
-  const quote = asset?.quote;
+  const quote = findAssetConfig(symbol)?.quote ||
+    (latestData?.crypto_tape || []).find((row) => row.symbol === symbol) ||
+    watchListQuotes.get(symbol);
   if (!quote) return "";
   const last = numericOrNull(displayQuoteValue(quote, "last"));
   const pct = numericOrNull(displayQuoteValue(quote, "change_pct"));
   const tone = pct === null ? "" : pct > 0 ? "positive" : pct < 0 ? "negative" : "";
   const parts = [];
-  if (last !== null) parts.push(escapeHtml(formatPrice(last)));
-  if (pct !== null) parts.push(`<em class="${tone}">${escapeHtml(formatSignedPct(pct))}</em>`);
+  if (last !== null) parts.push(`<span title="Last">${escapeHtml(formatPrice(last))}</span>`);
+  if (pct !== null) parts.push(`<em class="${tone}" title="1D %">${escapeHtml(formatSignedPct(pct))}</em>`);
+  if (quote.is_stale) parts.push('<em title="Last cached quote">◌</em>');
   return parts.join(" ");
 }
 
 function renderWatchGrid() {
   // Charts measure their container: never build while the panel is hidden
   // (clientWidth 0), selectView re-enters here once the view is visible.
-  if (watchView.hidden) return;
-  const token = ++watchRenderToken;
+  if (watchView.hidden || watchMode !== "charts") return;
   destroyWatchCharts();
+  const token = watchRenderToken;
   // Dense mode: past a dozen tiles, shrink the cards so more fit per row.
   watchGrid.classList.toggle("dense", watchSymbols.length > 12);
   if (!watchSymbols.length) {
@@ -1947,7 +1969,7 @@ async function loadWatchChart(symbol, token) {
     ]);
     if (!response.ok) throw new Error("history_failed");
     const payload = await response.json();
-    if (token !== watchRenderToken) return;
+    if (!isCurrentWatchChart(container, token)) return;
     const bars = (payload.bars || [])
       .map((bar) => ({
         time: toChartTime(bar.timestamp, watchInterval),
@@ -2002,7 +2024,7 @@ async function loadWatchChart(symbol, token) {
     wireWatchSync(symbol, watchCharts.get(symbol));
     if (watchSyncX) alignWatchCharts();
   } catch (error) {
-    if (token !== watchRenderToken) return;
+    if (!isCurrentWatchChart(container, token)) return;
     // Only a genuinely empty payload means the symbol has no history;
     // network/HTTP failures are transient and retryable.
     const copy =
@@ -2011,6 +2033,24 @@ async function loadWatchChart(symbol, token) {
         : "Chart data unavailable — retry from the timeframe buttons";
     container.innerHTML = `<div class="watch-error">${copy}</div>`;
   }
+}
+
+function isCurrentWatchChart(container, token) {
+  return token === watchRenderToken && watchMode === "charts" &&
+    !watchView.hidden && container.isConnected && watchGrid.contains(container);
+}
+
+function updateWatchQuotes() {
+  if (watchView.hidden) return;
+  if (watchMode === "lists") {
+    renderWatchListBoard();
+    return;
+  }
+  watchGrid.querySelectorAll("[data-watch-symbol]").forEach((tile) => {
+    const label = tile.querySelector(".watch-quote");
+    const html = watchQuoteLine(tile.dataset.watchSymbol);
+    if (label && label.innerHTML !== html) label.innerHTML = html;
+  });
 }
 
 // In-place data refresh: zoom/scroll survive, instances are reused.
@@ -2025,7 +2065,7 @@ async function refreshWatchData() {
         );
         if (!response.ok) return;
         const payload = await response.json();
-        if (token !== watchRenderToken) return;
+        if (!isCurrentWatchChart(entry.container, token) || watchCharts.get(symbol) !== entry) return;
         const bars = (payload.bars || [])
           .map((bar) => ({
             time: toChartTime(bar.timestamp, watchInterval),
@@ -2433,7 +2473,7 @@ function recoverStaleWebSocket() {
 }
 
 function updateFeedModeLabel() {
-  feedModeLabel.textContent = feedMode === "ws" ? "WS Live" : "Poll 10s";
+  feedModeLabel.textContent = feedMode === "ws" ? "WS connected" : "Poll 10s";
   feedModeLabel.title =
     feedMode === "ws"
       ? "Streaming over WebSocket"
@@ -2486,7 +2526,8 @@ function applyQuotes(payload) {
     dailyRenderPending = false;
     renderDailyBoard(payload.overview, latestCryptoEtfFlows);
   }
-  updateHeader(payload.overview);
+  updateWatchQuotes();
+  updateQuoteFreshness();
   openPendingChartFromUrl();
 }
 
@@ -3560,7 +3601,9 @@ function syncNewsView() {
   if (mapActive) {
     document.body.classList.add("news-map-open");
     renderNewsMap();
+    if (!newsMapModal.classList.contains("open")) openDialog(newsMapModal, newsMapClose);
   } else {
+    closeDialog(newsMapModal);
     document.body.classList.remove("news-map-open");
     renderNewsClusterPanel(null);
   }
@@ -3922,18 +3965,23 @@ function updateHeader(overview) {
   const date = Number.isNaN(asOf.getTime()) ? "--" : formatLocalDate(asOf);
   const time = Number.isNaN(asOf.getTime()) ? "--" : formatClock(asOf);
   boardMeta.textContent = `${date} · ${universe.total || 0} names · universe v2`;
-  liveFreshness.textContent = time === "--" ? "Updated --" : `Updated ${time}`;
+  const freshness = quoteFreshness(latestData, dataIsCached);
+  const quoteTime = freshness.timestamp ? formatClock(new Date(freshness.timestamp)) : "--";
+  liveFreshness.textContent = `${freshness.label} · Updated ${quoteTime}`;
+  liveBadge.dataset.freshness = freshness.state;
   const usSession = sessionState("us");
   // QW5: the SYSTEM telemetry line left the permanent header. Its content
   // rides on the LIVE pill as a native title and a click popover; the strip
   // itself only surfaces while connecting or on error.
   const telemetry = [
-    ["Feed", dataIsCached ? "Cached view · refreshing" : feedMode === "ws" ? "Live quotes" : "Polled quotes"],
+    ["Quotes", freshness.label],
+    ["Transport", feedMode === "ws" ? "WebSocket connected" : "HTTP polling"],
     usSession ? ["US session", SESSION_STATE_COPY[usSession.state]] : null,
     ["Quoted", `${universe.quoted || 0}/${universe.total || 0}`],
     ["History", `${universe.history_count || 0}/${universe.total || 0}`],
     ["Flows", flowStatusLabel(latestCryptoEtfFlows).toLowerCase()],
-    ["Updated", time],
+    ["Quote updated", quoteTime],
+    ["Board computed", time],
   ].filter(Boolean);
   statusCopy.textContent = telemetry.map(([label, value]) => `${label} ${value}`).join(" · ");
   if (liveBadge) {
@@ -5942,9 +5990,7 @@ async function fetchWatchlistConfig() {
     if (!response.ok) throw new Error("groups_failed");
     watchlistConfig = await response.json();
     renderEditor();
-    // Keep the session-only warning visible on serverless deployments;
-    // clearing it here made it flash for ~100ms and vanish.
-    setEditorStatus(persistenceNotice());
+    setEditorStatus("");
   } catch (error) {
     setEditorStatus("Unable to load universe");
   }
@@ -6105,8 +6151,7 @@ async function mutateWatchlists(url, options) {
     }
     watchlistConfig = await response.json();
     renderEditor();
-    const notice = persistenceNotice();
-    setEditorStatus(notice ? `Saved (session only) — ${notice}` : "Saved");
+    setEditorStatus("Saved");
     await fetchQuotes();
     return true;
   } catch (error) {
@@ -6305,12 +6350,6 @@ function updateFundingChip(cell, quote) {
     fundingTitle(rate) + (oi ? ` · open interest $${formatCompactPrice(oi)}` : "");
 }
 
-function flashCell(cell, delta) {
-  cell.classList.remove("flash-up", "flash-down");
-  void cell.offsetWidth;
-  cell.classList.add(delta > 0 ? "flash-up" : "flash-down");
-  window.setTimeout(() => cell.classList.remove("flash-up", "flash-down"), 450);
-}
 
 function sparklineSvg(values, animate = false) {
   const points = Array.isArray(values) ? values.map(Number).filter((value) => Number.isFinite(value)) : [];
@@ -7347,6 +7386,7 @@ function openDialog(dialog, focusTarget) {
   dialog.setAttribute("aria-hidden", "false");
   document.body.classList.add("modal-open");
   window.requestAnimationFrame(() => {
+    if (topDialog() !== dialog || !dialog.classList.contains("open")) return;
     const target = focusTarget || firstFocusableElement(dialog);
     target?.focus();
   });
@@ -7359,7 +7399,7 @@ function closeDialog(dialog) {
   const index = dialogStack.findIndex((entry) => entry.dialog === dialog);
   const wasTop = index === dialogStack.length - 1;
   const entry = index !== -1 ? dialogStack.splice(index, 1)[0] : null;
-  if (!document.querySelector(".modal.open")) document.body.classList.remove("modal-open");
+  if (!dialogStack.length) document.body.classList.remove("modal-open");
   // Focus returns to the closer's trigger only when the TOP dialog closed;
   // a lower dialog leaving the stack must not steal focus from the one
   // still open above it.
@@ -7502,11 +7542,20 @@ function isTextInput(target) {
 }
 
 function setConnection(state) {
-  statusStrip.classList.toggle("live", state === "live");
-  statusStrip.classList.toggle("error", state === "error");
-  statusStrip.classList.toggle("connecting", state === "connecting");
-  connectionState.classList.toggle("live", state === "live");
-  connectionState.classList.toggle("error", state === "error");
+  connectionState.dataset.transport = state;
+  updateQuoteFreshness();
+}
+
+function updateQuoteFreshness() {
+  const freshness = quoteFreshness(latestData, dataIsCached);
+  const transport = connectionState.dataset.transport || "connecting";
+  const fresh = freshness.state === "fresh";
+  statusStrip.classList.toggle("live", fresh);
+  statusStrip.classList.toggle("error", transport === "error" || freshness.state === "stale");
+  statusStrip.classList.toggle("connecting", transport === "connecting" && !latestData);
+  connectionState.classList.toggle("live", fresh);
+  connectionState.classList.toggle("error", freshness.state === "stale" || transport === "error");
+  if (latestData) updateHeader(latestData.overview);
 }
 
 function changeClass(value) {
@@ -7522,104 +7571,6 @@ function classToken(value, fallback = "neutral") {
   return /^[a-z][a-z0-9-]*$/.test(token) ? token : fallback;
 }
 
-function formatPrice(value, error) {
-  if (error || !Number.isFinite(value)) return "--";
-  if (Math.abs(value) >= 1000) return value.toLocaleString(undefined, { maximumFractionDigits: 1 });
-  if (Math.abs(value) >= 1) return value.toFixed(2);
-  // toPrecision flips to scientific notation for micro prices ("4.200e-7");
-  // expand them to fixed decimals with 4 significant digits instead.
-  if (Math.abs(value) < 1e-4) {
-    return value.toLocaleString(undefined, { maximumSignificantDigits: 4, useGrouping: false });
-  }
-  return value.toPrecision(4);
-}
-
-
-function formatBoardPrice(value, error, currency) {
-  if (error || !Number.isFinite(value)) return "--";
-  // USX = US cents (CBOT/ICE): full precision, bare, like USD.
-  if (!currency || currency === "USD" || currency === "USX") return formatPrice(value);
-  // formatCompactPrice is abs-based, so restore the sign for negatives.
-  return `${value < 0 ? "-" : ""}${currencyPrefix(currency)}${formatCompactPrice(value)}`;
-}
-
-function formatCurrencyPrice(value, currency = "USD") {
-  if (!Number.isFinite(value)) return "--";
-  const prefix = currencyPrefix(currency);
-  // formatCompactPrice is abs-based, so restore the sign for negatives.
-  if (currency && currency !== "USD") return `${value < 0 ? "-" : ""}${prefix}${formatCompactPrice(value)}`;
-  return `${prefix}${formatPrice(value)}`;
-}
-
-function formatSigned(value) {
-  if (typeof value !== "number") return "--";
-  // Round FIRST, then take the sign from the rounded value: -0.0004 must
-  // read +0.00, not -0.00 (the +0 normalizes -0 away).
-  const digits = Math.abs(value) >= 100 ? 1 : 2;
-  const rounded = Number(value.toFixed(digits)) + 0;
-  return `${rounded >= 0 ? "+" : "-"}${Math.abs(rounded).toFixed(digits)}`;
-}
-
-function formatBoardSignedChange(value, currency) {
-  if (typeof value !== "number") return "--";
-  // Zero is flat and unsigned; keep it out of the signed non-USD path,
-  // which would otherwise render "+₩0.00".
-  if (value === 0) return "0.00";
-  if (!currency || currency === "USD" || currency === "USX") return formatSigned(value);
-  return `${value >= 0 ? "+" : "-"}${currencyPrefix(currency)}${formatCompactPrice(Math.abs(value))}`;
-}
-
-function formatSignedPct(value) {
-  if (typeof value !== "number") return "--";
-  // Round FIRST, then take the sign from the rounded value (see formatSigned).
-  const rounded = Number(value.toFixed(2)) + 0;
-  return `${rounded >= 0 ? "+" : ""}${rounded.toFixed(2)}%`;
-}
-
-function formatPlainPct(value) {
-  if (typeof value !== "number") return "--";
-  return `${value.toFixed(1)}%`;
-}
-
-function formatSignedNumber(value) {
-  if (typeof value !== "number") return "--";
-  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
-}
-
-function formatCompactPrice(value) {
-  const abs = Math.abs(value);
-  if (abs >= 1_000_000_000) return `${(abs / 1_000_000_000).toFixed(2)}B`;
-  if (abs >= 1_000_000) return `${(abs / 1_000_000).toFixed(2)}M`;
-  if (abs >= 1000) return `${(abs / 1000).toFixed(abs >= 100_000 ? 1 : 2)}K`;
-  return formatPrice(abs);
-}
-
-function currencyPrefix(currency) {
-  const code = typeof currency === "string" ? currency.trim().toUpperCase() : "";
-  const known = {
-    KRW: "₩",
-    JPY: "¥",
-    EUR: "€",
-    GBP: "£",
-    USD: "$",
-    // US-cents quotes (CBOT/ICE ags): shown bare, the futures convention.
-    USX: "",
-  };
-  if (Object.prototype.hasOwnProperty.call(known, code)) return known[code];
-  // Unknown ISO-style codes are safe text; malformed provider strings never
-  // cross into the many innerHTML-based price renderers.
-  return /^[A-Z]{3}$/.test(code) ? `${code} ` : "";
-}
-
-function formatUsdFlow(value) {
-  if (typeof value !== "number") return "--";
-  const abs = Math.abs(value);
-  const sign = value > 0 ? "+" : value < 0 ? "-" : "";
-  if (abs >= 1_000_000_000) return `${sign}$${(abs / 1_000_000_000).toFixed(2)}B`;
-  if (abs >= 1_000_000) return `${sign}$${(abs / 1_000_000).toFixed(1)}M`;
-  if (abs >= 1_000) return `${sign}$${(abs / 1_000).toFixed(1)}K`;
-  return `${sign}$${abs.toFixed(0)}`;
-}
 
 function formatFlowDate(value) {
   if (!value) return "--";
@@ -7670,14 +7621,6 @@ function displayGroupName(value) {
   return String(value || "--").replaceAll("_", " ");
 }
 
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
 
 const DATE_ONLY_INTERVALS = new Set(["1d", "1wk", "1mo"]);
 
@@ -8476,3 +8419,7 @@ function formatAiCompact(value) {
     maximumFractionDigits: 1,
   }).format(number);
 }
+
+// Startup runs only after every lexical dependency has initialized; cached
+// first paint is synchronous and exercises helpers throughout this module.
+init();

@@ -80,9 +80,10 @@ class CandleStreamService:
             if first:
                 self._coins[key] = coin
                 self._ensure_upstream()
-            ws = self._ws
-        if first and ws is not None:
-            await self._send_frame(ws, "subscribe", coin, interval)
+            if first and self._ws is not None:
+                # Control frames share the state lock: a resubscribe cannot
+                # overtake an in-flight unsubscribe for the same market.
+                await self._send_frame(self._ws, "subscribe", coin, interval)
         return queue
 
     async def unsubscribe(
@@ -100,14 +101,16 @@ class CandleStreamService:
             coin = self._coins.pop(key, None)
             ws = self._ws
             empty = not self._coins
-        if coin is not None and ws is not None:
-            await self._send_frame(ws, "unsubscribe", coin, interval)
+            if coin is not None and ws is not None:
+                await self._send_frame(ws, "unsubscribe", coin, interval)
         if empty:
             await self._stop_upstream()
 
     async def aclose(self) -> None:
         async with self._lock:
             self._closed = True
+            self._subscribers.clear()
+            self._coins.clear()
         await self._stop_upstream()
 
     # --- upstream ----------------------------------------------------------
@@ -122,24 +125,32 @@ class CandleStreamService:
         self._upstream_task.add_done_callback(self._log_upstream_exit)
 
     async def _stop_upstream(self) -> None:
-        task = self._upstream_task
-        self._upstream_task = None
+        async with self._lock:
+            # Another chart may have subscribed while unsubscribe awaited a
+            # control frame or while this coroutine waited for the lock.
+            if self._coins and not self._closed:
+                return
+            task = self._upstream_task
+            self._upstream_task = None
+            self._ws = None
+            if task is not None:
+                task.cancel()
         if task is not None:
-            task.cancel()
+            # Never await cancellation under the lock: the old loop acquires
+            # it in its finally block. A new loop may start in the meantime.
             with suppress(asyncio.CancelledError):
                 await task
-        self._ws = None
 
     async def _upstream_loop(self) -> None:
         backoff = RECONNECT_BASE_SECONDS
         while not self._closed:
+            ws: Transport | None = None
             try:
                 async with self._connector() as ws:
                     async with self._lock:
                         self._ws = ws
-                        active = list(self._coins.items())
-                    for (_symbol, interval), coin in active:
-                        await self._send_frame(ws, "subscribe", coin, interval)
+                        for (_symbol, interval), coin in self._coins.items():
+                            await self._send_frame(ws, "subscribe", coin, interval)
                     backoff = RECONNECT_BASE_SECONDS
                     async for raw in ws:
                         self._route(raw)
@@ -149,7 +160,8 @@ class CandleStreamService:
                 logger.warning("candle upstream dropped; reconnecting", exc_info=True)
             finally:
                 async with self._lock:
-                    self._ws = None
+                    if self._ws is ws:
+                        self._ws = None
             if not self._coins:
                 # Raced with the last unsubscribe: idle instead of reconnecting.
                 return

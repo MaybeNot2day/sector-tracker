@@ -344,3 +344,23 @@ def test_official_close_absent_without_session_signals() -> None:
 
     assert quote is not None
     assert quote.official_close is None
+
+
+def test_krx_quote_infers_native_currency_when_metadata_omits_it() -> None:
+    asset = AssetConfig("005930.KS", "equity", "yahoo")
+    quote = _quote_from_chart_result(
+        asset, {"meta": {"regularMarketPrice": 155_000.0}}
+    )
+    assert quote is not None and quote.currency == "KRW"
+
+
+def test_krx_history_without_fx_never_returns_native_bars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asset = AssetConfig("005930.KS", "equity", "yahoo")
+    native = Bar(
+        asset.symbol, "yahoo", "1d", datetime.now(UTC),
+        155_000.0, 170_500.0, 139_500.0, 155_000.0,
+    )
+    monkeypatch.setattr(yahoo_module, "_get_raw_history_sync", lambda *args: [])
+    assert yahoo_module._bars_with_usd_display(asset, [native], "1d", "1y") == []

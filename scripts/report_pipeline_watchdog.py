@@ -53,9 +53,15 @@ def _get_json(url: str) -> dict[str, Any]:
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme != "https":
         raise ValueError("dashboard watchdog requires an HTTPS BOARD_URL")
-    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    request = urllib.request.Request(
+        url,
+        headers={"Accept": "application/json", "X-Edit-Token": load_config().get("EDIT_TOKEN", "")},
+    )
     with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:  # nosec B310
-        return cast(dict[str, Any], json.loads(response.read().decode("utf-8")))
+        payload = json.loads(response.read().decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("malformed dashboard JSON payload")
+    return cast(dict[str, Any], payload)
 
 
 def _save_json(payload: dict[str, Any], path: Path) -> None:
@@ -152,24 +158,24 @@ def audit_pipeline(now: datetime | None = None) -> list[str]:
         if upload_state.get(filename) != content_hash(cached):
             issues.append(f"{stage.title}: uploader state does not match vault content")
 
+    listing_available = False
     try:
         listing = _get_json(base_url + "/api/reports?limit=20")
-        reports = listing.get("reports", [])
+        reports = listing.get("reports")
+        if not isinstance(reports, list) or any(not isinstance(item, dict) for item in reports):
+            raise ValueError("malformed dashboard report listing")
         latest_by_title: dict[str, dict[str, Any]] = {}
-        if isinstance(reports, list):
-            for item in reports:
-                if not isinstance(item, dict):
-                    continue
-                # /api/reports is newest-first. Preserve the first report for
-                # each title; assignment would let an older page row replace it.
-                latest_by_title.setdefault(str(item.get("title")), item)
+        for item in reports:
+            # /api/reports is newest-first. Preserve the first report for each title.
+            latest_by_title.setdefault(str(item.get("title")), item)
+        listing_available = True
     except (OSError, ValueError, urllib.error.URLError, http.client.HTTPException) as exc:
         issues.append(f"dashboard report listing unavailable ({exc})")
         latest_by_title = {}
 
     for stage in due:
         cached = bodies.get(stage.title)
-        if cached is None or not latest_by_title:
+        if not listing_available:
             continue
         report = latest_by_title.get(stage.title)
         if report is None:
@@ -182,6 +188,8 @@ def audit_pipeline(now: datetime | None = None) -> list[str]:
         # A newer report can legitimately replace an earlier slug. The uploader
         # hash above proves this day's file was accepted before replacement.
         if report_date > date_text:
+            continue
+        if cached is None:
             continue
         try:
             detail = _get_json(base_url + f"/api/reports/{int(report['id'])}")

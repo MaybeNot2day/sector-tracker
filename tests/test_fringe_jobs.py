@@ -221,6 +221,10 @@ def test_stats_block_shape_and_mode_labels() -> None:
     assert any(line.startswith("- Direction: long ") for line in lines)
     assert any(line.startswith("- Asset: crypto ") for line in lines)
     assert any(line.startswith("- Open risk: giveback-to-stops ") for line in lines)
+    assert (
+        "- Breaker policy: negative expectancy activates CALIBRATION_CAP, not NO_NEW_OPENS; "
+        "only 5+ consecutive losses halt entries"
+    ) in lines
 
 
 def test_review_markdown_covers_every_required_topic() -> None:
@@ -269,3 +273,82 @@ def test_review_handles_an_empty_week() -> None:
     }
     _, body = review.compose_review(payload, date(2026, 8, 14))
     assert "No closed trades this week; best/worst not applicable." in body
+
+
+def test_week_window_is_exactly_seven_calendar_days() -> None:
+    today = date(2026, 8, 14)
+    trades = [
+        _closed(1, 10, "2026-08-07"),
+        _closed(2, 20, "2026-08-08"),
+        _closed(3, 30, "2026-08-14"),
+        _closed(4, 40, "2026-08-15"),
+    ]
+    assert [item["id"] for item in review.week_trades(trades, today)] == [2, 3]
+
+
+def test_failed_weekly_post_leaves_vault_report_for_uploader_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    book = {"summary": {"portfolio": {"equity": 10000}}, "open": [], "closed": []}
+    monkeypatch.setattr(
+        review, "load_config",
+        lambda: {"BOARD_URL": "https://board.test", "EDIT_TOKEN": "secret",
+                 "VAULT_DIR": str(tmp_path)},
+    )
+    monkeypatch.setattr(review, "fetch_book", lambda url: book)
+    posted: list[str] = []
+
+    def post(url: str, token: str, stamp: str, body: str) -> int:
+        posted.append(body)
+        raise OSError("board unavailable")
+
+    monkeypatch.setattr(review, "post_report", post)
+    assert review.run([]) == 1
+    files = list(tmp_path.glob("* Fringe Weekly Review.md"))
+    assert len(files) == 1
+    assert files[0].read_text() == posted[0]
+    assert "fringe weekly review" in sys.modules["vault_report_uploader"].parse_title_allowlist(
+        sys.modules["vault_report_uploader"].DEFAULT_REPORT_TITLES
+    )
+
+
+def test_weekly_vault_failure_does_not_publish_an_unrecoverable_board_only_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "not-a-directory"
+    vault.write_text("file")
+    monkeypatch.setattr(
+        review,
+        "load_config",
+        lambda: {
+            "BOARD_URL": "https://board.test", "EDIT_TOKEN": "secret", "VAULT_DIR": str(vault)
+        },
+    )
+    monkeypatch.setattr(
+        review, "fetch_book",
+        lambda url: {"summary": {"portfolio": {"equity": 10000}}, "open": [], "closed": []},
+    )
+    monkeypatch.setattr(
+        review,
+        "post_report",
+        lambda *args: pytest.fail("must not publish after vault write failed"),
+    )
+    assert review.run([]) == 1
+
+
+def test_book_fetch_authenticates_machine_reads_and_rejects_malformed_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+
+    monkeypatch.setattr(stats, "load_config", lambda: {"EDIT_TOKEN": "machine-secret"})
+    bodies = iter([b'{"open": [], "closed": [], "summary": {"portfolio": {}}}', b'[]'])
+
+    def urlopen(request: Any, **kwargs: Any) -> Any:
+        assert request.get_header("X-edit-token") == "machine-secret"
+        return io.BytesIO(next(bodies))
+
+    monkeypatch.setattr(stats.urllib.request, "urlopen", urlopen)
+    assert stats.fetch_book("https://board.test")["open"] == []
+    with pytest.raises(ValueError, match="malformed Fringe book"):
+        stats.fetch_book("https://board.test")
