@@ -162,6 +162,8 @@ RUN_PLAYWRIGHT=1 python -m pytest tests/test_playwright_smoke.py -q
 GitHub Actions runs the locked development environment, Ruff, mypy, backend regressions,
 shell syntax checks, and the complete Chromium suite. The browser fixture uses a
 temporary database and watchlist, never the working dashboard's accumulated state.
+The fixture writes uvicorn output to `uvicorn.log` in that temporary directory,
+avoiding an undrained stdout pipe that can block the server during a full run.
 
 To run the same smoke suite against an already-running board instead of the test fixture
 server:

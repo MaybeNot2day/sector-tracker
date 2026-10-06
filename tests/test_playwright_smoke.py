@@ -78,25 +78,27 @@ def base_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
         "EDIT_TOKEN": "",
         "ALLOW_UNSAFE_EDITS": "true",
     }
-    process = subprocess.Popen(
-        [
-            executable,
-            "-m",
-            "uvicorn",
-            "app.main:app",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        env=env,
-    )
+    log_path = isolated / "uvicorn.log"
+    with log_path.open("w", encoding="utf-8") as log_file:
+        process = subprocess.Popen(
+            [
+                executable,
+                "-m",
+                "uvicorn",
+                "app.main:app",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+            ],
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+        )
     url = f"http://127.0.0.1:{port}"
     try:
-        _wait_for_health(url, process)
+        _wait_for_health(url, process, log_path)
         yield url
     finally:
         process.terminate()
@@ -2879,12 +2881,12 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _wait_for_health(url: str, process: subprocess.Popen[str]) -> None:
+def _wait_for_health(url: str, process: subprocess.Popen[str], log_path: Path) -> None:
     deadline = time.monotonic() + 15
     health_url = f"{url}/api/health"
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            output = process.stdout.read() if process.stdout else ""
+            output = log_path.read_text(encoding="utf-8")
             pytest.fail(f"uvicorn exited before serving health check:\n{output}")
         try:
             with urlopen(health_url, timeout=0.5) as response:
@@ -2892,7 +2894,10 @@ def _wait_for_health(url: str, process: subprocess.Popen[str]) -> None:
                     return
         except URLError:
             time.sleep(0.1)
-    pytest.fail(f"uvicorn did not answer {health_url} within 15s")
+    pytest.fail(
+        f"uvicorn did not answer {health_url} within 15s:\n"
+        + log_path.read_text(encoding="utf-8")
+    )
 
 
 def _iso(offset_minutes: int = 0) -> str:
