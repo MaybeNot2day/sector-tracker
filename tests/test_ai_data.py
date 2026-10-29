@@ -289,6 +289,10 @@ async def test_ai_data_warm_loop_refreshes_every_ai_dataset(
         async def get_capex(self) -> None:
             calls.append("capex")
 
+    class NeocloudProbe:
+        async def get_financing(self) -> None:
+            calls.append("neoclouds")
+
     class GPUComputeProbe:
         async def get_hardware(self) -> None:
             calls.append("hardware")
@@ -305,13 +309,14 @@ async def test_ai_data_warm_loop_refreshes_every_ai_dataset(
     state = SimpleNamespace(
         ai_data_service=AIDataProbe(),
         ai_capex_service=CapexProbe(),
+        neocloud_finance_service=NeocloudProbe(),
         gpu_compute_service=GPUComputeProbe(),
     )
 
     with pytest.raises(asyncio.CancelledError):
         await scheduler.ai_data_warm_loop(state)
 
-    assert calls == ["models", "token-index", "capex", "hardware"]
+    assert calls == ["models", "token-index", "capex", "neoclouds", "hardware"]
 
 
 @pytest.mark.asyncio

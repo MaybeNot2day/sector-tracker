@@ -6630,6 +6630,84 @@ a.key-date-row:focus-visible {
   aspect-ratio: 16 / 9;
 }
 
+.ai-neocloud-layout {
+  grid-template-columns: minmax(0, 1.15fr) minmax(360px, 0.85fr);
+}
+
+.ai-neocloud-layout .ai-index-chart {
+  height: auto;
+  min-height: 200px;
+  aspect-ratio: 760 / 320;
+}
+
+.ai-index-chart .bar-debt {
+  fill: var(--accent);
+}
+
+.ai-index-chart .bar-equity {
+  fill: var(--green);
+}
+
+.ai-index-chart .series-capex {
+  fill: none;
+  stroke: var(--chart-ma-200);
+  stroke-width: 1.8;
+}
+
+.ai-index-chart .series-financing {
+  fill: none;
+  stroke: var(--chart-ma-50);
+  stroke-width: 1.6;
+  stroke-dasharray: 5 4;
+}
+
+.ai-index-legend .bar {
+  height: 8px;
+}
+
+.ai-index-legend .debt { background: var(--accent); }
+.ai-index-legend .equity { background: var(--green); }
+.ai-index-legend .capex { background: var(--chart-ma-200); }
+.ai-index-legend .financing { background: var(--chart-ma-50); }
+
+.ai-neocloud-section {
+  border-top: 1px solid var(--line);
+}
+
+.ai-neocloud-section > .ai-index-heading {
+  align-items: center;
+  margin: 0;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.ai-neocloud-ledger-wrap {
+  max-height: 620px;
+  overflow-y: auto;
+}
+
+.ai-neocloud-ledger td.ai-neocloud-kind {
+  text-align: left;
+}
+
+.ai-neocloud-kind .debt { color: var(--accent); }
+.ai-neocloud-kind .equity { color: var(--green); }
+.ai-neocloud-kind .contract { color: var(--muted); }
+
+.ai-neocloud-ledger td.ai-neocloud-detail {
+  min-width: 360px;
+  max-width: 720px;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  line-height: 1.4;
+  text-align: left;
+  white-space: normal;
+}
+
+.ai-table td.ai-neocloud-stale {
+  color: var(--muted);
+}
+
 .ai-index-chart-panel {
   min-width: 0;
   padding: 15px;

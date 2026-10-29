@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     marketdata_base_url: str = "https://api.marketdata.app"
     options_cache_seconds: int = Field(default=60, ge=15, le=900)
     computeprices_api_key: str = ""
+    # SEC fair-access policy requires a descriptive User-Agent with a contact
+    # address; the neocloud financing tracker sends it to data.sec.gov.
+    sec_user_agent: str = "SectorTracker/0.1 (+AI market dashboard) contact@example.com"
     # TradingView economic-calendar enrichment for the Key Dates rail:
     # base cache TTL (drops to ~20s around scheduled releases) and the
     # comma-separated country filter sent to the calendar endpoint.

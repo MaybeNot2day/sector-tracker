@@ -30,7 +30,7 @@ class CloseProbe:
         # Network resources must not close until every background user stopped.
         assert self.tracker.stopped_tasks == 8
         self.tracker.started.append(self.name)
-        if len(self.tracker.started) == 11:
+        if len(self.tracker.started) == 12:
             self.tracker.all_started.set()
         await self.tracker.all_started.wait()
         if self.fail:
@@ -54,6 +54,7 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
         "earnings": CloseProbe("earnings", tracker),
         "ai": CloseProbe("ai", tracker),
         "capex": CloseProbe("capex", tracker),
+        "neoclouds": CloseProbe("neoclouds", tracker),
         "gpu": CloseProbe("gpu", tracker),
         "sofr": CloseProbe("sofr", tracker),
     }
@@ -70,6 +71,7 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
         marketdata_base_url="https://marketdata.test",
         options_cache_seconds=60,
         computeprices_api_key="",
+        sec_user_agent="SectorTracker tests test@example.com",
         econ_calendar_cache_seconds=300,
         econ_calendar_countries="US,EU",
         news_channels=[],
@@ -123,6 +125,9 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
     )
     monkeypatch.setattr(main_module, "AIDataService", lambda *args, **kwargs: probes["ai"])
     monkeypatch.setattr(main_module, "AICapexService", lambda *args, **kwargs: probes["capex"])
+    monkeypatch.setattr(
+        main_module, "NeocloudFinanceService", lambda *args, **kwargs: probes["neoclouds"]
+    )
     monkeypatch.setattr(main_module, "GPUComputeService", lambda *args, **kwargs: probes["gpu"])
     monkeypatch.setattr(main_module, "SOFRService", lambda *args, **kwargs: probes["sofr"])
     monkeypatch.setattr(main_module, "stop_task", fake_stop_task)
@@ -145,6 +150,7 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
         "earnings",
         "ai",
         "capex",
+        "neoclouds",
         "gpu",
         "sofr",
     }
@@ -158,6 +164,7 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
         "earnings",
         "ai",
         "capex",
+        "neoclouds",
         "gpu",
         "sofr",
     }

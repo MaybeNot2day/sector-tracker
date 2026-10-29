@@ -37,6 +37,7 @@ const aiSectionTabs = document.querySelector("#ai-section-tabs");
 const aiModelsPanel = document.querySelector("#ai-models-panel");
 const aiTokenIndexPanel = document.querySelector("#ai-token-index-panel");
 const aiCapexPanel = document.querySelector("#ai-capex-panel");
+const aiNeocloudsPanel = document.querySelector("#ai-neoclouds-panel");
 const aiHardwarePanel = document.querySelector("#ai-hardware-panel");
 const aiSourceLink = document.querySelector("#ai-source-link");
 const aiDataStatus = document.querySelector("#ai-data-status");
@@ -47,6 +48,7 @@ const aiModelsSummary = document.querySelector("#ai-models-summary");
 const aiModelsBoard = document.querySelector("#ai-models-board");
 const aiIndexBoard = document.querySelector("#ai-index-board");
 const aiCapexBoard = document.querySelector("#ai-capex-board");
+const aiNeocloudsBoard = document.querySelector("#ai-neoclouds-board");
 const aiHardwareBoard = document.querySelector("#ai-hardware-board");
 const watchView = document.querySelector("#watch-view");
 const watchGrid = document.querySelector("#watch-grid");
@@ -214,6 +216,18 @@ let aiIndexLoading = false;
 let latestAiCapex = null;
 let aiCapexFetchedAt = 0;
 let aiCapexLoading = false;
+let latestAiNeoclouds = null;
+let aiNeocloudsFetchedAt = 0;
+let aiNeocloudsLoading = false;
+let aiNeocloudFilter = "all";
+const NEOCLOUD_FILTERS = [
+  ["all", "All"],
+  ["debt", "Debt"],
+  ["equity", "Equity"],
+  ["contract", "Contracts"],
+];
+const NEOCLOUD_CURRENCY_SYMBOLS = { USD: "$", EUR: "€", GBP: "£", AUD: "A$", CAD: "C$" };
+
 let latestAiHardware = null;
 let aiHardwareFetchedAt = 0;
 let aiHardwareLoading = false;
@@ -832,6 +846,7 @@ function init() {
     if (activeView === "ai" && activeAiSection === "models") fetchAiModels(true);
     if (activeView === "ai" && activeAiSection === "token-index") fetchAiTokenIndex(true);
     if (activeView === "ai" && activeAiSection === "capex") fetchAiCapex(true);
+    if (activeView === "ai" && activeAiSection === "neoclouds") fetchAiNeoclouds(true);
     if (activeView === "ai" && activeAiSection === "hardware") {
       fetchAiHardware(true);
       loadComponentTrends(true);
@@ -846,6 +861,12 @@ function init() {
     if (button) selectAiSection(button.dataset.aiSection || "models");
   });
   aiSectionTabs.addEventListener("keydown", handleAiSectionKeydown);
+  aiNeocloudsBoard.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-neocloud-filter]");
+    if (!button) return;
+    aiNeocloudFilter = button.dataset.neocloudFilter || "all";
+    renderAiNeocloudLedger();
+  });
   aiModelSearch.addEventListener("input", () => {
     aiModelQuery = aiModelSearch.value.trim().toLowerCase();
     renderAiModels();
@@ -7649,14 +7670,16 @@ function renderAiView() {
 }
 
 function selectAiSection(section) {
-  activeAiSection = ["models", "token-index", "capex", "hardware"].includes(section)
+  activeAiSection = ["models", "token-index", "capex", "neoclouds", "hardware"].includes(section)
     ? section
     : "models";
   aiModelsPanel.hidden = activeAiSection !== "models";
   aiTokenIndexPanel.hidden = activeAiSection !== "token-index";
   aiCapexPanel.hidden = activeAiSection !== "capex";
+  aiNeocloudsPanel.hidden = activeAiSection !== "neoclouds";
   aiHardwarePanel.hidden = activeAiSection !== "hardware";
   const capexActive = activeAiSection === "capex";
+  const neocloudsActive = activeAiSection === "neoclouds";
   const hardwareActive = activeAiSection === "hardware";
   if (hardwareActive) {
     aiSourceLink.href = "https://computeprices.com/gpu";
@@ -7664,6 +7687,9 @@ function selectAiSection(section) {
   } else if (capexActive) {
     aiSourceLink.href = "https://finance.yahoo.com/";
     aiSourceLink.textContent = "Yahoo Finance source";
+  } else if (neocloudsActive) {
+    aiSourceLink.href = "https://www.sec.gov/edgar/search/";
+    aiSourceLink.textContent = "SEC EDGAR source";
   } else {
     aiSourceLink.href = "https://openrouter.ai/rankings";
     aiSourceLink.textContent = "OpenRouter source";
@@ -7676,6 +7702,7 @@ function selectAiSection(section) {
   });
   if (activeAiSection === "token-index") fetchAiTokenIndex();
   else if (capexActive) fetchAiCapex();
+  else if (neocloudsActive) fetchAiNeoclouds();
   else if (hardwareActive) {
     fetchAiHardware();
     loadComponentTrends();
@@ -8128,6 +8155,221 @@ function renderAiCapex() {
   `;
 }
 
+async function fetchAiNeoclouds(force = false) {
+  if (aiNeocloudsLoading) return;
+  if (!force && latestAiNeoclouds && Date.now() - aiNeocloudsFetchedAt < AI_DATA_TTL_MS) {
+    renderAiNeoclouds();
+    setAiDataStatus("neoclouds", neocloudStatusText());
+    return;
+  }
+  aiNeocloudsLoading = true;
+  setAiDataStatus("neoclouds", "Loading neocloud financing from SEC EDGAR");
+  if (!latestAiNeoclouds) {
+    aiNeocloudsBoard.innerHTML =
+      '<div class="empty-state">Reading SEC filings · the first sync takes about a minute</div>';
+  }
+  try {
+    const response = await fetch("/api/ai/neoclouds");
+    if (!response.ok) throw new Error(`ai_neoclouds_${response.status}`);
+    latestAiNeoclouds = await response.json();
+    aiNeocloudsFetchedAt = Date.now();
+    renderAiNeoclouds();
+    setAiDataStatus("neoclouds", neocloudStatusText());
+  } catch (error) {
+    if (latestAiNeoclouds) {
+      renderAiNeoclouds();
+      setAiDataStatus("neoclouds", "SEC EDGAR unavailable · showing cached filings");
+    } else {
+      aiNeocloudsBoard.innerHTML =
+        '<div class="empty-state">Neocloud financing is temporarily unavailable</div>';
+      setAiDataStatus("neoclouds", "SEC filings unavailable");
+    }
+  } finally {
+    aiNeocloudsLoading = false;
+  }
+}
+
+function neocloudStatusText() {
+  return `SEC filings · balance sheets through ${latestAiNeoclouds?.as_of || "—"}`;
+}
+
+function renderAiNeoclouds() {
+  if (!latestAiNeoclouds?.companies) return;
+  const summary = latestAiNeoclouds.summary || {};
+  const announced =
+    (Number(summary.announced_debt_12m) || 0) + (Number(summary.announced_equity_12m) || 0);
+  const metrics = [
+    aiMetric(
+      "Listed debt",
+      formatNeocloudUsd(summary.total_debt),
+      `${summary.listed_companies || 0} listed · cash ${formatNeocloudUsd(summary.total_cash)}`,
+    ),
+    aiMetric(
+      "Contracted backlog",
+      formatNeocloudUsd(summary.total_backlog),
+      `remaining obligations · leases ${formatNeocloudUsd(summary.total_leases)}`,
+    ),
+    aiMetric(
+      "Trailing 4Q capex",
+      formatNeocloudUsd(summary.ttm_capex),
+      `net financing inflow ${formatNeocloudUsd(summary.ttm_net_financing)}`,
+    ),
+    aiMetric(
+      "Deals announced · 12M",
+      formatNeocloudUsd(announced),
+      `debt ${formatNeocloudUsd(summary.announced_debt_12m)} · equity ${formatNeocloudUsd(summary.announced_equity_12m)}`,
+    ),
+    aiMetric(
+      "Private raised · 12M",
+      formatNeocloudUsd(summary.private_raised_12m),
+      `Form D · ${summary.private_companies || 0} private issuers`,
+    ),
+  ].join("");
+
+  const listedRows = latestAiNeoclouds.companies.map((company) => {
+    const stale = company.stale || {};
+    const balance = (field) => {
+      const value = formatNeocloudUsd(company[field]);
+      if (!stale[field]) return `<td>${value}</td>`;
+      return `<td class="ai-neocloud-stale" title="Last tagged ${escapeHtml(stale[field])}">${value}*</td>`;
+    };
+    return `
+      <tr>
+        <td>
+          <span class="ai-model-name">${escapeHtml(company.name)}</span>
+          <span class="ai-capex-symbol">${escapeHtml(company.key)} · ${escapeHtml(company.segment)}</span>
+        </td>
+        <td>${escapeHtml(company.period_end)}</td>
+        ${balance("cash")}
+        ${balance("debt")}
+        <td>${formatNeocloudUsd(company.net_debt)}</td>
+        ${balance("leases")}
+        ${balance("backlog")}
+        <td>${formatNeocloudUsd(company.revenue_ttm)}</td>
+        <td>${formatNeocloudUsd(company.capex_ttm)}</td>
+        <td>${formatNeocloudMultiple(company.capex_to_revenue)}</td>
+        <td class="${aiChangeClass(company.net_financing_ttm)}">${formatNeocloudUsd(company.net_financing_ttm)}</td>
+        <td>${formatNeocloudUsd(company.interest_ttm)}</td>
+      </tr>
+    `;
+  }).join("");
+
+  const privateRows = (latestAiNeoclouds.private_companies || []).map((company) => `
+    <tr>
+      <td>
+        <span class="ai-model-name">${escapeHtml(company.name)}</span>
+        <span class="ai-capex-symbol">${escapeHtml(company.segment)} · ${Number(company.rounds) || 0} Form D</span>
+      </td>
+      <td>${escapeHtml(company.last_date || "—")}</td>
+      <td>${Number(company.rounds) ? formatNeocloudUsd(company.raised) : "—"}</td>
+      <td>${formatNeocloudUsd(company.last_amount)}</td>
+      <td>${escapeHtml(company.ipo_filed || "—")}</td>
+    </tr>
+  `).join("");
+
+  const series = latestAiNeoclouds.series || [];
+  const filters = NEOCLOUD_FILTERS.map(([value, label]) => `
+    <button type="button" data-neocloud-filter="${value}" aria-pressed="false">${label}</button>
+  `).join("");
+  aiNeocloudsBoard.innerHTML = `
+    <div class="ai-metrics">${metrics}</div>
+    <div class="ai-index-layout ai-neocloud-layout">
+      <section class="ai-index-chart-panel">
+        <div class="ai-index-heading">
+          <h3>Quarterly capital formation</h3>
+          <span>USD · SEC filings</span>
+        </div>
+        <div class="ai-index-chart" role="img" aria-label="Announced debt and equity deals with listed capex and net financing by calendar quarter">
+          ${aiNeocloudChart(series)}
+        </div>
+        <div class="ai-index-legend">
+          <span><i class="bar debt"></i>Debt deals announced</span>
+          <span><i class="bar equity"></i>Equity deals announced</span>
+          <span><i class="capex"></i>Listed capex</span>
+          <span><i class="financing"></i>Listed net financing cash flow</span>
+        </div>
+      </section>
+      <section class="ai-index-side">
+        <h3>Private issuers · Form D</h3>
+        <div class="ai-table-wrap">
+          <table class="ai-table">
+            <thead><tr><th>Company</th><th>Last filing</th><th>Raised · 3Y</th><th>Last round</th><th>IPO filing</th></tr></thead>
+            <tbody>${privateRows || '<tr><td colspan="5">No Form D notices in range</td></tr>'}</tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+    <section class="ai-neocloud-section">
+      <div class="ai-index-heading">
+        <h3>Listed issuers · latest balance sheet</h3>
+        <span>Trailing figures = last four reported quarters</span>
+      </div>
+      <div class="ai-table-wrap">
+        <table class="ai-table">
+          <thead><tr>
+            <th>Company</th><th>Balance date</th><th>Cash</th><th>Debt</th><th>Net debt</th>
+            <th>Leases</th><th>Backlog</th><th>Revenue 4Q</th><th>Capex 4Q</th>
+            <th>Capex / rev.</th><th>Net financing 4Q</th><th>Interest 4Q</th>
+          </tr></thead>
+          <tbody>${listedRows}</tbody>
+        </table>
+      </div>
+    </section>
+    <section class="ai-neocloud-section">
+      <div class="ai-index-heading">
+        <h3>Financing ledger</h3>
+        <div class="category-tabs" role="group" aria-label="Financing ledger filter">${filters}</div>
+      </div>
+      <div class="ai-table-wrap ai-neocloud-ledger-wrap">
+        <table class="ai-table ai-neocloud-ledger">
+          <thead><tr><th>Filed</th><th>Company</th><th>Type</th><th>Amount</th><th>Detail</th></tr></thead>
+          <tbody id="ai-neocloud-ledger"></tbody>
+        </table>
+      </div>
+    </section>
+    <div class="ai-method-note">
+      ${escapeHtml(latestAiNeoclouds.methodology?.description || "")}
+      * Balance an issuer stopped tagging; hover for its last reported date.
+    </div>
+  `;
+  renderAiNeocloudLedger();
+}
+
+function renderAiNeocloudLedger() {
+  const body = aiNeocloudsBoard.querySelector("#ai-neocloud-ledger");
+  if (!body || !latestAiNeoclouds) return;
+  aiNeocloudsBoard.querySelectorAll("button[data-neocloud-filter]").forEach((button) => {
+    const active = button.dataset.neocloudFilter === aiNeocloudFilter;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  const events = (latestAiNeoclouds.events || []).filter(
+    (event) => aiNeocloudFilter === "all" || event.category === aiNeocloudFilter,
+  );
+  if (!events.length) {
+    body.innerHTML = '<tr><td colspan="5">No filings in this category</td></tr>';
+    return;
+  }
+  body.innerHTML = events.map((event) => {
+    const url = String(event.url || "");
+    const link = url.startsWith("https://www.sec.gov/")
+      ? ` <a class="ai-table-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(event.form)}</a>`
+      : "";
+    const filings = Number(event.filings) > 1
+      ? ` <span class="ai-provider">· ${Number(event.filings)} filings</span>`
+      : "";
+    return `
+      <tr>
+        <td>${escapeHtml(event.date)}</td>
+        <td><span class="ai-model-name">${escapeHtml(event.company_name)}</span></td>
+        <td class="ai-neocloud-kind"><span class="${escapeHtml(event.category)}">${escapeHtml(event.kind)}</span></td>
+        <td>${formatDealAmount(event.amount, event.currency)}</td>
+        <td class="ai-neocloud-detail">${escapeHtml(event.summary)}${filings}${link}</td>
+      </tr>
+    `;
+  }).join("");
+}
+
 async function fetchAiHardware(force = false) {
   if (aiHardwareLoading) return;
   if (!force && latestAiHardware && Date.now() - aiHardwareFetchedAt < AI_DATA_TTL_MS) {
@@ -8356,6 +8598,81 @@ function aiCapexChart(series) {
       <text x="${width - pad.right}" y="${height - 7}" text-anchor="end">${escapeHtml(rows.at(-1).period)}</text>
     </svg>
   `;
+}
+
+function aiNeocloudChart(series) {
+  const rows = series.slice(-8);
+  if (!rows.length) return '<div class="empty-state">No quarterly filings yet</div>';
+  const width = 760;
+  const height = 320;
+  const pad = { left: 54, right: 14, top: 16, bottom: 27 };
+  const billions = (value) => (Number(value) || 0) / 1e9;
+  // Lines skip quarters most listed issuers have not reported yet, so a
+  // half-reported quarter does not read as a collapse in spending.
+  const maxCount = Math.max(...rows.map((row) => Number(row.company_count) || 0), 0);
+  const reported = (row) => maxCount > 0 && Number(row.company_count) >= maxCount * 0.75;
+  const values = rows.flatMap((row) => [
+    billions(row.announced_debt) + billions(row.announced_equity),
+    ...(reported(row) ? [billions(row.capex), billions(row.net_financing)] : []),
+  ]);
+  const max = Math.max(...values, 1) * 1.08;
+  const min = Math.min(0, ...values);
+  const plotHeight = height - pad.top - pad.bottom;
+  const y = (value) => pad.top + ((max - value) / (max - min)) * plotHeight;
+  const band = (width - pad.left - pad.right) / rows.length;
+  const center = (index) => pad.left + band * (index + 0.5);
+  const barWidth = Math.min(46, band * 0.5);
+  const bars = rows.map((row, index) => {
+    const debt = billions(row.announced_debt);
+    const total = debt + billions(row.announced_equity);
+    const left = (center(index) - barWidth / 2).toFixed(1);
+    return `
+      <rect class="bar-debt" x="${left}" y="${y(debt).toFixed(1)}" width="${barWidth.toFixed(1)}" height="${(y(0) - y(debt)).toFixed(1)}" />
+      <rect class="bar-equity" x="${left}" y="${y(total).toFixed(1)}" width="${barWidth.toFixed(1)}" height="${(y(debt) - y(total)).toFixed(1)}" />
+      <text x="${center(index).toFixed(1)}" y="${height - 7}" text-anchor="middle">${escapeHtml(row.period)}</text>
+    `;
+  }).join("");
+  const line = (field) => rows
+    .map((row, index) => (reported(row) ? `${center(index).toFixed(1)},${y(billions(row[field])).toFixed(1)}` : null))
+    .filter(Boolean)
+    .join(" ");
+  const ticks = [max, max / 2, 0, ...(min < 0 ? [min] : [])].map((value) => `
+    <line class="grid-line" x1="${pad.left}" y1="${y(value).toFixed(1)}" x2="${width - pad.right}" y2="${y(value).toFixed(1)}" />
+    <text x="5" y="${(y(value) + 3).toFixed(1)}">$${value.toFixed(0)}B</text>
+  `).join("");
+  return `
+    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
+      ${ticks}
+      ${bars}
+      <polyline class="series-capex" points="${line("capex")}" />
+      <polyline class="series-financing" points="${line("net_financing")}" />
+    </svg>
+  `;
+}
+
+function formatNeocloudUsd(value) {
+  if (value === null || value === undefined) return "—";
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "—";
+  const sign = number < 0 ? "-" : "";
+  const absolute = Math.abs(number);
+  if (absolute >= 1e9) {
+    return `${sign}$${(absolute / 1e9).toLocaleString("en-US", { maximumFractionDigits: 1 })}B`;
+  }
+  return `${sign}$${(absolute / 1e6).toLocaleString("en-US", { maximumFractionDigits: 0 })}M`;
+}
+
+function formatDealAmount(value, currency) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return "—";
+  if (!currency || currency === "USD") return formatNeocloudUsd(value);
+  const symbol = NEOCLOUD_CURRENCY_SYMBOLS[currency] || `${currency} `;
+  return formatNeocloudUsd(value).replace("$", symbol);
+}
+
+function formatNeocloudMultiple(value) {
+  const number = Number(value);
+  if (value === null || value === undefined || !Number.isFinite(number)) return "—";
+  return `${number.toFixed(1)}×`;
 }
 
 function formatAiBillions(value) {

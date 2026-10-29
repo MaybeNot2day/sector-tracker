@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from secrets import randbits
 
 # Version 1 adopts pre-versioned databases without rebuilding their tables.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS latest_quotes (
@@ -222,6 +222,36 @@ CREATE TABLE IF NOT EXISTS sofr_history (
     fetched_at TEXT NOT NULL
 );
 """
+# Version 3 adds the neocloud SEC ledger; fresh databases reach it through the
+# same migration step as existing ones.
+NEOCLOUD_SCHEMA = """
+CREATE TABLE IF NOT EXISTS neocloud_financials (
+    company TEXT NOT NULL,
+    period_end TEXT NOT NULL,
+    metric TEXT NOT NULL,
+    value REAL NOT NULL,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (company, period_end, metric)
+);
+
+CREATE TABLE IF NOT EXISTS neocloud_filings (
+    accession TEXT PRIMARY KEY,
+    company TEXT NOT NULL,
+    form TEXT NOT NULL,
+    filed_date TEXT NOT NULL,
+    kind TEXT,
+    amount REAL,
+    currency TEXT,
+    offering_amount REAL,
+    first_sale_date TEXT,
+    summary TEXT NOT NULL DEFAULT '',
+    url TEXT NOT NULL,
+    fetched_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_neocloud_filings_company_date
+ON neocloud_filings (company, filed_date DESC);
+"""
 VALID_BAR_SQL = """
     open > 0 AND high > 0 AND low > 0 AND close > 0
     AND open < 1.0e100 AND high < 1.0e100 AND low < 1.0e100 AND close < 1.0e100
@@ -243,6 +273,11 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
     if version < 2:
         _add_history_metadata(conn)
         conn.execute("PRAGMA user_version = 2")
+    if version < 3:
+        for statement in NEOCLOUD_SCHEMA.split(";"):
+            if statement.strip():
+                conn.execute(statement)
+        conn.execute("PRAGMA user_version = 3")
     # Also quarantine corrupt rows introduced outside the provider path. The
     # delete trigger participates in this transaction and invalidates readers.
     _quarantine_invalid_bars(conn)

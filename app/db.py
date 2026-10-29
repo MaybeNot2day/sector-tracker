@@ -1596,6 +1596,132 @@ def load_ai_capex_history(path: Path) -> dict[str, list[dict[str, object]]]:
     return grouped
 
 
+def save_neocloud_financials(path: Path, rows: Sequence[dict[str, object]]) -> None:
+    """Upsert derived SEC XBRL metrics; restatements replace earlier values."""
+    if not rows:
+        return
+    init_db(path)
+    fetched_at = datetime.now(UTC).isoformat()
+    values = [
+        (
+            str(row["company"]),
+            str(row["period_end"]),
+            str(row["metric"]),
+            float(cast(float, row["value"])),
+            fetched_at,
+        )
+        for row in rows
+    ]
+    with _connect(path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO neocloud_financials (company, period_end, metric, value, fetched_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(company, period_end, metric) DO UPDATE SET
+                value = excluded.value,
+                fetched_at = excluded.fetched_at
+            """,
+            values,
+        )
+
+
+def load_neocloud_financials(path: Path) -> dict[str, list[dict[str, object]]]:
+    """Load persisted neocloud metrics grouped by company, oldest period first."""
+    init_db(path)
+    with _connect(path) as conn:
+        rows = conn.execute(
+            """
+            SELECT company, period_end, metric, value
+            FROM neocloud_financials
+            ORDER BY company, period_end, metric
+            """
+        ).fetchall()
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row["company"]), []).append(
+            {
+                "period_end": str(row["period_end"]),
+                "metric": str(row["metric"]),
+                "value": float(row["value"]),
+            }
+        )
+    return grouped
+
+
+def save_neocloud_filings(path: Path, rows: Sequence[dict[str, object]]) -> None:
+    """Record reviewed SEC filings; kind NULL marks a filing that is not a deal."""
+    if not rows:
+        return
+    init_db(path)
+    fetched_at = datetime.now(UTC).isoformat()
+    values = [
+        (
+            str(row["accession"]),
+            str(row["company"]),
+            str(row["form"]),
+            str(row["filed_date"]),
+            row.get("kind"),
+            _optional_float(row.get("amount")),
+            row.get("currency"),
+            _optional_float(row.get("offering_amount")),
+            row.get("first_sale_date"),
+            str(row.get("summary") or ""),
+            str(row["url"]),
+            fetched_at,
+        )
+        for row in rows
+    ]
+    with _connect(path) as conn:
+        conn.executemany(
+            """
+            INSERT OR REPLACE INTO neocloud_filings (
+                accession, company, form, filed_date, kind, amount, currency,
+                offering_amount, first_sale_date, summary, url, fetched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            values,
+        )
+
+
+def load_neocloud_filing_accessions(path: Path) -> set[str]:
+    """Accessions already reviewed, so their documents are never refetched."""
+    init_db(path)
+    with _connect(path) as conn:
+        rows = conn.execute("SELECT accession FROM neocloud_filings").fetchall()
+    return {str(row["accession"]) for row in rows}
+
+
+def load_neocloud_events(path: Path) -> list[dict[str, object]]:
+    """Load filings classified as financing or contract events, oldest first."""
+    init_db(path)
+    with _connect(path) as conn:
+        rows = conn.execute(
+            """
+            SELECT accession, company, form, filed_date, kind, amount, currency,
+                   offering_amount, first_sale_date, summary, url
+            FROM neocloud_filings
+            WHERE kind IS NOT NULL
+            ORDER BY filed_date, accession
+            """
+        ).fetchall()
+    return [
+        {
+            "accession": str(row["accession"]),
+            "company": str(row["company"]),
+            "form": str(row["form"]),
+            "filed_date": str(row["filed_date"]),
+            "kind": str(row["kind"]),
+            "amount": _optional_float(row["amount"]),
+            "currency": row["currency"],
+            "offering_amount": _optional_float(row["offering_amount"]),
+            "first_sale_date": row["first_sale_date"],
+            "summary": str(row["summary"]),
+            "url": str(row["url"]),
+        }
+        for row in rows
+    ]
+
+
 def save_ai_gpu_compute_snapshot(path: Path, payload: dict[str, object]) -> None:
     """Store one normalized GPU compute payload per UTC day."""
     init_db(path)

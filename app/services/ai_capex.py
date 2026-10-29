@@ -48,6 +48,9 @@ class AICapexService:
         self._cache: tuple[float, dict[str, object]] | None = None
         self._lock = asyncio.Lock()
 
+    async def aclose(self) -> None:
+        """Nothing to release: yfinance owns its sessions; lifespan closes every service."""
+
     async def get_capex(self) -> dict[str, object]:
         now = monotonic()
         if self._cache is not None and now - self._cache[0] < self.cache_seconds:

@@ -87,6 +87,7 @@ from app.services.hyperliquid_discovery import HyperliquidDiscoveryService
 from app.services.key_dates import parse_key_dates
 from app.services.macro import MACRO_TAPE_GROUP_NAME, with_macro_group
 from app.services.market_context import market_context_payload
+from app.services.neocloud_finance import NeocloudFinanceService
 from app.services.news import NewsService
 from app.services.options import MarketDataOptionsService, OptionsDataError
 from app.services.quotes import QuoteService, quote_payload
@@ -234,6 +235,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.database_path,
         api_key=settings.computeprices_api_key,
     )
+    app.state.neocloud_finance_service = NeocloudFinanceService(
+        settings.database_path,
+        user_agent=settings.sec_user_agent,
+    )
     app.state.sofr_service = SOFRService(settings.database_path)
     app.state.connection_manager = ConnectionManager()
     hyperliquid = providers.get("hyperliquid")
@@ -335,6 +340,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.earnings_service.aclose(),
             app.state.ai_data_service.aclose(),
             app.state.ai_capex_service.aclose(),
+            app.state.neocloud_finance_service.aclose(),
             app.state.gpu_compute_service.aclose(),
             app.state.sofr_service.aclose(),
             return_exceptions=True,

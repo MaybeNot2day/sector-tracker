@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 from app.services.ai_capex import AICapexError, AICapexService
 from app.services.ai_data import AIDataError, AIDataService
 from app.services.gpu_compute import GPUComputeError, GPUComputeService
+from app.services.neocloud_finance import NeocloudFinanceError, NeocloudFinanceService
 from app.services.sofr import SOFRError, SOFRService
 
 router = APIRouter(prefix="/api")
@@ -38,6 +39,15 @@ async def ai_capex(request: Request) -> dict[str, object]:
         service = cast(AICapexService, request.app.state.ai_capex_service)
         return await service.get_capex()
     except AICapexError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/ai/neoclouds")
+async def ai_neoclouds(request: Request) -> dict[str, object]:
+    try:
+        service = cast(NeocloudFinanceService, request.app.state.neocloud_finance_service)
+        return await service.get_financing()
+    except NeocloudFinanceError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 

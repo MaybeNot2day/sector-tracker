@@ -23,20 +23,34 @@ renders a Newsmap-style semantic treemap: TF-IDF clusters of repeated stories be
 whose size tracks the number of related headlines and whose color tracks freshness; clicking
 a tile opens the linked Telegram headlines.
 
-The AI view has four live panels. Models normalizes the public OpenRouter catalog into
+The AI view has five live panels. Models normalizes the public OpenRouter catalog into
 comparable input, output, cache, and 3:1 blended prices with provider, context, open-weight,
 and intelligence metadata. Token Index prices the observed prompt/completion mix from
 OpenRouter's public rankings and splits the result into broad, open-weight-proxy, and
 proprietary series. AI Capex tracks reported quarterly capital expenditure for eight
 hyperscalers and chip suppliers from Yahoo Finance company statements, including QoQ/YoY
 changes, trailing-four-quarter spend, and capex/revenue intensity. Reported total capex is an
-AI-infrastructure proxy because issuers do not consistently isolate AI-only spend. Hardware
-compares normalized cloud GPU rental rates, provider offers, and workload cost estimates from
-ComputePrices, alongside PCPartPicker component street-price trends. Catalog, index, capex, and
-GPU observations accrue in SQLite (`ai_model_snapshots`, `ai_token_index`, `ai_capex_history`,
-`ai_gpu_compute_snapshots`) instead of treating today's upstream response as historical truth.
-The token index is explicitly an OpenRouter market proxy, not a replica of Silicon Data's
-multi-network benchmark.
+AI-infrastructure proxy because issuers do not consistently isolate AI-only spend. Neoclouds
+(`GET /api/ai/neoclouds`) tracks how GPU clouds and AI data-center builders are financed, from
+SEC EDGAR only. Listed issuers (CoreWeave, Nebius, IREN, WhiteFiber, Applied Digital, Cipher,
+TeraWulf, Core Scientific, Hut 8) get cash, debt, leases, contracted backlog (RPO), and
+trailing-four-quarter revenue, capex, net financing cash flow, and interest from XBRL company
+facts. Their deals come from 8-K items 1.01/2.03/3.02, 6-K reports, and prospectus covers:
+each filing is classified (loan facility, senior or convertible notes, equity offering, ATM
+program, contract, lease) with its headline amount read from the text, and launch, pricing,
+and closing filings of one deal merge into one ledger row. Private issuers (Crusoe, Lambda,
+Fluidstack, Nscale, TensorWave, Lancium) appear through Form D notices (amount sold) and IPO
+registrations. Rounds that skip Form D, privately placed debt, and balances tagged only under
+issuer-specific XBRL extensions do not appear. A balance an issuer stopped tagging keeps its
+last reported value and date. Hardware compares normalized cloud GPU rental rates, provider
+offers, and workload cost estimates from ComputePrices, alongside PCPartPicker component
+street-price trends. Catalog, index, capex, neocloud, and GPU observations accrue in SQLite
+(`ai_model_snapshots`, `ai_token_index`, `ai_capex_history`, `neocloud_financials`,
+`neocloud_filings`, `ai_gpu_compute_snapshots`) instead of treating today's upstream response
+as historical truth. Reviewed SEC filings are never fetched again. The first sync takes about a
+minute because of SEC's request-rate limit; after that, the 6-hour refresh only fetches new
+filings. The token index is explicitly an OpenRouter market proxy, not a replica of Silicon
+Data's multi-network benchmark.
 
 Market data blends two worlds. Hyperliquid drives crypto perps end to end (quotes, candles,
 funding, OI) and overlays live 24/7 prices onto the equities/ETFs its xyz dex lists as synthetic
@@ -522,6 +536,7 @@ MARKETDATA_TOKEN=                                  # server-side API token; leav
 MARKETDATA_BASE_URL=https://api.marketdata.app     # MarketData.app REST API origin
 OPTIONS_CACHE_SECONDS=60                           # chain snapshot cache, 15-900 seconds
 COMPUTEPRICES_API_KEY=                  # optional free key; public GPU pages are the keyless fallback
+SEC_USER_AGENT="SectorTracker/0.1 you@example.com"   # SEC fair-access policy: name + contact email
 ECON_CALENDAR_CACHE_SECONDS=300         # key-dates enrichment cache; auto-drops to 20s around releases
 ECON_CALENDAR_COUNTRIES=US,EU,DE,GB,JP,CN
 NEWS_TELEGRAM_CHANNELS=marketfeed,RetardFrens,tradehaven,AGGRNEWSWIRE,WalterBloomberg,StablewatchNews,cookiesreads,real_DonaldJTrump,ahboyashreads,thekobeissiletter   # public t.me handles; each gets a mute chip in the drawer
@@ -554,6 +569,10 @@ Hardware's cloud GPU board uses the authenticated ComputePrices v1 API when `COM
 Without a key, it reads the public GPU comparison and top-model provider pages; this keyless
 mode has the same current-price semantics but fewer detailed models. The browser never receives
 the API key.
+
+The Neoclouds panel calls `data.sec.gov` and `www.sec.gov` from the server, and stays under
+SEC's 10 requests/second limit. SEC requires automated clients to send a User-Agent with a
+contact address, so set `SEC_USER_AGENT` to your own name and email in production.
 
 ## Smoke Tests
 

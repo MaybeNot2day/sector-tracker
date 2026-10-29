@@ -411,6 +411,28 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
     expect(page.locator("#ai-capex-board")).to_contain_text("AI infrastructure proxy")
     expect(page.locator("#ai-source-link")).to_have_text("Yahoo Finance source")
 
+    page.locator("#ai-neoclouds-tab").click()
+    expect(page.locator("#ai-neoclouds-panel")).to_be_visible()
+    expect(page.locator("#ai-capex-panel")).to_be_hidden()
+    expect(page.locator("#ai-source-link")).to_have_text("SEC EDGAR source")
+    expect(page.locator("#ai-neoclouds-board .ai-metric")).to_have_count(5)
+    expect(page.locator("#ai-neoclouds-board .bar-debt")).to_have_count(2)
+    # A balance the issuer stopped tagging is flagged with its last reported date.
+    stale_debt = page.locator("#ai-neoclouds-board td.ai-neocloud-stale")
+    expect(stale_debt).to_have_text("$3.1B*")
+    expect(stale_debt).to_have_attribute("title", "Last tagged 2026-03-31")
+    ledger = page.locator("#ai-neocloud-ledger tr")
+    expect(ledger).to_have_count(2)
+    page.locator('#ai-neoclouds-board button[data-neocloud-filter="debt"]').click()
+    expect(ledger).to_have_count(1)
+    expect(ledger.first).to_contain_text("Loan facility")
+    expect(ledger.first.locator("a")).to_have_attribute(
+        "href", "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000001/loan.htm"
+    )
+    page.locator('#ai-neoclouds-board button[data-neocloud-filter="contract"]').click()
+    expect(ledger).to_have_count(1)
+    expect(ledger.first).to_contain_text("€2B")
+
     page.locator("#ai-hardware-tab").click()
     expect(page.locator("#ai-hardware-panel")).to_be_visible()
     expect(page.locator("#ai-capex-panel")).to_be_hidden()
@@ -2565,6 +2587,106 @@ AI_CAPEX_PAYLOAD: dict[str, Any] = {
 }
 
 
+AI_NEOCLOUDS_PAYLOAD: dict[str, Any] = {
+    "as_of": "2026-06-30",
+    "source": {"name": "SEC EDGAR", "url": "https://www.sec.gov/edgar/search/"},
+    "methodology": {"description": "SEC filings ledger."},
+    "summary": {
+        "listed_companies": 1,
+        "private_companies": 1,
+        "total_debt": 3_100_000_000,
+        "total_cash": 2_600_000_000,
+        "total_leases": 24_000_000,
+        "total_backlog": 0,
+        "ttm_capex": 2_200_000_000,
+        "ttm_net_financing": 6_000_000_000,
+        "private_raised_12m": 730_000_000,
+        "announced_debt_12m": 2_600_000_000,
+        "announced_equity_12m": 730_000_000,
+        "deals_12m": 2,
+    },
+    "series": [
+        {
+            "period": "2026-Q1",
+            "capex": 1_000_000_000,
+            "net_financing": 2_000_000_000,
+            "announced_debt": 1_500_000_000,
+            "announced_equity": 0,
+            "company_count": 1,
+        },
+        {
+            "period": "2026-Q2",
+            "capex": 1_200_000_000,
+            "net_financing": 4_000_000_000,
+            "announced_debt": 2_600_000_000,
+            "announced_equity": 730_000_000,
+            "company_count": 1,
+        },
+    ],
+    "companies": [
+        {
+            "key": "WULF",
+            "name": "TeraWulf",
+            "segment": "AI data centers",
+            "period_end": "2026-06-30",
+            "cash": 2_600_000_000,
+            "debt": 3_100_000_000,
+            "net_debt": 500_000_000,
+            "leases": 24_000_000,
+            "backlog": None,
+            "revenue_ttm": 165_000_000,
+            "capex_ttm": 2_200_000_000,
+            "interest_ttm": 196_000_000,
+            "net_financing_ttm": 6_000_000_000,
+            "capex_to_revenue": 13.5,
+            "stale": {"debt": "2026-03-31"},
+        }
+    ],
+    "private_companies": [
+        {
+            "key": "FLUIDSTACK",
+            "name": "Fluidstack",
+            "segment": "GPU cloud",
+            "raised": 730_000_000,
+            "raised_12m": 730_000_000,
+            "rounds": 1,
+            "last_date": "2026-06-30",
+            "last_amount": 730_000_000,
+            "last_kind": "Private round",
+            "ipo_filed": None,
+        }
+    ],
+    "events": [
+        {
+            "date": "2026-08-10",
+            "company": "CRWV",
+            "company_name": "CoreWeave",
+            "form": "8-K",
+            "kind": "Loan facility",
+            "category": "debt",
+            "amount": 2_600_000_000,
+            "currency": "USD",
+            "summary": "CoreWeave entered into a delayed draw term loan facility.",
+            "url": "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000001/loan.htm",
+            "filings": 1,
+        },
+        {
+            "date": "2026-06-18",
+            "company": "NBIS",
+            "company_name": "Nebius",
+            "form": "6-K",
+            "kind": "Contract",
+            "category": "contract",
+            "amount": 2_000_000_000,
+            "currency": "EUR",
+            "summary": "Commercial agreement with a hyperscale customer.",
+            "url": "https://www.sec.gov/Archives/edgar/data/1513845/000151384526000002/k.htm",
+            "filings": 1,
+        },
+    ],
+}
+
+
 AI_HARDWARE_PAYLOAD: dict[str, Any] = {
     "as_of": "2026-08-20",
     "source": {
@@ -2716,6 +2838,8 @@ def _stub_board_apis(page: Page) -> None:
             _fulfill_json(route, AI_TOKEN_INDEX_PAYLOAD)
         elif path == "/api/ai/capex":
             _fulfill_json(route, AI_CAPEX_PAYLOAD)
+        elif path == "/api/ai/neoclouds":
+            _fulfill_json(route, AI_NEOCLOUDS_PAYLOAD)
         elif path == "/api/ai/hardware":
             _fulfill_json(route, AI_HARDWARE_PAYLOAD)
         elif path == "/api/component-image":
