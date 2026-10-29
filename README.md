@@ -42,12 +42,21 @@ and closing filings of one deal merge into one ledger row. Private issuers (Crus
 Fluidstack, Nscale, TensorWave, Lancium) appear through Form D notices (amount sold) and IPO
 registrations. Rounds that skip Form D, privately placed debt, and balances tagged only under
 issuer-specific XBRL extensions do not appear. A balance an issuer stopped tagging keeps its
-last reported value and date. Hardware compares normalized cloud GPU rental rates, provider
+last reported value and date. Debt deals also carry their terms, read from the filing text:
+maturity date (or the "due YYYY" year), tenor from the first filing to maturity, secured or
+unsecured, and collateral (GPUs, data centers, customer contracts, equity pledges). Notes
+count as unsecured unless the filing says otherwise; loans the text is silent on stay unknown.
+The debt stack shows, per issuer, the number of deals, face value, secured share,
+amount-weighted tenor, next maturity, and the amount due within 24 months, plus a sector
+maturity wall by year. Face value is the facility size or principal at signing, not the drawn
+balance. Amendments of existing facilities and non-USD tranches are excluded from counts, and
+repayments before maturity are not visible. Hardware compares normalized cloud GPU rental rates, provider
 offers, and workload cost estimates from ComputePrices, alongside PCPartPicker component
 street-price trends. Catalog, index, capex, neocloud, and GPU observations accrue in SQLite
 (`ai_model_snapshots`, `ai_token_index`, `ai_capex_history`, `neocloud_financials`,
 `neocloud_filings`, `ai_gpu_compute_snapshots`) instead of treating today's upstream response
-as historical truth. Reviewed SEC filings are never fetched again. The first sync takes about a
+as historical truth. Reviewed SEC filings are only fetched again when the filing parser changes
+(`PARSER_VERSION`). The first sync takes about a
 minute because of SEC's request-rate limit; after that, the 6-hour refresh only fetches new
 filings. The token index is explicitly an OpenRouter market proxy, not a replica of Silicon
 Data's multi-network benchmark.

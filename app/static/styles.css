@@ -6669,6 +6669,21 @@ a.key-date-row:focus-visible {
 .ai-index-legend .equity { background: var(--green); }
 .ai-index-legend .capex { background: var(--chart-ma-200); }
 .ai-index-legend .financing { background: var(--chart-ma-50); }
+.ai-index-legend .secured { background: var(--accent); }
+.ai-index-legend .unsecured { background: var(--chart-ma-50); }
+.ai-index-legend .unknown { background: var(--muted); }
+
+.ai-index-chart .bar-secured {
+  fill: var(--accent);
+}
+
+.ai-index-chart .bar-unsecured {
+  fill: var(--chart-ma-50);
+}
+
+.ai-index-chart .bar-unknown {
+  fill: var(--muted);
+}
 
 .ai-neocloud-section {
   border-top: 1px solid var(--line);
@@ -6706,6 +6721,26 @@ a.key-date-row:focus-visible {
 
 .ai-table td.ai-neocloud-stale {
   color: var(--muted);
+}
+
+.ai-neocloud-ledger td.ai-neocloud-terms {
+  text-align: left;
+}
+
+.ai-neocloud-debt th:nth-child(2),
+.ai-neocloud-debt td:nth-child(2) {
+  text-align: right;
+}
+
+.ai-neocloud-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 5px;
+  border: 1px solid var(--line-strong);
+  color: var(--muted);
+  font-size: 9px;
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
 }
 
 .ai-index-chart-panel {

@@ -8268,6 +8268,19 @@ function renderAiNeoclouds() {
   `).join("");
 
   const series = latestAiNeoclouds.series || [];
+  const debt = latestAiNeoclouds.debt || {};
+  const debtRows = (debt.companies || []).map((company) => `
+    <tr>
+      <td><span class="ai-model-name">${escapeHtml(company.name)}</span></td>
+      <td>${Number(company.instruments) || 0}</td>
+      <td>${formatNeocloudUsd(company.face)}</td>
+      <td>${formatAiPct(company.secured_share === null || company.secured_share === undefined ? null : Number(company.secured_share) * 100, false)}</td>
+      <td>${formatNeocloudYears(company.avg_tenor_years)}</td>
+      <td>${escapeHtml(company.next_maturity || "—")}${company.next_maturity_amount ? ` <span class="ai-provider">· ${formatNeocloudUsd(company.next_maturity_amount)}</span>` : ""}</td>
+      <td>${formatNeocloudUsd(company.maturing_24m)}</td>
+    </tr>
+  `).join("");
+  const undated = debt.undated || {};
   const filters = NEOCLOUD_FILTERS.map(([value, label]) => `
     <button type="button" data-neocloud-filter="${value}" aria-pressed="false">${label}</button>
   `).join("");
@@ -8315,6 +8328,32 @@ function renderAiNeoclouds() {
         </table>
       </div>
     </section>
+    <div class="ai-index-layout ai-neocloud-layout ai-neocloud-section">
+      <section class="ai-index-chart-panel">
+        <div class="ai-index-heading">
+          <h3>Debt maturity wall</h3>
+          <span>${Number(debt.instruments) || 0} instruments · ${formatNeocloudUsd(debt.face)} face · ${formatAiPct(debt.secured_share === null || debt.secured_share === undefined ? null : Number(debt.secured_share) * 100, false)} secured</span>
+        </div>
+        <div class="ai-index-chart" role="img" aria-label="Face value of neocloud debt maturing each year, split by security">
+          ${aiNeocloudMaturityChart(debt.maturity_wall || [])}
+        </div>
+        <div class="ai-index-legend">
+          <span><i class="bar secured"></i>Secured</span>
+          <span><i class="bar unsecured"></i>Unsecured</span>
+          <span><i class="bar unknown"></i>Security not stated</span>
+          <span>${Number(undated.count) || 0} without stated maturity · ${formatNeocloudUsd(undated.amount || 0)}</span>
+        </div>
+      </section>
+      <section class="ai-index-side">
+        <h3>Debt stack by issuer</h3>
+        <div class="ai-table-wrap">
+          <table class="ai-table ai-neocloud-debt">
+            <thead><tr><th>Company</th><th>Deals</th><th>Face</th><th>Secured</th><th>Avg tenor</th><th>Next maturity</th><th>Due ≤ 24M</th></tr></thead>
+            <tbody>${debtRows || '<tr><td colspan="7">No dated debt deals in range</td></tr>'}</tbody>
+          </table>
+        </div>
+      </section>
+    </div>
     <section class="ai-neocloud-section">
       <div class="ai-index-heading">
         <h3>Financing ledger</h3>
@@ -8322,7 +8361,7 @@ function renderAiNeoclouds() {
       </div>
       <div class="ai-table-wrap ai-neocloud-ledger-wrap">
         <table class="ai-table ai-neocloud-ledger">
-          <thead><tr><th>Filed</th><th>Company</th><th>Type</th><th>Amount</th><th>Detail</th></tr></thead>
+          <thead><tr><th>Filed</th><th>Company</th><th>Type</th><th>Amount</th><th>Security</th><th>Maturity</th><th>Detail</th></tr></thead>
           <tbody id="ai-neocloud-ledger"></tbody>
         </table>
       </div>
@@ -8347,7 +8386,7 @@ function renderAiNeocloudLedger() {
     (event) => aiNeocloudFilter === "all" || event.category === aiNeocloudFilter,
   );
   if (!events.length) {
-    body.innerHTML = '<tr><td colspan="5">No filings in this category</td></tr>';
+    body.innerHTML = '<tr><td colspan="7">No filings in this category</td></tr>';
     return;
   }
   body.innerHTML = events.map((event) => {
@@ -8358,12 +8397,28 @@ function renderAiNeocloudLedger() {
     const filings = Number(event.filings) > 1
       ? ` <span class="ai-provider">· ${Number(event.filings)} filings</span>`
       : "";
+    const isDebt = event.category === "debt";
+    let security = "—";
+    if (isDebt && event.secured === true) {
+      const collateral = (event.collateral || []).map(escapeHtml).join(", ");
+      security = `Secured${collateral ? ` <span class="ai-provider">· ${collateral}</span>` : ""}`;
+    } else if (isDebt && event.secured === false) {
+      security = "Unsecured";
+    }
+    const maturity = isDebt && event.maturity
+      ? `${escapeHtml(event.maturity)} <span class="ai-provider">· ${formatNeocloudYears(event.tenor_years)}</span>`
+      : "—";
+    const amendment = event.amendment
+      ? ' <span class="ai-neocloud-tag">Amendment</span>'
+      : "";
     return `
       <tr>
         <td>${escapeHtml(event.date)}</td>
         <td><span class="ai-model-name">${escapeHtml(event.company_name)}</span></td>
-        <td class="ai-neocloud-kind"><span class="${escapeHtml(event.category)}">${escapeHtml(event.kind)}</span></td>
+        <td class="ai-neocloud-kind"><span class="${escapeHtml(event.category)}">${escapeHtml(event.kind)}</span>${amendment}</td>
         <td>${formatDealAmount(event.amount, event.currency)}</td>
+        <td class="ai-neocloud-terms">${security}</td>
+        <td>${maturity}</td>
         <td class="ai-neocloud-detail">${escapeHtml(event.summary)}${filings}${link}</td>
       </tr>
     `;
@@ -8650,6 +8705,58 @@ function aiNeocloudChart(series) {
   `;
 }
 
+function aiNeocloudMaturityChart(wall) {
+  const rows = wall.filter((row) => Number(row.count) > 0);
+  if (!rows.length) return '<div class="empty-state">No dated maturities yet</div>';
+  const width = 760;
+  const height = 320;
+  const pad = { left: 54, right: 14, top: 16, bottom: 27 };
+  const billions = (value) => (Number(value) || 0) / 1e9;
+  // One slot per calendar year, so gaps between maturity years stay visible.
+  const first = Number(rows[0].year);
+  const last = Number(rows.at(-1).year);
+  const byYear = new Map(rows.map((row) => [Number(row.year), row]));
+  const years = Array.from({ length: last - first + 1 }, (_, index) => first + index);
+  const max = Math.max(
+    ...rows.map((row) => billions(row.secured) + billions(row.unsecured) + billions(row.unknown)),
+    1,
+  ) * 1.08;
+  const plotHeight = height - pad.top - pad.bottom;
+  const y = (value) => pad.top + ((max - value) / max) * plotHeight;
+  const band = (width - pad.left - pad.right) / years.length;
+  const barWidth = Math.min(46, band * 0.6);
+  const labelEvery = Math.ceil(years.length / 12);
+  const bars = years.map((year, index) => {
+    const row = byYear.get(year);
+    const center = pad.left + band * (index + 0.5);
+    const label = index % labelEvery === 0 || year === last
+      ? `<text x="${center.toFixed(1)}" y="${height - 7}" text-anchor="middle">${year}</text>`
+      : "";
+    if (!row) return label;
+    let base = 0;
+    const left = (center - barWidth / 2).toFixed(1);
+    const segments = ["secured", "unsecured", "unknown"].map((field) => {
+      const value = billions(row[field]);
+      if (value <= 0) return "";
+      const top = base + value;
+      const rect = `<rect class="bar-${field}" x="${left}" y="${y(top).toFixed(1)}" width="${barWidth.toFixed(1)}" height="${(y(base) - y(top)).toFixed(1)}" />`;
+      base = top;
+      return rect;
+    }).join("");
+    return segments + label;
+  }).join("");
+  const ticks = [max, max / 2, 0].map((value) => `
+    <line class="grid-line" x1="${pad.left}" y1="${y(value).toFixed(1)}" x2="${width - pad.right}" y2="${y(value).toFixed(1)}" />
+    <text x="5" y="${(y(value) + 3).toFixed(1)}">$${value.toFixed(0)}B</text>
+  `).join("");
+  return `
+    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
+      ${ticks}
+      ${bars}
+    </svg>
+  `;
+}
+
 function formatNeocloudUsd(value) {
   if (value === null || value === undefined) return "—";
   const number = Number(value);
@@ -8667,6 +8774,12 @@ function formatDealAmount(value, currency) {
   if (!currency || currency === "USD") return formatNeocloudUsd(value);
   const symbol = NEOCLOUD_CURRENCY_SYMBOLS[currency] || `${currency} `;
   return formatNeocloudUsd(value).replace("$", symbol);
+}
+
+function formatNeocloudYears(value) {
+  const number = Number(value);
+  if (value === null || value === undefined || !Number.isFinite(number)) return "—";
+  return `${number.toFixed(1)}y`;
 }
 
 function formatNeocloudMultiple(value) {

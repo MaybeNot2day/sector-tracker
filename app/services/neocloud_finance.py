@@ -48,6 +48,10 @@ HISTORY_QUARTERS = 12
 INSTANT_FALLBACK_DAYS = 400
 # Smaller figures in deal text are par values, share prices or fees.
 MIN_DEAL_AMOUNT = 1_000_000
+# Bump when filing parsing changes so stored filings are reviewed again.
+PARSER_VERSION = 2
+# Collateral and security language sits in the first pages of the terms.
+DEBT_TERMS_CHARS = 6000
 
 _PERIODIC_FORMS = ("10-K", "10-Q", "20-F", "40-F")
 
@@ -197,6 +201,80 @@ _PROSPECTUS_BOILERPLATE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_MONTHS = (
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december",
+)
+_ORDINALS = {
+    word: index
+    for index, words in enumerate(
+        (
+            ("first", "one"), ("second", "two"), ("third", "three"), ("fourth", "four"),
+            ("fifth", "five"), ("sixth", "six"), ("seventh", "seven"), ("eighth", "eight"),
+            ("ninth", "nine"), ("tenth", "ten"),
+        ),
+        start=1,
+    )
+    for word in words
+}
+_ORDINAL_WORDS = "|".join(_ORDINALS)
+# A maturity keyword followed within the clause by a full date; the window may
+# cross periods in names such as "DDTL 5.5 Facility" but not a semicolon.
+_MATURITY_DATE_RE = re.compile(
+    r"(?:matur\w*|due and payable|final (?:scheduled )?(?:payment|repayment) date)[^;]{0,160}?"
+    r"\b(?P<month>" + "|".join(_MONTHS) + r")\s+(?P<day>\d{1,2}),\s*(?P<year>20\d\d)",
+    re.IGNORECASE,
+)
+_ANNIVERSARY_RE = re.compile(
+    r"(?:matur\w*|until|terminat\w*)[^;]{0,160}?\b(" + _ORDINAL_WORDS + r")\s+anniversary of the"
+    r" (?:closing|effective|issue|funding|initial borrowing) date",
+    re.IGNORECASE,
+)
+_DAYS_AFTER_RE = re.compile(r"matur\w*[^;]{0,80}?\b(\d{2,4}) days after", re.IGNORECASE)
+_YEARS_AFTER_RE = re.compile(
+    r"matur\w*[^;]{0,80}?\b(\d{1,2}|" + _ORDINAL_WORDS + r") years after", re.IGNORECASE
+)
+_DUE_YEAR_RE = re.compile(r"(?:Notes|Debentures|Loans?) due (20\d\d)")
+_SECURED_RE = re.compile(
+    r"senior secured|secured by|first[- ]priority (?:lien|security interest)|collateralized by"
+    r"|security interest in|secured on a",
+    re.IGNORECASE,
+)
+_SECURED_CONVERTIBLE_RE = re.compile(
+    r"convertible senior secured|secured convertible", re.IGNORECASE
+)
+_UNSECURED_RE = re.compile(r"\bunsecured\b", re.IGNORECASE)
+_AMENDMENT_RE = re.compile(r"\bamend(?:ment|ed)\b", re.IGNORECASE)
+_COLLATERAL_PATTERNS = (
+    (
+        "GPUs",
+        re.compile(
+            r"\bGPUs?\b|graphics processing|compute equipment|computing equipment|\bservers\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "Data centers",
+        re.compile(r"data cent(?:er|re)s?|real property|\bcampus\b|leasehold", re.IGNORECASE),
+    ),
+    (
+        "Contracts",
+        re.compile(
+            r"customer contracts?|master services agreements?|receivables"
+            r"|contracted (?:cash flows|revenue)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "Equity pledge",
+        re.compile(
+            r"pledge of (?:the |all )?(?:equity|membership|capital stock)"
+            r"|equity interests? (?:in|of) the (?:borrower|issuer)",
+            re.IGNORECASE,
+        ),
+    ),
+)
+
 
 class NeocloudFinanceError(RuntimeError):
     """No current or persisted neocloud financing observations are available."""
@@ -245,7 +323,11 @@ class NeocloudFinanceService:
 
             today = self._today or datetime.now(UTC).date()
             cutoff = today - timedelta(days=EVENT_LOOKBACK_DAYS)
-            known = await asyncio.to_thread(db.load_neocloud_filing_accessions, self.database_path)
+            known = await asyncio.to_thread(
+                db.load_neocloud_filing_accessions,
+                self.database_path,
+                parser_version=PARSER_VERSION,
+            )
             results = await asyncio.gather(
                 *(self._sync_company(company, known, cutoff) for company in self.companies),
                 return_exceptions=True,
@@ -266,7 +348,12 @@ class NeocloudFinanceService:
                     db.save_neocloud_financials, self.database_path, financial_rows
                 )
             if filing_rows:
-                await asyncio.to_thread(db.save_neocloud_filings, self.database_path, filing_rows)
+                await asyncio.to_thread(
+                    db.save_neocloud_filings,
+                    self.database_path,
+                    filing_rows,
+                    parser_version=PARSER_VERSION,
+                )
             financials = await asyncio.to_thread(db.load_neocloud_financials, self.database_path)
             events = await asyncio.to_thread(db.load_neocloud_events, self.database_path)
             if not financials and not events:
@@ -341,6 +428,10 @@ class NeocloudFinanceService:
             "offering_amount": None,
             "first_sale_date": None,
             "summary": "",
+            "maturity": None,
+            "secured": None,
+            "collateral": [],
+            "amendment": False,
         }
         if form in {"S-1", "F-1"}:
             row.update(
@@ -356,7 +447,10 @@ class NeocloudFinanceService:
             return row
         if not document:
             return row
-        event = parse_filing_event(form, filing["items"], await self._get_text(url))
+        document_text = await self._get_text(url)
+        event = parse_filing_event(
+            form, filing["items"], document_text, filed=date.fromisoformat(filing["filed"])
+        )
         if event is not None:
             row.update(event)
         return row
@@ -599,7 +693,13 @@ def parse_form_d(xml_text: str) -> dict[str, object] | None:
     }
 
 
-def parse_filing_event(form: str, items: str, document: str) -> dict[str, object] | None:
+def parse_filing_event(
+    form: str,
+    items: str,
+    document: str,
+    *,
+    filed: date,
+) -> dict[str, object] | None:
     """Classify a financing filing and pull its headline amount from the text."""
     text = _document_text(document)
     item_set = {item.strip() for item in items.split(",") if item.strip()}
@@ -621,12 +721,82 @@ def parse_filing_event(form: str, items: str, document: str) -> dict[str, object
     if kind is None:
         return None
     money = _first_amount(body[:1500])
-    return {
+    event: dict[str, object] = {
         "kind": kind,
         "amount": money[1] if money else None,
         "currency": money[0] if money else None,
         "summary": _truncate(body, 320),
     }
+    if KIND_CATEGORY.get(kind) == "debt":
+        event.update(parse_debt_terms(kind, body, filed=filed))
+    return event
+
+
+def parse_debt_terms(kind: str, body: str, *, filed: date) -> dict[str, object]:
+    """Read maturity, security and collateral from a debt filing's terms.
+
+    Notes are unsecured unless the filing says otherwise; loan facilities are
+    left unknown when the text is silent, because many are secured by
+    reference to a separate collateral agreement.
+    """
+    terms = body[:DEBT_TERMS_CHARS]
+    if kind == "Convertible notes":
+        secured: bool | None = bool(_SECURED_CONVERTIBLE_RE.search(terms))
+    elif _SECURED_RE.search(terms):
+        secured = True
+    elif _UNSECURED_RE.search(terms) or kind == "Senior notes":
+        secured = False
+    else:
+        secured = None
+    collateral = (
+        [label for label, pattern in _COLLATERAL_PATTERNS if pattern.search(terms)]
+        if secured
+        else []
+    )
+    return {
+        "maturity": _maturity(body, filed),
+        "secured": secured,
+        "collateral": collateral,
+        # Amendments restate or upsize an existing facility: they stay in the
+        # ledger but must not count as a new instrument.
+        "amendment": bool(_AMENDMENT_RE.search(body[:300])),
+    }
+
+
+def _maturity(body: str, filed: date) -> str | None:
+    """Maturity as an ISO date, or a bare year when only "Notes due YYYY" is given."""
+    for match in _MATURITY_DATE_RE.finditer(body):
+        month, day, year = match.group("month", "day", "year")
+        try:
+            maturity = date(int(year), _MONTHS.index(month.lower()) + 1, int(day))
+        except ValueError:
+            continue
+        if maturity > filed:
+            return maturity.isoformat()
+    anniversary = _ANNIVERSARY_RE.search(body)
+    if anniversary:
+        return _add_years(filed, _ORDINALS[anniversary.group(1).lower()]).isoformat()
+    days = _DAYS_AFTER_RE.search(body)
+    if days:
+        return (filed + timedelta(days=int(days.group(1)))).isoformat()
+    years = _YEARS_AFTER_RE.search(body)
+    if years:
+        count = years.group(1).lower()
+        return _add_years(filed, int(count) if count.isdigit() else _ORDINALS[count]).isoformat()
+    due = _DUE_YEAR_RE.search(body)
+    return due.group(1) if due else None
+
+
+def _add_years(start: date, years: int) -> date:
+    try:
+        return start.replace(year=start.year + years)
+    except ValueError:  # 29 February
+        return start.replace(year=start.year + years, day=28)
+
+
+def maturity_date(maturity: str) -> date:
+    """A bare maturity year stands for mid-year when measuring tenor."""
+    return date(int(maturity), 7, 1) if len(maturity) == 4 else date.fromisoformat(maturity)
 
 
 def _document_text(document: str) -> str:
@@ -680,6 +850,9 @@ def _six_k_body(text: str) -> str:
 def _classify(form: str, items: set[str], lead: str) -> str | None:
     if _MERGER_RE.search(lead):
         return None
+    # Exhibit-only 6-Ks also carry status updates on legacy instruments.
+    if form == "6-K" and re.search(r"\bupdate on\b", lead, re.IGNORECASE):
+        return None
     if "3.02" in items and "1.01" not in items:
         return "Equity offering"
     if _CONVERTIBLE_RE.search(lead):
@@ -697,9 +870,6 @@ def _classify(form: str, items: set[str], lead: str) -> str | None:
     if "3.02" in items:
         return "Equity offering"
     if form == "6-K":
-        # Exhibit-only 6-Ks also carry status updates on legacy instruments.
-        if re.search(r"\bupdate on\b", lead, re.IGNORECASE):
-            return None
         return "Contract" if _CONTRACT_6K_RE.search(lead) else None
     return "Contract"
 
@@ -901,7 +1071,10 @@ def compose_payload(
                 "the filing text (facility size or principal, not drawn balance) and launch, "
                 "pricing and closing filings merged. Private issuers: Form D exempt-offering "
                 "notices (amount sold) and IPO registrations; rounds that skip Form D and "
-                "privately placed debt do not appear."
+                "privately placed debt do not appear. Debt stack: maturity, security and "
+                "collateral are read from each deal's terms; notes count as unsecured unless "
+                "stated, amendments of existing facilities and non-USD tranches are excluded "
+                "from counts and the maturity wall, and repayments before maturity are not seen."
             ),
         },
         "summary": {
@@ -921,11 +1094,117 @@ def compose_payload(
         "series": quarter_rows,
         "companies": public_rows,
         "private_companies": private_rows,
+        "debt": _debt_profile(merged, names, today=today),
         "events": [
             {**event, "company_name": names.get(str(event["company"]), event["company"])}
             for event in merged[:EVENT_LIMIT]
         ],
     }
+
+
+def _debt_profile(
+    merged: list[dict[str, object]],
+    names: dict[str, str],
+    *,
+    today: date,
+) -> dict[str, object]:
+    """Debt stack per issuer and the sector maturity wall.
+
+    Counts USD-sized debt deals that are not amendments of an existing facility
+    and have not matured yet. Face value is the facility size or principal at
+    signing, not the drawn balance, and early repayments are not visible.
+    """
+    instruments = []
+    for event in merged:
+        amount = _number(event["amount"])
+        if event["category"] != "debt" or event["amendment"] or amount is None:
+            continue
+        if event["currency"] != "USD":
+            continue
+        maturity = str(event["maturity"]) if event["maturity"] else None
+        if maturity is not None and maturity_date(maturity) <= today:
+            continue
+        instruments.append((event, amount, maturity))
+
+    horizon = _add_years(today, 2)
+    by_company: dict[str, list[tuple[dict[str, object], float, str | None]]] = defaultdict(list)
+    wall: dict[int, dict[str, float]] = defaultdict(
+        lambda: {"secured": 0.0, "unsecured": 0.0, "unknown": 0.0, "count": 0}
+    )
+    undated = {"amount": 0.0, "count": 0}
+    for event, amount, maturity in instruments:
+        by_company[str(event["company"])].append((event, amount, maturity))
+        if maturity is None:
+            undated["amount"] += amount
+            undated["count"] += 1
+            continue
+        bucket = wall[maturity_date(maturity).year]
+        security = {True: "secured", False: "unsecured"}.get(cast(Any, event["secured"]), "unknown")
+        bucket[security] += amount
+        bucket["count"] += 1
+
+    companies = []
+    for key, rows in by_company.items():
+        face = sum(amount for _, amount, _ in rows)
+        dated = [(event, amount, maturity) for event, amount, maturity in rows if maturity]
+        tenor_weight = sum(amount for event, amount, _ in dated if event["tenor_years"] is not None)
+        upcoming = sorted(dated, key=lambda row: maturity_date(str(row[2])))
+        companies.append(
+            {
+                "key": key,
+                "name": names.get(key, key),
+                "instruments": len(rows),
+                "face": face,
+                "secured_share": _secured_share(rows),
+                "avg_tenor_years": (
+                    round(
+                        sum(
+                            amount * float(cast(float, event["tenor_years"]))
+                            for event, amount, _ in dated
+                            if event["tenor_years"] is not None
+                        )
+                        / tenor_weight,
+                        1,
+                    )
+                    if tenor_weight
+                    else None
+                ),
+                "next_maturity": upcoming[0][2] if upcoming else None,
+                "next_maturity_amount": upcoming[0][1] if upcoming else None,
+                "maturing_24m": sum(
+                    amount for _, amount, maturity in dated
+                    if maturity_date(str(maturity)) <= horizon
+                ),
+                "undated": sum(amount for _, amount, maturity in rows if maturity is None),
+            }
+        )
+    companies.sort(key=lambda row: float(cast(float, row["face"])), reverse=True)
+    total_face = sum(amount for _, amount, _ in instruments)
+    return {
+        "instruments": len(instruments),
+        "face": total_face,
+        "secured_share": _secured_share(instruments),
+        "maturing_24m": sum(float(cast(float, row["maturing_24m"])) for row in companies),
+        "undated": {"amount": undated["amount"], "count": int(undated["count"])},
+        "companies": companies,
+        "maturity_wall": [
+            {
+                "year": year,
+                "secured": bucket["secured"],
+                "unsecured": bucket["unsecured"],
+                "unknown": bucket["unknown"],
+                "count": int(bucket["count"]),
+            }
+            for year, bucket in sorted(wall.items())
+        ],
+    }
+
+
+def _secured_share(rows: list[tuple[dict[str, object], float, str | None]]) -> float | None:
+    """Secured face over face whose security is stated; None when none is stated."""
+    known = sum(amount for event, amount, _ in rows if event["secured"] is not None)
+    secured = sum(amount for event, amount, _ in rows if event["secured"] is True)
+    return round(secured / known, 3) if known else None
 
 
 def _merge_events(events: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -963,9 +1242,16 @@ def _merge_events(events: list[dict[str, object]]) -> list[dict[str, object]]:
     merged: list[dict[str, object]] = []
     for cluster in clusters:
         latest = cluster[-1]
-        priced = next(
-            (event for event in reversed(cluster) if event.get("amount") is not None), None
-        )
+
+        def newest(field: str, rows: list[dict[str, object]] = cluster) -> dict[str, object]:
+            return next(
+                (event for event in reversed(rows) if event.get(field) is not None), rows[-1]
+            )
+
+        priced = newest("amount")
+        termed = newest("secured")
+        maturity = newest("maturity").get("maturity")
+        issued = date.fromisoformat(str(cluster[0]["filed_date"]))
         kind = str(latest["kind"])
         merged.append(
             {
@@ -974,12 +1260,22 @@ def _merge_events(events: list[dict[str, object]]) -> list[dict[str, object]]:
                 "form": latest["form"],
                 "kind": kind,
                 "category": KIND_CATEGORY.get(kind, "contract"),
-                "amount": priced["amount"] if priced else None,
-                "currency": priced["currency"] if priced else None,
+                "amount": priced.get("amount"),
+                "currency": priced.get("currency") if priced.get("amount") is not None else None,
                 "offering_amount": latest.get("offering_amount"),
                 "summary": latest["summary"],
                 "url": latest["url"],
                 "filings": len(cluster),
+                "maturity": maturity,
+                "tenor_years": (
+                    round((maturity_date(str(maturity)) - issued).days / 365.25, 1)
+                    if maturity
+                    else None
+                ),
+                "secured": termed.get("secured"),
+                "collateral": termed.get("collateral") or [],
+                # The launch filing says whether the deal amends a facility.
+                "amendment": bool(cluster[0].get("amendment")),
             }
         )
     merged.sort(key=lambda event: str(event["date"]), reverse=True)

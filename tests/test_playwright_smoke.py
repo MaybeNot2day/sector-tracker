@@ -426,6 +426,13 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
     page.locator('#ai-neoclouds-board button[data-neocloud-filter="debt"]').click()
     expect(ledger).to_have_count(1)
     expect(ledger.first).to_contain_text("Loan facility")
+    expect(ledger.first).to_contain_text("Secured · GPUs, Contracts")
+    expect(ledger.first).to_contain_text("2031-09-01 · 5.1y")
+    expect(page.locator("#ai-neoclouds-board .bar-secured")).to_have_count(1)
+    expect(page.locator("#ai-neoclouds-board .bar-unsecured")).to_have_count(1)
+    debt_rows = page.locator("#ai-neoclouds-board .ai-neocloud-debt tbody tr")
+    expect(debt_rows).to_have_count(1)
+    expect(debt_rows.first).to_contain_text("2031-09-01")
     expect(ledger.first.locator("a")).to_have_attribute(
         "href", "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000001/loan.htm"
     )
@@ -2642,6 +2649,31 @@ AI_NEOCLOUDS_PAYLOAD: dict[str, Any] = {
             "stale": {"debt": "2026-03-31"},
         }
     ],
+    "debt": {
+        "instruments": 2,
+        "face": 4_600_000_000,
+        "secured_share": 0.565,
+        "maturing_24m": 0,
+        "undated": {"amount": 0, "count": 0},
+        "companies": [
+            {
+                "key": "CRWV",
+                "name": "CoreWeave",
+                "instruments": 2,
+                "face": 4_600_000_000,
+                "secured_share": 0.565,
+                "avg_tenor_years": 5.3,
+                "next_maturity": "2031-09-01",
+                "next_maturity_amount": 2_600_000_000,
+                "maturing_24m": 0,
+                "undated": 0,
+            }
+        ],
+        "maturity_wall": [
+            {"year": 2031, "secured": 2_600_000_000, "unsecured": 0, "unknown": 0, "count": 1},
+            {"year": 2033, "secured": 0, "unsecured": 2_000_000_000, "unknown": 0, "count": 1},
+        ],
+    },
     "private_companies": [
         {
             "key": "FLUIDSTACK",
@@ -2669,6 +2701,11 @@ AI_NEOCLOUDS_PAYLOAD: dict[str, Any] = {
             "summary": "CoreWeave entered into a delayed draw term loan facility.",
             "url": "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000001/loan.htm",
             "filings": 1,
+            "maturity": "2031-09-01",
+            "tenor_years": 5.1,
+            "secured": True,
+            "collateral": ["GPUs", "Contracts"],
+            "amendment": False,
         },
         {
             "date": "2026-06-18",

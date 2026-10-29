@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from secrets import randbits
 
 # Version 1 adopts pre-versioned databases without rebuilding their tables.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS latest_quotes (
@@ -278,6 +278,18 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
             if statement.strip():
                 conn.execute(statement)
         conn.execute("PRAGMA user_version = 3")
+    if version < 4:
+        # Debt terms parsed from filing text. parser_version lets the service
+        # re-review filings stored by an older parser instead of trusting them.
+        for column, definition in (
+            ("maturity", "TEXT"),
+            ("secured", "INTEGER"),
+            ("collateral", "TEXT"),
+            ("amendment", "INTEGER NOT NULL DEFAULT 0"),
+            ("parser_version", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            _ensure_column(conn, "neocloud_filings", column, definition)
+        conn.execute("PRAGMA user_version = 4")
     # Also quarantine corrupt rows introduced outside the provider path. The
     # delete trigger participates in this transaction and invalidates readers.
     _quarantine_invalid_bars(conn)

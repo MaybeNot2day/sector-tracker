@@ -1648,46 +1648,63 @@ def load_neocloud_financials(path: Path) -> dict[str, list[dict[str, object]]]:
     return grouped
 
 
-def save_neocloud_filings(path: Path, rows: Sequence[dict[str, object]]) -> None:
+def save_neocloud_filings(
+    path: Path,
+    rows: Sequence[dict[str, object]],
+    *,
+    parser_version: int,
+) -> None:
     """Record reviewed SEC filings; kind NULL marks a filing that is not a deal."""
     if not rows:
         return
     init_db(path)
     fetched_at = datetime.now(UTC).isoformat()
-    values = [
-        (
-            str(row["accession"]),
-            str(row["company"]),
-            str(row["form"]),
-            str(row["filed_date"]),
-            row.get("kind"),
-            _optional_float(row.get("amount")),
-            row.get("currency"),
-            _optional_float(row.get("offering_amount")),
-            row.get("first_sale_date"),
-            str(row.get("summary") or ""),
-            str(row["url"]),
-            fetched_at,
+    values = []
+    for row in rows:
+        secured = row.get("secured")
+        collateral = cast(Sequence[str], row.get("collateral") or ())
+        values.append(
+            (
+                str(row["accession"]),
+                str(row["company"]),
+                str(row["form"]),
+                str(row["filed_date"]),
+                row.get("kind"),
+                _optional_float(row.get("amount")),
+                row.get("currency"),
+                _optional_float(row.get("offering_amount")),
+                row.get("first_sale_date"),
+                str(row.get("summary") or ""),
+                str(row["url"]),
+                row.get("maturity"),
+                None if secured is None else int(bool(secured)),
+                ",".join(collateral) or None,
+                int(bool(row.get("amendment"))),
+                parser_version,
+                fetched_at,
+            )
         )
-        for row in rows
-    ]
     with _connect(path) as conn:
         conn.executemany(
             """
             INSERT OR REPLACE INTO neocloud_filings (
                 accession, company, form, filed_date, kind, amount, currency,
-                offering_amount, first_sale_date, summary, url, fetched_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                offering_amount, first_sale_date, summary, url, maturity, secured,
+                collateral, amendment, parser_version, fetched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             values,
         )
 
 
-def load_neocloud_filing_accessions(path: Path) -> set[str]:
-    """Accessions already reviewed, so their documents are never refetched."""
+def load_neocloud_filing_accessions(path: Path, *, parser_version: int) -> set[str]:
+    """Accessions reviewed by the current parser, so their documents are not refetched."""
     init_db(path)
     with _connect(path) as conn:
-        rows = conn.execute("SELECT accession FROM neocloud_filings").fetchall()
+        rows = conn.execute(
+            "SELECT accession FROM neocloud_filings WHERE parser_version >= ?",
+            (parser_version,),
+        ).fetchall()
     return {str(row["accession"]) for row in rows}
 
 
@@ -1698,7 +1715,8 @@ def load_neocloud_events(path: Path) -> list[dict[str, object]]:
         rows = conn.execute(
             """
             SELECT accession, company, form, filed_date, kind, amount, currency,
-                   offering_amount, first_sale_date, summary, url
+                   offering_amount, first_sale_date, summary, url, maturity, secured,
+                   collateral, amendment
             FROM neocloud_filings
             WHERE kind IS NOT NULL
             ORDER BY filed_date, accession
@@ -1717,6 +1735,10 @@ def load_neocloud_events(path: Path) -> list[dict[str, object]]:
             "first_sale_date": row["first_sale_date"],
             "summary": str(row["summary"]),
             "url": str(row["url"]),
+            "maturity": row["maturity"],
+            "secured": None if row["secured"] is None else bool(row["secured"]),
+            "collateral": str(row["collateral"]).split(",") if row["collateral"] else [],
+            "amendment": bool(row["amendment"]),
         }
         for row in rows
     ]

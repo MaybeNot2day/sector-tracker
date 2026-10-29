@@ -7,9 +7,12 @@ from typing import Any, cast
 import httpx
 import pytest
 
+from app import db
 from app.services.neocloud_finance import (
+    PARSER_VERSION,
     NeocloudCompany,
     NeocloudFinanceService,
+    parse_debt_terms,
     parse_filing_event,
 )
 
@@ -112,7 +115,7 @@ DOCUMENTS = {
     ),
     "loan-close.htm": _eight_k(
         "On May 7, 2026, Acme Financing LLC upsized its delayed draw term loan facility to"
-        " $2.6 billion."
+        " $2.6 billion. The maturity date of the DDTL 2.0 Facility is May 7, 2031."
     ),
     "contract-a.htm": _eight_k(
         "On May 4, 2026, Acme Cloud entered into a master services agreement with a hyperscale"
@@ -222,6 +225,19 @@ async def test_service_builds_ledger_and_balance_sheet_from_sec_filings(tmp_path
     assert series["2026-Q2"]["announced_equity"] == 842e6
     assert not any(path.endswith("officer.htm") for path in sec.paths)
 
+    # The closing filing carries the terms; tenor runs from the launch filing.
+    debt = cast(dict[str, Any], payload["debt"])
+    assert debt["maturity_wall"] == [
+        {"year": 2031, "secured": 2.6e9, "unsecured": 0.0, "unknown": 0.0, "count": 1}
+    ]
+    stack = cast(list[dict[str, Any]], debt["companies"])
+    assert [
+        (row["key"], row["instruments"], row["secured_share"], row["avg_tenor_years"])
+        for row in stack
+    ] == [("ACME", 1, 1.0, 5.0)]
+    assert stack[0]["next_maturity"] == "2031-05-07"
+    assert loans[0]["collateral"] == ["GPUs", "Contracts"]
+
     # Reviewed filings are never fetched again.
     fetched = len(sec.archive_requests())
     await service.get_financing()
@@ -243,6 +259,38 @@ async def test_service_serves_persisted_ledger_when_sec_is_down(tmp_path: Path) 
 
     assert payload["events"] == first["events"]
     assert payload["companies"] == first["companies"]
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_filings_stored_by_an_older_parser_are_reviewed_again(tmp_path: Path) -> None:
+    database = tmp_path / "board.sqlite3"
+    url = "https://www.sec.gov/Archives/edgar/data/1/000000000126000005/loan-close.htm"
+    db.save_neocloud_filings(
+        database,
+        [
+            {
+                "accession": "0000000001-26-000005",
+                "company": "ACME",
+                "form": "8-K",
+                "filed_date": "2026-05-08",
+                "kind": "Loan facility",
+                "amount": 2.6e9,
+                "currency": "USD",
+                "url": url,
+            }
+        ],
+        parser_version=PARSER_VERSION - 1,
+    )
+    sec = FakeSec()
+    service, client = _service(database, sec)
+
+    payload = await service.get_financing()
+
+    assert "/Archives/edgar/data/1/000000000126000005/loan-close.htm" in sec.paths
+    events = cast(list[dict[str, Any]], payload["events"])
+    loans = [event for event in events if event["kind"] == "Loan facility"]
+    assert loans[0]["maturity"] == "2031-05-07"
     await client.aclose()
 
 
@@ -287,7 +335,7 @@ async def test_service_serves_persisted_ledger_when_sec_is_down(tmp_path: Path) 
 def test_filing_event_classification(
     form: str, items: str, document: str, kind: str, amount: float
 ) -> None:
-    event = parse_filing_event(form, items, document)
+    event = parse_filing_event(form, items, document, filed=date(2026, 8, 20))
 
     assert event is not None
     assert (event["kind"], event["amount"]) == (kind, amount)
@@ -299,4 +347,66 @@ def test_merger_agreement_is_not_a_financing_event() -> None:
         " Target Corp. for $9.0 billion in stock."
     )
 
-    assert parse_filing_event("8-K", "1.01", document) is None
+    assert parse_filing_event("8-K", "1.01", document, filed=date(2026, 5, 5)) is None
+
+
+@pytest.mark.parametrize(
+    ("kind", "terms", "maturity", "secured", "amendment"),
+    [
+        pytest.param(
+            "Loan facility",
+            "The DDTL 5.5 Facility provides for delayed draw term loans until December 2026."
+            " The maturity date of the DDTL 5.5 Facility is September 1, 2031.",
+            "2031-09-01",
+            None,
+            False,
+            id="explicit-date-after-dotted-facility-name",
+        ),
+        pytest.param(
+            "Loan facility",
+            "Loans may be borrowed until the fourth anniversary of the Closing Date. The"
+            " obligations are secured by a first-priority lien on the data center campus.",
+            "2030-09-24",
+            True,
+            False,
+            id="revolver-anniversary",
+        ),
+        pytest.param(
+            "Loan facility",
+            "The Term Loan Facility will mature on the date that is 364 days after the Closing"
+            " Date. Loans bear interest at a rate per annum of 1.00% plus the six (6)-month"
+            " anniversary step-up.",
+            "2027-09-23",
+            None,
+            False,
+            id="bridge-days-after-closing",
+        ),
+        pytest.param(
+            "Convertible notes",
+            "The Company issued 0.00% Convertible Senior Notes due 2032. The notes are"
+            " effectively subordinated to senior secured notes of the Company's subsidiaries.",
+            "2032",
+            False,
+            False,
+            id="convertible-unsecured-despite-subsidiary-secured-debt",
+        ),
+        pytest.param(
+            "Loan facility",
+            "Amendment No. 1 to the Credit Agreement increases commitments by $250 million.",
+            None,
+            None,
+            True,
+            id="amendment-of-existing-facility",
+        ),
+    ],
+)
+def test_debt_terms(
+    kind: str, terms: str, maturity: str | None, secured: bool | None, amendment: bool
+) -> None:
+    parsed = parse_debt_terms(kind, terms, filed=date(2026, 9, 24))
+
+    assert (parsed["maturity"], parsed["secured"], parsed["amendment"]) == (
+        maturity,
+        secured,
+        amendment,
+    )
