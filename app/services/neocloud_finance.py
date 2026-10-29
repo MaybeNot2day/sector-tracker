@@ -49,11 +49,26 @@ INSTANT_FALLBACK_DAYS = 400
 # Smaller figures in deal text are par values, share prices or fees.
 MIN_DEAL_AMOUNT = 1_000_000
 # Bump when filing parsing changes so stored filings are reviewed again.
-PARSER_VERSION = 2
+PARSER_VERSION = 3
 # Collateral and security language sits in the first pages of the terms.
 DEBT_TERMS_CHARS = 6000
 
 _PERIODIC_FORMS = ("10-K", "10-Q", "20-F", "40-F")
+_PERIODIC_FILINGS = {"10-K", "10-KT", "10-Q", "20-F", "40-F"}
+_XBRLI = "{http://www.xbrl.org/2003/instance}"
+_XBRLDI = "{http://xbrl.org/2006/xbrldi}"
+_LINKBASE_RE = re.compile(r"_(?:cal|def|lab|pre)\.xml$|FilingSummary\.xml$|MetaLinks", re.I)
+# Principal-maturity buckets as offsets from the fiscal year that contains the
+# balance-sheet date; "after year N" buckets are open-ended.
+_SCHEDULE_RE = re.compile(
+    r"^LongTermDebtMaturit\w*?(?P<bucket>RemainderOfFiscalYear|InNextRollingTwelveMonths"
+    r"|InNextTwelveMonths|InYearOne|InRollingYear(?:Two|Three|Four|Five)"
+    r"|InYear(?:Two|Three|Four|Five)|AfterRollingYear(?:Four|Five)|AfterYear(?:Four|Five))$"
+)
+_SCHEDULE_OFFSETS = {"One": 1, "Two": 2, "Three": 3, "Four": 4, "Five": 5}
+_SCHEDULE_AXES = ("LongtermDebtTypeAxis", "DebtInstrumentAxis")
+# Debt maturity wall segments, from most to least authoritative.
+WALL_SEGMENTS = ("reported", "reported_split", "after_report", "deals", "deals_amortizing")
 
 
 @dataclass(frozen=True)
@@ -230,9 +245,11 @@ _ANNIVERSARY_RE = re.compile(
     r" (?:closing|effective|issue|funding|initial borrowing) date",
     re.IGNORECASE,
 )
-_DAYS_AFTER_RE = re.compile(r"matur\w*[^;]{0,80}?\b(\d{2,4}) days after", re.IGNORECASE)
+# "will mature, and all obligations thereunder will become due and payable, on
+# the date that is 364 days after the Closing Date".
+_DAYS_AFTER_RE = re.compile(r"matur\w*[^;]{0,120}?\b(\d{2,4}) days after", re.IGNORECASE)
 _YEARS_AFTER_RE = re.compile(
-    r"matur\w*[^;]{0,80}?\b(\d{1,2}|" + _ORDINAL_WORDS + r") years after", re.IGNORECASE
+    r"matur\w*[^;]{0,120}?\b(\d{1,2}|" + _ORDINAL_WORDS + r") years after", re.IGNORECASE
 )
 _DUE_YEAR_RE = re.compile(r"(?:Notes|Debentures|Loans?) due (20\d\d)")
 _SECURED_RE = re.compile(
@@ -245,6 +262,52 @@ _SECURED_CONVERTIBLE_RE = re.compile(
 )
 _UNSECURED_RE = re.compile(r"\bunsecured\b", re.IGNORECASE)
 _AMENDMENT_RE = re.compile(r"\bamend(?:ment|ed)\b", re.IGNORECASE)
+_PERCENT = r"(\d{1,2}(?:\.\d{1,4})?)%"
+# "9.625% Senior Secured Notes", "0.00% Convertible Senior Notes".
+_COUPON_RE = re.compile(
+    _PERCENT + r"\s+(?:Senior|Secured|Convertible|Exchangeable|Unsecured|Notes|Debentures)\b",
+    re.IGNORECASE,
+)
+_PER_ANNUM_RE = re.compile(
+    r"(?:bears?|accrues?)\s+interest\s+at\s+(?:a\s+(?:fixed\s+)?rate\s+(?:of|equal\s+to)\s+)?"
+    + _PERCENT
+    + r"\s+per\s+annum",
+    re.IGNORECASE,
+)
+_SPREAD = r"(?P<low>\d{1,2}(?:\.\d{1,3})?)%(?:\s+to\s+(?P<high>\d{1,2}(?:\.\d{1,3})?)%)?"
+_FLOATING_RATE_PATTERNS = (
+    # "Term SOFR (subject to a 0.00% floor) plus an applicable margin of 2.25%"
+    re.compile(
+        # Decimal points ("a 0.00% floor") may sit inside the clause; sentence ends may not.
+        r"SOFR(?:[^.;]|\.(?=\d)){0,90}?plus\s+(?:an?\s+)?(?:applicable\s+)?(?:margin|spread)\s+"
+        r"(?:of\s+|equal\s+to\s+)?(?:ranging\s+from\s+)?" + _SPREAD,
+        re.IGNORECASE,
+    ),
+    # "4.00% plus the daily compounded SOFR"
+    re.compile(
+        _SPREAD + r"\s+plus\s+(?:the\s+)?(?:daily\s+(?:compounded|simple)\s+|term\s+)?SOFR",
+        re.IGNORECASE,
+    ),
+    # "The applicable margin will be 2.25%, in the case of Term SOFR-based loans"
+    re.compile(
+        r"applicable\s+margin\s+will\s+be\s+" + _SPREAD + r",?\s+in\s+the\s+case\s+of\s+"
+        r"(?:Term\s+)?SOFR",
+        re.IGNORECASE,
+    ),
+)
+_AMORTIZATION_RE = re.compile(
+    r"amortiz\w*[^.;]{0,160}?beginning\s+(?:on|with)\s+(?:the\s+)?(?P<month>"
+    + "|".join(_MONTHS)
+    + r")\s+(?P<day>\d{1,2}),\s*(?P<year>20\d\d)",
+    re.IGNORECASE,
+)
+_PAYMENT_FREQUENCIES = (
+    ("semi-annual", 2),
+    ("semiannual", 2),
+    ("quarterly", 4),
+    ("monthly", 12),
+    ("annual", 1),
+)
 _COLLATERAL_PATTERNS = (
     (
         "GPUs",
@@ -328,8 +391,17 @@ class NeocloudFinanceService:
                 self.database_path,
                 parser_version=PARSER_VERSION,
             )
+            stored_schedules = await asyncio.to_thread(
+                db.load_neocloud_debt_schedules, self.database_path
+            )
+            schedule_accessions = {
+                key: str(schedule["accession"]) for key, schedule in stored_schedules.items()
+            }
             results = await asyncio.gather(
-                *(self._sync_company(company, known, cutoff) for company in self.companies),
+                *(
+                    self._sync_company(company, known, cutoff, schedule_accessions)
+                    for company in self.companies
+                ),
                 return_exceptions=True,
             )
             financial_rows: list[dict[str, object]] = []
@@ -342,6 +414,10 @@ class NeocloudFinanceService:
                     continue
                 financial_rows.extend(result[0])
                 filing_rows.extend(result[1])
+                if result[2] is not None:
+                    await asyncio.to_thread(
+                        db.save_neocloud_debt_schedule, self.database_path, result[2]
+                    )
 
             if financial_rows:
                 await asyncio.to_thread(
@@ -356,12 +432,15 @@ class NeocloudFinanceService:
                 )
             financials = await asyncio.to_thread(db.load_neocloud_financials, self.database_path)
             events = await asyncio.to_thread(db.load_neocloud_events, self.database_path)
+            schedules = await asyncio.to_thread(db.load_neocloud_debt_schedules, self.database_path)
             if not financials and not events:
                 if self._cache is not None:
                     return self._cache[1]
                 raise NeocloudFinanceError("neocloud_finance_unavailable")
 
-            payload = compose_payload(self.companies, financials, events, today=today)
+            payload = compose_payload(
+                self.companies, financials, events, schedules, today=today
+            )
             self._cache = (monotonic(), payload)
             return payload
 
@@ -370,7 +449,8 @@ class NeocloudFinanceService:
         company: NeocloudCompany,
         known: set[str],
         cutoff: date,
-    ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        schedule_accessions: dict[str, str],
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, object] | None]:
         financial_rows: list[dict[str, object]] = []
         if company.listed:
             facts = await self._get_json(
@@ -405,7 +485,49 @@ class NeocloudFinanceService:
                 logger.warning("SEC filing %s for %s skipped: %s", accession, company.key, exc)
                 continue
             filing_rows.append(row)
-        return financial_rows, filing_rows
+        schedule: dict[str, object] | None = None
+        periodic = next((filing for filing in filings if filing["form"] in _PERIODIC_FILINGS), None)
+        if (
+            company.listed
+            and periodic is not None
+            and schedule_accessions.get(company.key) != periodic["accession"]
+        ):
+            try:
+                schedule = await self._fetch_schedule(company, periodic)
+            except (httpx.HTTPError, ET.ParseError, ValueError) as exc:
+                logger.warning("SEC debt schedule for %s skipped: %s", company.key, exc)
+        return financial_rows, filing_rows, schedule
+
+    async def _fetch_schedule(
+        self,
+        company: NeocloudCompany,
+        filing: dict[str, str],
+    ) -> dict[str, object]:
+        """Read the principal maturity schedule from the filing's XBRL instance."""
+        folder = f"{SEC_ARCHIVES_URL}/{company.cik}/{filing['accession'].replace('-', '')}"
+        index = await self._get_json(f"{folder}/index.json")
+        items = index.get("directory", {}).get("item", []) or []
+        names = [str(item.get("name", "")) for item in items if isinstance(item, dict)]
+        instance = next((name for name in names if name.endswith("_htm.xml")), None) or next(
+            (
+                name
+                for name in names
+                if name.endswith(".xml")
+                and not _LINKBASE_RE.search(name)
+                and name != "primary_doc.xml"
+            ),
+            None,
+        )
+        parsed: dict[str, object] = {"as_of": None, "fiscal_year_end": None, "buckets": []}
+        if instance is not None:
+            parsed = parse_reported_schedule(await self._get_bytes(f"{folder}/{instance}"))
+        return {
+            "company": company.key,
+            "accession": filing["accession"],
+            "form": filing["form"],
+            "url": f"{folder}/{filing['document']}",
+            **parsed,
+        }
 
     async def _parse_filing(
         self,
@@ -482,6 +604,10 @@ class NeocloudFinanceService:
         return cast(dict[str, Any], payload)
 
     async def _get_text(self, url: str) -> str:
+        content = await self._get_bytes(url, limit=DOCUMENT_BYTE_LIMIT)
+        return content.decode("utf-8", errors="replace")
+
+    async def _get_bytes(self, url: str, *, limit: int | None = None) -> bytes:
         client = await self._client_instance()
         await self._pace()
         chunks: list[bytes] = []
@@ -491,9 +617,9 @@ class NeocloudFinanceService:
             async for chunk in response.aiter_bytes():
                 chunks.append(chunk)
                 size += len(chunk)
-                if size >= DOCUMENT_BYTE_LIMIT:
+                if limit is not None and size >= limit:
                     break
-        return b"".join(chunks).decode(response.encoding or "utf-8", errors="replace")
+        return b"".join(chunks)
 
 
 # --- Filing index -----------------------------------------------------------
@@ -656,6 +782,118 @@ def _trailing_twelve_months(
 # --- Filing documents -------------------------------------------------------
 
 
+def parse_reported_schedule(instance: bytes) -> dict[str, object]:
+    """Principal maturity schedule tagged in a 10-Q/10-K XBRL instance.
+
+    Uses the undimensioned schedule when the issuer tags one; otherwise sums the
+    schedule tagged per debt type (or per instrument). Buckets are mapped to
+    fiscal-year end years: the remainder of the current fiscal year is offset 0,
+    "year one" the next fiscal year, and "after year N" stays open-ended.
+    """
+    root = ET.fromstring(instance)
+    contexts: dict[str, tuple[dict[str, str], str]] = {}
+    for context in root.iter(f"{_XBRLI}context"):
+        dims = {
+            str(member.get("dimension", "")).split(":")[-1]: (member.text or "").strip()
+            for member in context.iter(f"{_XBRLDI}explicitMember")
+        }
+        period = context.find(f"{_XBRLI}period")
+        when = ""
+        if period is not None:
+            when = (
+                period.findtext(f"{_XBRLI}instant") or period.findtext(f"{_XBRLI}endDate") or ""
+            ).strip()
+        contexts[str(context.get("id"))] = (dims, when)
+    units = {
+        str(unit.get("id")): " ".join(
+            (measure.text or "") for measure in unit.iter(f"{_XBRLI}measure")
+        )
+        for unit in root.iter(f"{_XBRLI}unit")
+    }
+    as_of: str | None = None
+    fiscal_year_end: str | None = None
+    tagged: list[tuple[str, dict[str, str], str, float]] = []
+    for element in root:
+        name = element.tag.rsplit("}", 1)[-1]
+        if name == "DocumentPeriodEndDate" and element.text:
+            as_of = element.text.strip()
+        elif name == "CurrentFiscalYearEndDate" and element.text:
+            fiscal_year_end = element.text.strip()
+        match = _SCHEDULE_RE.match(name)
+        if match is None or "Interest" in name or not element.text:
+            continue
+        if units.get(str(element.get("unitRef")), "") != "iso4217:USD":
+            continue
+        dims, when = contexts.get(str(element.get("contextRef")), ({}, ""))
+        value = _number(element.text.strip())
+        if value is not None:
+            tagged.append((match.group("bucket"), dims, when, value))
+    try:
+        balance_date = date.fromisoformat(str(as_of))
+    except ValueError:
+        return {"as_of": None, "fiscal_year_end": fiscal_year_end, "buckets": []}
+
+    groups: dict[tuple[str, str], dict[tuple[int, bool], float]] = defaultdict(dict)
+    for bucket, dims, when, value in tagged:
+        if when != balance_date.isoformat():
+            continue
+        if not dims:
+            group = ("", "")
+        elif len(dims) == 1 and next(iter(dims)) in _SCHEDULE_AXES:
+            axis, member = next(iter(dims.items()))
+            group = (axis, member)
+        else:
+            continue
+        groups[group].setdefault(_schedule_offset(bucket), value)
+    if ("", "") in groups:
+        chosen = [groups[("", "")]]
+    else:
+        chosen_axis = next(
+            (name for name in _SCHEDULE_AXES if any(group[0] == name for group in groups)), None
+        )
+        chosen = [values for (axis_name, _), values in groups.items() if axis_name == chosen_axis]
+    totals: dict[tuple[int, bool], float] = defaultdict(float)
+    for values in chosen:
+        for key, value in values.items():
+            totals[key] += value
+    base_year = _fiscal_base_year(balance_date, fiscal_year_end)
+    return {
+        "as_of": balance_date.isoformat(),
+        "fiscal_year_end": fiscal_year_end,
+        "buckets": [
+            {"offset": offset, "year": base_year + offset, "open": is_open, "amount": amount}
+            for (offset, is_open), amount in sorted(totals.items())
+            if amount
+        ],
+    }
+
+
+def _schedule_offset(bucket: str) -> tuple[int, bool]:
+    if bucket == "RemainderOfFiscalYear":
+        return 0, False
+    if bucket in {"InNextTwelveMonths", "InNextRollingTwelveMonths", "InYearOne"}:
+        return 1, False
+    year = _SCHEDULE_OFFSETS[re.sub(r"^(?:In|After)(?:Rolling)?Year", "", bucket)]
+    # "After year four" starts in fiscal year five.
+    return (year + 1, True) if bucket.startswith("After") else (year, False)
+
+
+def _fiscal_base_year(balance_date: date, fiscal_year_end: str | None) -> int:
+    """Year in which the fiscal year containing the balance-sheet date ends."""
+    year_end = _fiscal_year_end_date(balance_date.year, fiscal_year_end)
+    return balance_date.year if year_end >= balance_date else balance_date.year + 1
+
+
+def _fiscal_year_end_date(year: int, fiscal_year_end: object) -> date:
+    """Last day of the fiscal year ending in `year` ("--06-30" style, default December)."""
+    match = re.fullmatch(r"--(\d{2})-(\d{2})", str(fiscal_year_end or ""))
+    month, day = (int(match.group(1)), int(match.group(2))) if match else (12, 31)
+    try:
+        return date(year, month, day)
+    except ValueError:  # --02-29 in a common year
+        return date(year, month, 28)
+
+
 def parse_form_d(xml_text: str) -> dict[str, object] | None:
     """Read the offering size and security type from a Form D notice."""
     root = ET.fromstring(xml_text)
@@ -753,6 +991,21 @@ def parse_debt_terms(kind: str, body: str, *, filed: date) -> dict[str, object]:
         if secured
         else []
     )
+    amortization = _AMORTIZATION_RE.search(body)
+    amortization_start: str | None = None
+    frequency: int | None = None
+    if amortization:
+        month, day, year = amortization.group("month", "day", "year")
+        try:
+            amortization_start = date(
+                int(year), _MONTHS.index(month.lower()) + 1, int(day)
+            ).isoformat()
+        except ValueError:
+            amortization_start = None
+        window = body[max(amortization.start() - 160, 0) : amortization.end()].lower()
+        frequency = next(
+            (count for word, count in _PAYMENT_FREQUENCIES if word in window), None
+        )
     return {
         "maturity": _maturity(body, filed),
         "secured": secured,
@@ -760,7 +1013,29 @@ def parse_debt_terms(kind: str, body: str, *, filed: date) -> dict[str, object]:
         # Amendments restate or upsize an existing facility: they stay in the
         # ledger but must not count as a new instrument.
         "amendment": bool(_AMENDMENT_RE.search(body[:300])),
+        "rate": _rate(kind, terms),
+        "amortization_start": amortization_start,
+        "amortization_frequency": frequency if amortization_start else None,
     }
+
+
+def _rate(kind: str, terms: str) -> str | None:
+    """Coupon ("9.625%") or floating spread ("SOFR + 2.25%") as the filing states it.
+
+    Loans quote a spread over SOFR; the base-rate alternative ("federal funds
+    rate plus 0.50%") is never taken for the spread. Notes quote a coupon.
+    """
+    floating = next(
+        (match for pattern in _FLOATING_RATE_PATTERNS if (match := pattern.search(terms))), None
+    )
+    fixed = _COUPON_RE.search(terms) or _PER_ANNUM_RE.search(terms)
+    if floating and (kind == "Loan facility" or fixed is None):
+        low, high = floating.group("low"), floating.groupdict().get("high")
+        spread = f"{float(low):g}%" if not high else f"{float(low):g}–{float(high):g}%"
+        return f"SOFR + {spread}"
+    if fixed:
+        return f"{float(fixed.group(1)):g}%"
+    return None
 
 
 def _maturity(body: str, filed: date) -> str | None:
@@ -797,6 +1072,21 @@ def _add_years(start: date, years: int) -> date:
 def maturity_date(maturity: str) -> date:
     """A bare maturity year stands for mid-year when measuring tenor."""
     return date(int(maturity), 7, 1) if len(maturity) == 4 else date.fromisoformat(maturity)
+
+
+def _payment_dates(start: date, end: date, per_year: int) -> list[date]:
+    step = 12 // per_year
+    dates: list[date] = []
+    current = start
+    while current <= end:
+        dates.append(current)
+        month = current.month - 1 + step
+        year = current.year + month // 12
+        try:
+            current = current.replace(year=year, month=month % 12 + 1)
+        except ValueError:  # day past month end
+            current = current.replace(year=year, month=month % 12 + 1, day=28)
+    return dates
 
 
 def _document_text(document: str) -> str:
@@ -924,6 +1214,7 @@ def compose_payload(
     companies: tuple[NeocloudCompany, ...],
     financials: dict[str, list[dict[str, object]]],
     events: list[dict[str, object]],
+    schedules: dict[str, dict[str, object]] | None = None,
     *,
     today: date,
 ) -> dict[str, object]:
@@ -1071,10 +1362,13 @@ def compose_payload(
                 "the filing text (facility size or principal, not drawn balance) and launch, "
                 "pricing and closing filings merged. Private issuers: Form D exempt-offering "
                 "notices (amount sold) and IPO registrations; rounds that skip Form D and "
-                "privately placed debt do not appear. Debt stack: maturity, security and "
-                "collateral are read from each deal's terms; notes count as unsecured unless "
-                "stated, amendments of existing facilities and non-USD tranches are excluded "
-                "from counts and the maturity wall, and repayments before maturity are not seen."
+                "privately placed debt do not appear. Debt: rate, maturity, amortization start, "
+                "security and collateral are read from each deal's terms (notes count as "
+                "unsecured unless stated). The maturity wall uses each issuer's own 10-Q/10-K "
+                "principal schedule where tagged, splits its open-ended last bucket by the "
+                "issuer's deal maturities (estimate), adds deals signed after that report as "
+                "commitments, and falls back to deal terms elsewhere. Amendments of existing "
+                "facilities and non-USD tranches are excluded."
             ),
         },
         "summary": {
@@ -1094,7 +1388,13 @@ def compose_payload(
         "series": quarter_rows,
         "companies": public_rows,
         "private_companies": private_rows,
-        "debt": _debt_profile(merged, names, today=today),
+        "debt": _debt_profile(
+            merged,
+            names,
+            schedules or {},
+            {str(row["key"]): _number(row["debt"]) for row in public_rows},
+            today=today,
+        ),
         "events": [
             {**event, "company_name": names.get(str(event["company"]), event["company"])}
             for event in merged[:EVENT_LIMIT]
@@ -1105,16 +1405,22 @@ def compose_payload(
 def _debt_profile(
     merged: list[dict[str, object]],
     names: dict[str, str],
+    schedules: dict[str, dict[str, object]],
+    balance_debt: dict[str, float | None],
     *,
     today: date,
 ) -> dict[str, object]:
     """Debt stack per issuer and the sector maturity wall.
 
-    Counts USD-sized debt deals that are not amendments of an existing facility
-    and have not matured yet. Face value is the facility size or principal at
-    signing, not the drawn balance, and early repayments are not visible.
+    An issuer's own principal maturity schedule from its latest 10-Q/10-K is the
+    base: it is outstanding debt and already reflects amortization. Its
+    open-ended "after year N" bucket is split across years in proportion to the
+    issuer's deal maturities (an estimate, kept as its own segment). Debt deals
+    signed after that report are added as commitments. Issuers that tag no
+    schedule fall back to deal terms: principal at maturity, or equal
+    installments from a stated amortization start (also an estimate).
     """
-    instruments = []
+    deals: dict[str, list[tuple[dict[str, object], float, str | None]]] = defaultdict(list)
     for event in merged:
         amount = _number(event["amount"])
         if event["category"] != "debt" or event["amendment"] or amount is None:
@@ -1124,37 +1430,68 @@ def _debt_profile(
         maturity = str(event["maturity"]) if event["maturity"] else None
         if maturity is not None and maturity_date(maturity) <= today:
             continue
-        instruments.append((event, amount, maturity))
+        deals[str(event["company"])].append((event, amount, maturity))
 
-    horizon = _add_years(today, 2)
-    by_company: dict[str, list[tuple[dict[str, object], float, str | None]]] = defaultdict(list)
-    wall: dict[int, dict[str, float]] = defaultdict(
-        lambda: {"secured": 0.0, "unsecured": 0.0, "unknown": 0.0, "count": 0}
-    )
-    undated = {"amount": 0.0, "count": 0}
-    for event, amount, maturity in instruments:
-        by_company[str(event["company"])].append((event, amount, maturity))
-        if maturity is None:
-            undated["amount"] += amount
-            undated["count"] += 1
-            continue
-        bucket = wall[maturity_date(maturity).year]
-        security = {True: "secured", False: "unsecured"}.get(cast(Any, event["secured"]), "unknown")
-        bucket[security] += amount
-        bucket["count"] += 1
-
+    due_year = today.year + 2
+    sector: dict[int, dict[str, float]] = defaultdict(lambda: dict.fromkeys(WALL_SEGMENTS, 0.0))
     companies = []
-    for key, rows in by_company.items():
-        face = sum(amount for _, amount, _ in rows)
+    for key in names:
+        rows = deals.get(key, [])
+        schedule = schedules.get(key)
+        buckets = cast(list[dict[str, Any]], schedule.get("buckets") or []) if schedule else []
+        reported = bool(buckets) and schedule is not None and schedule.get("as_of") is not None
+        if not rows and not reported:
+            continue
+        wall: dict[int, dict[str, float]] = defaultdict(lambda: dict.fromkeys(WALL_SEGMENTS, 0.0))
+        unallocated: dict[str, object] | None = None
+        undated = [(event, amount) for event, amount, maturity in rows if maturity is None]
+        after_report: list[tuple[dict[str, object], float, str | None]] = []
+        if reported and schedule is not None:
+            as_of = str(schedule["as_of"])
+            before = [row for row in rows if str(row[0]["date"]) <= as_of]
+            after_report = [row for row in rows if str(row[0]["date"]) > as_of]
+            for bucket in buckets:
+                year, amount = int(bucket["year"]), float(bucket["amount"])
+                if not bucket["open"]:
+                    wall[year]["reported"] += amount
+                    continue
+                profile: dict[int, float] = defaultdict(float)
+                # The bucket opens the day after the previous fiscal year ends.
+                opens = _fiscal_year_end_date(year - 1, schedule.get("fiscal_year_end"))
+                for event, face, maturity in before:
+                    for paid_on, paid in _deal_payments(event, face, maturity, today):
+                        if paid_on > opens:
+                            profile[paid_on.year] += paid
+                weight = sum(profile.values())
+                if not weight:
+                    unallocated = {"from_year": year, "amount": amount}
+                    continue
+                for paid_year, paid in profile.items():
+                    wall[paid_year]["reported_split"] += amount * paid / weight
+            for event, face, maturity in after_report:
+                for paid_on, paid in _deal_payments(event, face, maturity, today):
+                    wall[paid_on.year]["after_report"] += paid
+        else:
+            for event, face, maturity in rows:
+                segment = "deals_amortizing" if event["amortization_start"] else "deals"
+                for paid_on, paid in _deal_payments(event, face, maturity, today):
+                    wall[paid_on.year][segment] += paid
+
+        for year, segments in wall.items():
+            for segment, amount in segments.items():
+                sector[year][segment] += amount
         dated = [(event, amount, maturity) for event, amount, maturity in rows if maturity]
         tenor_weight = sum(amount for event, amount, _ in dated if event["tenor_years"] is not None)
         upcoming = sorted(dated, key=lambda row: maturity_date(str(row[2])))
         companies.append(
             {
                 "key": key,
-                "name": names.get(key, key),
+                "name": names[key],
+                "basis": "reported" if reported else "deals",
+                "schedule": _schedule_detail(schedule) if reported and schedule else None,
+                "balance_sheet_debt": balance_debt.get(key),
                 "instruments": len(rows),
-                "face": face,
+                "face": sum(amount for _, amount, _ in rows),
                 "secured_share": _secured_share(rows),
                 "avg_tenor_years": (
                     round(
@@ -1171,33 +1508,102 @@ def _debt_profile(
                 ),
                 "next_maturity": upcoming[0][2] if upcoming else None,
                 "next_maturity_amount": upcoming[0][1] if upcoming else None,
-                "maturing_24m": sum(
-                    amount for _, amount, maturity in dated
-                    if maturity_date(str(maturity)) <= horizon
+                "after_report": {
+                    "count": len(after_report),
+                    "amount": sum(amount for _, amount, _ in after_report),
+                },
+                "undated": {"count": len(undated), "amount": sum(a for _, a in undated)},
+                "unallocated": unallocated,
+                "due_through": sum(
+                    sum(segments.values()) for year, segments in wall.items() if year <= due_year
                 ),
-                "undated": sum(amount for _, amount, maturity in rows if maturity is None),
+                "wall": _wall_rows(wall),
             }
         )
-    companies.sort(key=lambda row: float(cast(float, row["face"])), reverse=True)
-    total_face = sum(amount for _, amount, _ in instruments)
+    companies.sort(
+        key=lambda row: float(
+            cast(float, cast(dict[str, Any], row["schedule"])["total"])
+            if row["schedule"]
+            else cast(float, row["face"])
+        ),
+        reverse=True,
+    )
+    all_deals = [row for rows in deals.values() for row in rows]
     return {
-        "instruments": len(instruments),
-        "face": total_face,
-        "secured_share": _secured_share(instruments),
-        "maturing_24m": sum(float(cast(float, row["maturing_24m"])) for row in companies),
-        "undated": {"amount": undated["amount"], "count": int(undated["count"])},
+        "instruments": len(all_deals),
+        "face": sum(amount for _, amount, _ in all_deals),
+        "secured_share": _secured_share(all_deals),
+        "reported_companies": sum(1 for row in companies if row["basis"] == "reported"),
+        "due_through_year": due_year,
+        "due_through": sum(float(cast(float, row["due_through"])) for row in companies),
+        "undated": {
+            "count": sum(cast(dict[str, int], row["undated"])["count"] for row in companies),
+            "amount": sum(cast(dict[str, float], row["undated"])["amount"] for row in companies),
+        },
+        "unallocated": sum(
+            float(cast(float, cast(dict[str, Any], row["unallocated"])["amount"]))
+            for row in companies
+            if row["unallocated"]
+        ),
         "companies": companies,
-        "maturity_wall": [
+        "maturity_wall": _wall_rows(sector),
+    }
+
+
+def _deal_payments(
+    event: dict[str, object],
+    face: float,
+    maturity: str | None,
+    today: date,
+) -> list[tuple[date, float]]:
+    """Remaining principal payments of one deal.
+
+    Principal is due at maturity unless the filing states an amortization
+    start; then equal installments are assumed at the stated frequency
+    (semi-annual when unstated) because the actual amounts sit in the indenture.
+    """
+    if maturity is None:
+        return []
+    end = maturity_date(maturity)
+    start_text = event.get("amortization_start")
+    start = date.fromisoformat(str(start_text)) if start_text else None
+    if start is None or start >= end:
+        return [(end, face)] if end > today else []
+    per_year = int(cast(int, event.get("amortization_frequency") or 2))
+    dates = _payment_dates(start, end, per_year)
+    installment = face / len(dates)
+    return [(paid, installment) for paid in dates if paid > today]
+
+
+def _schedule_detail(schedule: dict[str, object]) -> dict[str, object]:
+    buckets = cast(list[dict[str, Any]], schedule["buckets"])
+    fiscal_year_end = str(schedule.get("fiscal_year_end") or "--12-31")
+    prefix = "" if fiscal_year_end == "--12-31" else "FY"
+    return {
+        "as_of": schedule["as_of"],
+        "form": schedule["form"],
+        "url": schedule["url"],
+        "fiscal_year_end": fiscal_year_end,
+        "total": sum(float(bucket["amount"]) for bucket in buckets),
+        "buckets": [
             {
-                "year": year,
-                "secured": bucket["secured"],
-                "unsecured": bucket["unsecured"],
-                "unknown": bucket["unknown"],
-                "count": int(bucket["count"]),
+                "label": f"{prefix}{bucket['year']}" + ("+" if bucket["open"] else "")
+                + (" remainder" if bucket["offset"] == 0 else ""),
+                "year": bucket["year"],
+                "open": bucket["open"],
+                "amount": bucket["amount"],
             }
-            for year, bucket in sorted(wall.items())
+            for bucket in buckets
         ],
     }
+
+
+def _wall_rows(wall: dict[int, dict[str, float]]) -> list[dict[str, object]]:
+    return [
+        {"year": year, **{segment: round(value, 2) for segment, value in segments.items()}}
+        for year, segments in sorted(wall.items())
+        if any(segments.values())
+    ]
 
 
 def _secured_share(rows: list[tuple[dict[str, object], float, str | None]]) -> float | None:
@@ -1276,6 +1682,11 @@ def _merge_events(events: list[dict[str, object]]) -> list[dict[str, object]]:
                 "collateral": termed.get("collateral") or [],
                 # The launch filing says whether the deal amends a facility.
                 "amendment": bool(cluster[0].get("amendment")),
+                "rate": newest("rate").get("rate"),
+                "amortization_start": newest("amortization_start").get("amortization_start"),
+                "amortization_frequency": newest("amortization_start").get(
+                    "amortization_frequency"
+                ),
             }
         )
     merged.sort(key=lambda event: str(event["date"]), reverse=True)

@@ -220,6 +220,7 @@ let latestAiNeoclouds = null;
 let aiNeocloudsFetchedAt = 0;
 let aiNeocloudsLoading = false;
 let aiNeocloudFilter = "all";
+let aiNeocloudDebtCompany = "";
 const NEOCLOUD_FILTERS = [
   ["all", "All"],
   ["debt", "Debt"],
@@ -227,6 +228,13 @@ const NEOCLOUD_FILTERS = [
   ["contract", "Contracts"],
 ];
 const NEOCLOUD_CURRENCY_SYMBOLS = { USD: "$", EUR: "€", GBP: "£", AUD: "A$", CAD: "C$" };
+const NEOCLOUD_WALL_SEGMENTS = [
+  ["reported", "Reported principal (10-Q/10-K)"],
+  ["reported_split", "Reported after-year bucket, split by deal maturities (est.)"],
+  ["after_report", "Signed after latest report (commitment)"],
+  ["deals", "Deal terms, due at maturity (no reported schedule)"],
+  ["deals_amortizing", "Deal terms, equal installments assumed (est.)"],
+];
 
 let latestAiHardware = null;
 let aiHardwareFetchedAt = 0;
@@ -862,6 +870,14 @@ function init() {
   });
   aiSectionTabs.addEventListener("keydown", handleAiSectionKeydown);
   aiNeocloudsBoard.addEventListener("click", (event) => {
+    const company = event.target.closest("button[data-neocloud-company]");
+    if (company) {
+      const key = company.dataset.neocloudCompany || "";
+      aiNeocloudDebtCompany = key === aiNeocloudDebtCompany ? "" : key;
+      renderAiNeocloudDebt();
+      renderAiNeocloudLedger();
+      return;
+    }
     const button = event.target.closest("button[data-neocloud-filter]");
     if (!button) return;
     aiNeocloudFilter = button.dataset.neocloudFilter || "all";
@@ -8268,19 +8284,6 @@ function renderAiNeoclouds() {
   `).join("");
 
   const series = latestAiNeoclouds.series || [];
-  const debt = latestAiNeoclouds.debt || {};
-  const debtRows = (debt.companies || []).map((company) => `
-    <tr>
-      <td><span class="ai-model-name">${escapeHtml(company.name)}</span></td>
-      <td>${Number(company.instruments) || 0}</td>
-      <td>${formatNeocloudUsd(company.face)}</td>
-      <td>${formatAiPct(company.secured_share === null || company.secured_share === undefined ? null : Number(company.secured_share) * 100, false)}</td>
-      <td>${formatNeocloudYears(company.avg_tenor_years)}</td>
-      <td>${escapeHtml(company.next_maturity || "—")}${company.next_maturity_amount ? ` <span class="ai-provider">· ${formatNeocloudUsd(company.next_maturity_amount)}</span>` : ""}</td>
-      <td>${formatNeocloudUsd(company.maturing_24m)}</td>
-    </tr>
-  `).join("");
-  const undated = debt.undated || {};
   const filters = NEOCLOUD_FILTERS.map(([value, label]) => `
     <button type="button" data-neocloud-filter="${value}" aria-pressed="false">${label}</button>
   `).join("");
@@ -8328,40 +8331,15 @@ function renderAiNeoclouds() {
         </table>
       </div>
     </section>
-    <div class="ai-index-layout ai-neocloud-layout ai-neocloud-section">
-      <section class="ai-index-chart-panel">
-        <div class="ai-index-heading">
-          <h3>Debt maturity wall</h3>
-          <span>${Number(debt.instruments) || 0} instruments · ${formatNeocloudUsd(debt.face)} face · ${formatAiPct(debt.secured_share === null || debt.secured_share === undefined ? null : Number(debt.secured_share) * 100, false)} secured</span>
-        </div>
-        <div class="ai-index-chart" role="img" aria-label="Face value of neocloud debt maturing each year, split by security">
-          ${aiNeocloudMaturityChart(debt.maturity_wall || [])}
-        </div>
-        <div class="ai-index-legend">
-          <span><i class="bar secured"></i>Secured</span>
-          <span><i class="bar unsecured"></i>Unsecured</span>
-          <span><i class="bar unknown"></i>Security not stated</span>
-          <span>${Number(undated.count) || 0} without stated maturity · ${formatNeocloudUsd(undated.amount || 0)}</span>
-        </div>
-      </section>
-      <section class="ai-index-side">
-        <h3>Debt stack by issuer</h3>
-        <div class="ai-table-wrap">
-          <table class="ai-table ai-neocloud-debt">
-            <thead><tr><th>Company</th><th>Deals</th><th>Face</th><th>Secured</th><th>Avg tenor</th><th>Next maturity</th><th>Due ≤ 24M</th></tr></thead>
-            <tbody>${debtRows || '<tr><td colspan="7">No dated debt deals in range</td></tr>'}</tbody>
-          </table>
-        </div>
-      </section>
-    </div>
+    <div id="ai-neocloud-debt-section" class="ai-neocloud-section"></div>
     <section class="ai-neocloud-section">
       <div class="ai-index-heading">
-        <h3>Financing ledger</h3>
+        <h3>Financing ledger<span id="ai-neocloud-ledger-scope"></span></h3>
         <div class="category-tabs" role="group" aria-label="Financing ledger filter">${filters}</div>
       </div>
       <div class="ai-table-wrap ai-neocloud-ledger-wrap">
         <table class="ai-table ai-neocloud-ledger">
-          <thead><tr><th>Filed</th><th>Company</th><th>Type</th><th>Amount</th><th>Security</th><th>Maturity</th><th>Detail</th></tr></thead>
+          <thead><tr><th>Filed</th><th>Company</th><th>Type</th><th>Amount</th><th>Rate</th><th>Security</th><th>Maturity</th><th>Detail</th></tr></thead>
           <tbody id="ai-neocloud-ledger"></tbody>
         </table>
       </div>
@@ -8371,7 +8349,120 @@ function renderAiNeoclouds() {
       * Balance an issuer stopped tagging; hover for its last reported date.
     </div>
   `;
+  renderAiNeocloudDebt();
   renderAiNeocloudLedger();
+}
+
+
+function renderAiNeocloudDebt() {
+  const container = aiNeocloudsBoard.querySelector("#ai-neocloud-debt-section");
+  if (!container || !latestAiNeoclouds) return;
+  const debt = latestAiNeoclouds.debt || {};
+  const companies = debt.companies || [];
+  const selected = companies.find((company) => company.key === aiNeocloudDebtCompany) || null;
+  if (!selected) aiNeocloudDebtCompany = "";
+  const wall = selected ? selected.wall || [] : debt.maturity_wall || [];
+  const dueYear = Number(debt.due_through_year) || "";
+  const share = (value) => formatAiPct(
+    value === null || value === undefined ? null : Number(value) * 100,
+    false,
+  );
+  const rows = companies.map((company) => {
+    const active = company.key === aiNeocloudDebtCompany;
+    const schedule = company.schedule;
+    const basis = schedule
+      ? `${schedule.form} · ${schedule.as_of}`
+      : "deal terms only";
+    const next = company.next_maturity
+      ? `${escapeHtml(company.next_maturity)} <span class="ai-provider">· ${formatNeocloudUsd(company.next_maturity_amount)}</span>`
+      : "—";
+    return `
+      <tr class="${active ? "selected" : ""}">
+        <td>
+          <button type="button" class="ai-neocloud-company" data-neocloud-company="${escapeHtml(company.key)}" aria-pressed="${active}">${escapeHtml(company.name)}</button>
+          <span class="ai-capex-symbol">${escapeHtml(basis)}</span>
+        </td>
+        <td>${schedule ? formatNeocloudUsd(schedule.total) : "—"}</td>
+        <td>${Number(company.instruments) || 0} <span class="ai-provider">· ${formatNeocloudUsd(company.face)}</span></td>
+        <td>${share(company.secured_share)}</td>
+        <td>${formatNeocloudYears(company.avg_tenor_years)}</td>
+        <td>${next}</td>
+        <td>${formatNeocloudUsd(company.due_through)}</td>
+      </tr>
+    `;
+  }).join("");
+  const undated = (selected ? selected.undated : debt.undated) || {};
+  const unallocated = selected ? selected.unallocated?.amount : debt.unallocated;
+  const notes = [
+    Number(undated.count)
+      ? `${Number(undated.count)} debt ${Number(undated.count) === 1 ? "deal" : "deals"} without a stated maturity · ${formatNeocloudUsd(undated.amount)}`
+      : "",
+    Number(unallocated)
+      ? `${formatNeocloudUsd(unallocated)} reported for later years with no deal to date it`
+      : "",
+  ].filter(Boolean).map((note) => `<span>${escapeHtml(note)}</span>`).join("");
+  const legend = NEOCLOUD_WALL_SEGMENTS
+    .filter(([field]) => wall.some((row) => Number(row[field]) > 0))
+    .map(([field, label]) => `<span><i class="bar wall-${field}"></i>${escapeHtml(label)}</span>`)
+    .join("");
+  const heading = selected
+    ? `${escapeHtml(selected.name)} · <button type="button" class="ai-table-link ai-neocloud-reset" data-neocloud-company="">All issuers</button>`
+    : `Sector · ${Number(debt.reported_companies) || 0} of ${companies.length} issuers report a schedule`;
+  container.innerHTML = `
+    <div class="ai-index-layout ai-neocloud-layout">
+      <section class="ai-index-chart-panel">
+        <div class="ai-index-heading">
+          <h3>Debt maturity wall</h3>
+          <span>${heading}</span>
+        </div>
+        <div class="ai-index-chart" role="img" aria-label="Debt principal due each year by source">
+          ${aiNeocloudMaturityChart(wall)}
+        </div>
+        <div class="ai-index-legend">${legend}${notes}</div>
+        ${selected ? aiNeocloudDebtDetail(selected) : ""}
+      </section>
+      <section class="ai-index-side">
+        <h3>Debt stack by issuer · click to drill in</h3>
+        <div class="ai-table-wrap">
+          <table class="ai-table ai-neocloud-debt">
+            <thead><tr><th>Company</th><th>Reported principal</th><th>Debt deals</th><th>Secured</th><th>Avg tenor</th><th>Next deal maturity</th><th>Due ${dueYear ? `≤ ${dueYear}` : ""}</th></tr></thead>
+            <tbody>${rows || '<tr><td colspan="7">No debt in range</td></tr>'}</tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function aiNeocloudDebtDetail(company) {
+  const schedule = company.schedule;
+  const afterReport = company.after_report || {};
+  const parts = [];
+  if (schedule) {
+    const url = String(schedule.url || "");
+    const link = url.startsWith("https://www.sec.gov/")
+      ? `<a class="ai-table-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(schedule.form)} ${escapeHtml(schedule.as_of)}</a>`
+      : `${escapeHtml(schedule.form)} ${escapeHtml(schedule.as_of)}`;
+    const buckets = (schedule.buckets || []).map((bucket) => `
+      <tr><td>${escapeHtml(bucket.label)}</td><td>${formatNeocloudUsd(bucket.amount)}</td></tr>
+    `).join("");
+    parts.push(`
+      <p>Principal maturities as reported in ${link}: ${formatNeocloudUsd(schedule.total)} against ${formatNeocloudUsd(company.balance_sheet_debt)} balance-sheet debt.</p>
+      <table class="ai-table ai-neocloud-schedule">
+        <thead><tr><th>Fiscal period</th><th>Principal due</th></tr></thead>
+        <tbody>${buckets}</tbody>
+      </table>
+    `);
+  } else {
+    parts.push(`
+      <p>No principal maturity schedule is tagged in the latest 10-Q/10-K, so the wall uses deal terms at signing. Facility sizes can exceed drawn balances, and repayments before maturity are not visible.</p>
+    `);
+  }
+  if (Number(afterReport.count)) {
+    const count = Number(afterReport.count);
+    parts.push(`<p>${count} debt ${count === 1 ? "deal" : "deals"} signed after the report: ${formatNeocloudUsd(afterReport.amount)} of commitments.</p>`);
+  }
+  return `<div class="ai-neocloud-detail-block">${parts.join("")}</div>`;
 }
 
 function renderAiNeocloudLedger() {
@@ -8382,11 +8473,17 @@ function renderAiNeocloudLedger() {
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", String(active));
   });
+  const scope = aiNeocloudsBoard.querySelector("#ai-neocloud-ledger-scope");
+  const company = (latestAiNeoclouds.debt?.companies || []).find(
+    (row) => row.key === aiNeocloudDebtCompany,
+  );
+  if (scope) scope.textContent = company ? ` · ${company.name}` : "";
   const events = (latestAiNeoclouds.events || []).filter(
-    (event) => aiNeocloudFilter === "all" || event.category === aiNeocloudFilter,
+    (event) => (aiNeocloudFilter === "all" || event.category === aiNeocloudFilter)
+      && (!aiNeocloudDebtCompany || event.company === aiNeocloudDebtCompany),
   );
   if (!events.length) {
-    body.innerHTML = '<tr><td colspan="7">No filings in this category</td></tr>';
+    body.innerHTML = '<tr><td colspan="8">No filings in this category</td></tr>';
     return;
   }
   body.innerHTML = events.map((event) => {
@@ -8405,8 +8502,11 @@ function renderAiNeocloudLedger() {
     } else if (isDebt && event.secured === false) {
       security = "Unsecured";
     }
+    const amortizes = isDebt && event.amortization_start
+      ? ` <span class="ai-provider">· amortizes from ${escapeHtml(String(event.amortization_start).slice(0, 7))}</span>`
+      : "";
     const maturity = isDebt && event.maturity
-      ? `${escapeHtml(event.maturity)} <span class="ai-provider">· ${formatNeocloudYears(event.tenor_years)}</span>`
+      ? `${escapeHtml(event.maturity)} <span class="ai-provider">· ${formatNeocloudYears(event.tenor_years)}</span>${amortizes}`
       : "—";
     const amendment = event.amendment
       ? ' <span class="ai-neocloud-tag">Amendment</span>'
@@ -8417,6 +8517,7 @@ function renderAiNeocloudLedger() {
         <td><span class="ai-model-name">${escapeHtml(event.company_name)}</span></td>
         <td class="ai-neocloud-kind"><span class="${escapeHtml(event.category)}">${escapeHtml(event.kind)}</span>${amendment}</td>
         <td>${formatDealAmount(event.amount, event.currency)}</td>
+        <td>${isDebt && event.rate ? escapeHtml(event.rate) : "—"}</td>
         <td class="ai-neocloud-terms">${security}</td>
         <td>${maturity}</td>
         <td class="ai-neocloud-detail">${escapeHtml(event.summary)}${filings}${link}</td>
@@ -8706,40 +8807,41 @@ function aiNeocloudChart(series) {
 }
 
 function aiNeocloudMaturityChart(wall) {
-  const rows = wall.filter((row) => Number(row.count) > 0);
-  if (!rows.length) return '<div class="empty-state">No dated maturities yet</div>';
+  const fields = NEOCLOUD_WALL_SEGMENTS.map(([field]) => field);
+  const billions = (value) => (Number(value) || 0) / 1e9;
+  const total = (row) => fields.reduce((sum, field) => sum + billions(row[field]), 0);
+  const rows = wall.filter((row) => total(row) > 0);
+  if (!rows.length) return '<div class="empty-state">No dated maturities</div>';
   const width = 760;
   const height = 320;
   const pad = { left: 54, right: 14, top: 16, bottom: 27 };
-  const billions = (value) => (Number(value) || 0) / 1e9;
   // One slot per calendar year, so gaps between maturity years stay visible.
   const first = Number(rows[0].year);
   const last = Number(rows.at(-1).year);
   const byYear = new Map(rows.map((row) => [Number(row.year), row]));
   const years = Array.from({ length: last - first + 1 }, (_, index) => first + index);
-  const max = Math.max(
-    ...rows.map((row) => billions(row.secured) + billions(row.unsecured) + billions(row.unknown)),
-    1,
-  ) * 1.08;
+  // Scale to the data so a $200M issuer is as readable as the sector.
+  const max = Math.max(...rows.map(total)) * 1.08;
   const plotHeight = height - pad.top - pad.bottom;
   const y = (value) => pad.top + ((max - value) / max) * plotHeight;
   const band = (width - pad.left - pad.right) / years.length;
   const barWidth = Math.min(46, band * 0.6);
+  // Every year with principal due is labeled; empty years only when there is room.
   const labelEvery = Math.ceil(years.length / 12);
   const bars = years.map((year, index) => {
     const row = byYear.get(year);
     const center = pad.left + band * (index + 0.5);
-    const label = index % labelEvery === 0 || year === last
+    const label = row || index % labelEvery === 0
       ? `<text x="${center.toFixed(1)}" y="${height - 7}" text-anchor="middle">${year}</text>`
       : "";
     if (!row) return label;
     let base = 0;
     const left = (center - barWidth / 2).toFixed(1);
-    const segments = ["secured", "unsecured", "unknown"].map((field) => {
+    const segments = fields.map((field) => {
       const value = billions(row[field]);
       if (value <= 0) return "";
       const top = base + value;
-      const rect = `<rect class="bar-${field}" x="${left}" y="${y(top).toFixed(1)}" width="${barWidth.toFixed(1)}" height="${(y(base) - y(top)).toFixed(1)}" />`;
+      const rect = `<rect class="wall-${field}" x="${left}" y="${y(top).toFixed(1)}" width="${barWidth.toFixed(1)}" height="${(y(base) - y(top)).toFixed(1)}"><title>${year} · ${formatNeocloudUsd(Number(row[field]))}</title></rect>`;
       base = top;
       return rect;
     }).join("");
@@ -8747,7 +8849,7 @@ function aiNeocloudMaturityChart(wall) {
   }).join("");
   const ticks = [max, max / 2, 0].map((value) => `
     <line class="grid-line" x1="${pad.left}" y1="${y(value).toFixed(1)}" x2="${width - pad.right}" y2="${y(value).toFixed(1)}" />
-    <text x="5" y="${(y(value) + 3).toFixed(1)}">$${value.toFixed(0)}B</text>
+    <text x="5" y="${(y(value) + 3).toFixed(1)}">${formatNeocloudUsd(value * 1e9)}</text>
   `).join("");
   return `
     <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">

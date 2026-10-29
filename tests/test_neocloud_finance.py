@@ -12,8 +12,10 @@ from app.services.neocloud_finance import (
     PARSER_VERSION,
     NeocloudCompany,
     NeocloudFinanceService,
+    compose_payload,
     parse_debt_terms,
     parse_filing_event,
+    parse_reported_schedule,
 )
 
 TODAY = date(2026, 10, 29)
@@ -85,6 +87,7 @@ def _submissions(rows: list[tuple[str, str, str, str, str]]) -> dict[str, Any]:
 
 LISTED_FILINGS = _submissions(
     [
+        ("10-Q", "0000000001-26-000010", "2026-08-01", "", "acme-20260630.htm"),
         ("8-K", "0000000001-26-000005", "2026-05-08", "1.01,2.03", "loan-close.htm"),
         ("8-K", "0000000001-26-000004", "2026-05-06", "1.01", "contract-b.htm"),
         ("8-K", "0000000001-26-000003", "2026-05-05", "1.01", "contract-a.htm"),
@@ -98,6 +101,62 @@ PRIVATE_FILINGS = _submissions(
         ("D/A", "0000000002-26-000002", "2026-05-12", "", "xslFormDX01/primary_doc.xml"),
         ("D", "0000000002-26-000001", "2026-01-23", "", "xslFormDX01/primary_doc.xml"),
     ]
+)
+
+
+def _instance(period_end: str, fiscal_year_end: str, facts: str) -> bytes:
+    """A minimal 10-Q XBRL instance with USD unit and the given schedule facts."""
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance"
+    xmlns:xbrldi="http://xbrl.org/2006/xbrldi" xmlns:dei="http://xbrl.sec.gov/dei/2024"
+    xmlns:us-gaap="http://fasb.org/us-gaap/2024" xmlns:iso4217="http://www.xbrl.org/2003/iso4217"
+    xmlns:acme="http://acme.test/2026">
+  <xbrli:context id="duration"><xbrli:entity><xbrli:identifier scheme="cik">1</xbrli:identifier>
+    </xbrli:entity><xbrli:period><xbrli:startDate>2026-01-01</xbrli:startDate>
+    <xbrli:endDate>{period_end}</xbrli:endDate></xbrli:period></xbrli:context>
+  <xbrli:context id="balance"><xbrli:entity><xbrli:identifier scheme="cik">1</xbrli:identifier>
+    </xbrli:entity><xbrli:period><xbrli:instant>{period_end}</xbrli:instant></xbrli:period>
+  </xbrli:context>
+  <xbrli:context id="notes"><xbrli:entity><xbrli:identifier scheme="cik">1</xbrli:identifier>
+    <xbrli:segment><xbrldi:explicitMember dimension="us-gaap:LongtermDebtTypeAxis">
+    us-gaap:SeniorNotesMember</xbrldi:explicitMember></xbrli:segment></xbrli:entity>
+    <xbrli:period><xbrli:instant>{period_end}</xbrli:instant></xbrli:period></xbrli:context>
+  <xbrli:context id="converts"><xbrli:entity><xbrli:identifier scheme="cik">1</xbrli:identifier>
+    <xbrli:segment><xbrldi:explicitMember dimension="us-gaap:LongtermDebtTypeAxis">
+    us-gaap:ConvertibleDebtMember</xbrldi:explicitMember></xbrli:segment></xbrli:entity>
+    <xbrli:period><xbrli:instant>{period_end}</xbrli:instant></xbrli:period></xbrli:context>
+  <xbrli:unit id="usd"><xbrli:measure>iso4217:USD</xbrli:measure></xbrli:unit>
+  <dei:DocumentPeriodEndDate contextRef="duration">{period_end}</dei:DocumentPeriodEndDate>
+  <dei:CurrentFiscalYearEndDate contextRef="duration"
+    >{fiscal_year_end}</dei:CurrentFiscalYearEndDate>
+  {facts}
+</xbrli:xbrl>""".encode()
+
+
+def _maturity_fact(bucket: str, context: str, value: int) -> str:
+    concept = f"LongTermDebtMaturitiesRepaymentsOfPrincipal{bucket}"
+    return (
+        f'<us-gaap:{concept} contextRef="{context}" unitRef="usd" decimals="-6">'
+        f"{value}</us-gaap:{concept}>"
+    )
+
+
+ACME_INSTANCE = _instance(
+    "2026-06-30",
+    "--12-31",
+    "".join(
+        (
+            _maturity_fact("RemainderOfFiscalYear", "balance", 100_000_000),
+            _maturity_fact("InNextTwelveMonths", "balance", 200_000_000),
+            '<us-gaap:LongTermDebtMaturityAfterYearFour contextRef="balance" unitRef="usd">'
+            "1000000000</us-gaap:LongTermDebtMaturityAfterYearFour>",
+            # Ignored: a per-type breakdown of the same schedule, and interest.
+            _maturity_fact("RemainderOfFiscalYear", "notes", 100_000_000),
+            '<us-gaap:LongTermDebtMaturitiesRepaymentsOfInterestInNextTwelveMonths'
+            ' contextRef="balance" unitRef="usd">90000000'
+            "</us-gaap:LongTermDebtMaturitiesRepaymentsOfInterestInNextTwelveMonths>",
+        )
+    ),
 )
 
 
@@ -156,6 +215,11 @@ class FakeSec:
             return httpx.Response(503)
         if path == "/api/xbrl/companyfacts/CIK0000000001.json":
             return httpx.Response(200, json=COMPANY_FACTS)
+        if path == "/Archives/edgar/data/1/000000000126000010/index.json":
+            names = ("acme-20260630.htm", "acme-20260630_htm.xml", "acme-20260630_lab.xml")
+            return httpx.Response(200, json={"directory": {"item": [{"name": n} for n in names]}})
+        if path == "/Archives/edgar/data/1/000000000126000010/acme-20260630_htm.xml":
+            return httpx.Response(200, content=ACME_INSTANCE)
         if path == "/submissions/CIK0000000001.json":
             return httpx.Response(200, json=LISTED_FILINGS)
         if path == "/submissions/CIK0000000002.json":
@@ -225,18 +289,31 @@ async def test_service_builds_ledger_and_balance_sheet_from_sec_filings(tmp_path
     assert series["2026-Q2"]["announced_equity"] == 842e6
     assert not any(path.endswith("officer.htm") for path in sec.paths)
 
-    # The closing filing carries the terms; tenor runs from the launch filing.
+    # The issuer's own 10-Q schedule is the base. Its open "after year four"
+    # bucket is dated by the only deal maturing then (the loan, May 2031).
     debt = cast(dict[str, Any], payload["debt"])
-    assert debt["maturity_wall"] == [
-        {"year": 2031, "secured": 2.6e9, "unsecured": 0.0, "unknown": 0.0, "count": 1}
-    ]
+    wall = {row["year"]: row for row in cast(list[dict[str, Any]], debt["maturity_wall"])}
+    assert sorted(wall) == [2026, 2027, 2031]
+    assert (wall[2026]["reported"], wall[2027]["reported"]) == (100e6, 200e6)
+    assert (wall[2031]["reported"], wall[2031]["reported_split"]) == (0.0, 1e9)
     stack = cast(list[dict[str, Any]], debt["companies"])
-    assert [
-        (row["key"], row["instruments"], row["secured_share"], row["avg_tenor_years"])
-        for row in stack
-    ] == [("ACME", 1, 1.0, 5.0)]
-    assert stack[0]["next_maturity"] == "2031-05-07"
+    acme_debt = stack[0]
+    assert (acme_debt["key"], acme_debt["basis"], acme_debt["instruments"]) == (
+        "ACME",
+        "reported",
+        1,
+    )
+    assert acme_debt["schedule"]["total"] == 1.3e9
+    assert [bucket["label"] for bucket in acme_debt["schedule"]["buckets"]] == [
+        "2026 remainder",
+        "2027",
+        "2031+",
+    ]
+    # The closing filing carries the terms; tenor runs from the launch filing.
+    assert (acme_debt["secured_share"], acme_debt["avg_tenor_years"]) == (1.0, 5.0)
+    assert acme_debt["next_maturity"] == "2031-05-07"
     assert loans[0]["collateral"] == ["GPUs", "Contracts"]
+    assert loans[0]["rate"] is None
 
     # Reviewed filings are never fetched again.
     fetched = len(sec.archive_requests())
@@ -410,3 +487,92 @@ def test_debt_terms(
         secured,
         amendment,
     )
+
+
+def test_reported_schedule_sums_debt_types_on_a_non_calendar_fiscal_year() -> None:
+    instance = _instance(
+        "2026-08-31",
+        "--05-31",
+        "".join(
+            (
+                _maturity_fact("RemainderOfFiscalYear", "notes", 100_000_000),
+                _maturity_fact("RemainderOfFiscalYear", "converts", 10_000_000),
+                _maturity_fact("InYearTwo", "notes", 300_000_000),
+                _maturity_fact("AfterYearFive", "converts", 450_000_000),
+            )
+        ),
+    )
+
+    schedule = parse_reported_schedule(instance)
+
+    # August 2026 falls in the fiscal year ending May 2027.
+    assert schedule["as_of"] == "2026-08-31"
+    assert schedule["buckets"] == [
+        {"offset": 0, "year": 2027, "open": False, "amount": 110_000_000},
+        {"offset": 2, "year": 2029, "open": False, "amount": 300_000_000},
+        {"offset": 6, "year": 2033, "open": True, "amount": 450_000_000},
+    ]
+
+
+def test_deal_terms_spread_stated_amortization_into_equal_installments() -> None:
+    event = {
+        "accession": "0000000001-26-000020",
+        "company": "ACME",
+        "form": "8-K",
+        "filed_date": "2026-06-10",
+        "kind": "Senior notes",
+        "amount": 1e9,
+        "currency": "USD",
+        "offering_amount": None,
+        "first_sale_date": None,
+        "summary": "Senior secured notes.",
+        "url": "https://www.sec.gov/Archives/edgar/data/1/x/notes.htm",
+        "maturity": "2028-11-30",
+        "secured": True,
+        "collateral": ["Data centers"],
+        "amendment": False,
+        "rate": "6.129%",
+        "amortization_start": "2027-05-30",
+        "amortization_frequency": 2,
+    }
+
+    payload = compose_payload(COMPANIES, {}, [event], {}, today=TODAY)
+
+    debt = cast(dict[str, Any], payload["debt"])
+    assert [
+        (row["year"], row["deals_amortizing"], row["deals"]) for row in debt["maturity_wall"]
+    ] == [(2027, 5e8, 0.0), (2028, 5e8, 0.0)]
+    assert debt["companies"][0]["basis"] == "deals"
+
+
+@pytest.mark.parametrize(
+    ("kind", "terms", "rate", "amortization"),
+    [
+        pytest.param(
+            "Loan facility",
+            "Amounts borrowed are subject to an interest rate per annum equal to (i) for SOFR"
+            " loans, Term SOFR (subject to a 0.00% floor) plus an applicable margin of 5.50% per"
+            " annum, and (ii) for base rate loans, the federal funds effective rate plus 0.50%"
+            " and Term SOFR for a one-month tenor plus 1.00%.",
+            "SOFR + 5.5%",
+            (None, None),
+            id="loan-spread-not-base-rate-definition",
+        ),
+        pytest.param(
+            "Senior notes",
+            "The Issuer completed its offering of 6.129% Senior Secured Notes due 2042. The"
+            " principal amount of the Notes will amortize on a semi-annual basis on May 30 and"
+            " November 30 of each year, beginning on May 30, 2030.",
+            "6.129%",
+            ("2030-05-30", 2),
+            id="amortizing-project-notes",
+        ),
+    ],
+)
+def test_debt_rate_and_amortization(
+    kind: str, terms: str, rate: str, amortization: tuple[str | None, int | None]
+) -> None:
+    parsed = parse_debt_terms(kind, terms, filed=date(2026, 6, 10))
+
+    assert parsed["rate"] == rate
+    assert (parsed["amortization_start"], parsed["amortization_frequency"]) == amortization

@@ -6669,20 +6669,77 @@ a.key-date-row:focus-visible {
 .ai-index-legend .equity { background: var(--green); }
 .ai-index-legend .capex { background: var(--chart-ma-200); }
 .ai-index-legend .financing { background: var(--chart-ma-50); }
-.ai-index-legend .secured { background: var(--accent); }
-.ai-index-legend .unsecured { background: var(--chart-ma-50); }
-.ai-index-legend .unknown { background: var(--muted); }
+/* Maturity wall sources: solid = reported or stated, faded = estimated split. */
+.ai-index-legend .wall-reported,
+.ai-index-legend .wall-reported_split { background: var(--accent); }
+.ai-index-legend .wall-after_report { background: var(--chart-ma-200); }
+.ai-index-legend .wall-deals,
+.ai-index-legend .wall-deals_amortizing { background: var(--chart-ma-50); }
+.ai-index-legend .wall-reported_split,
+.ai-index-legend .wall-deals_amortizing { opacity: 0.45; }
 
-.ai-index-chart .bar-secured {
+.ai-index-chart .wall-reported,
+.ai-index-chart .wall-reported_split {
   fill: var(--accent);
 }
 
-.ai-index-chart .bar-unsecured {
+.ai-index-chart .wall-after_report {
+  fill: var(--chart-ma-200);
+}
+
+.ai-index-chart .wall-deals,
+.ai-index-chart .wall-deals_amortizing {
   fill: var(--chart-ma-50);
 }
 
-.ai-index-chart .bar-unknown {
-  fill: var(--muted);
+.ai-index-chart .wall-reported_split,
+.ai-index-chart .wall-deals_amortizing {
+  fill-opacity: 0.45;
+}
+
+.ai-neocloud-company {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+  font: 500 12px var(--font-sans);
+  text-align: left;
+}
+
+.ai-neocloud-company:hover,
+.ai-neocloud-company:focus-visible,
+.ai-neocloud-company[aria-pressed="true"] {
+  color: var(--accent);
+}
+
+.ai-neocloud-debt tr.selected {
+  background: var(--surface-selected);
+}
+
+.ai-neocloud-reset {
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  font: inherit;
+  text-transform: inherit;
+}
+
+.ai-neocloud-detail-block {
+  margin-top: 12px;
+  color: var(--muted-strong);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ai-neocloud-detail-block p {
+  margin: 0 0 8px;
+}
+
+.ai-neocloud-schedule {
+  max-width: 360px;
+  margin-bottom: 8px;
 }
 
 .ai-neocloud-section {

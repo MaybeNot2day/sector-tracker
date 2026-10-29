@@ -428,11 +428,25 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
     expect(ledger.first).to_contain_text("Loan facility")
     expect(ledger.first).to_contain_text("Secured · GPUs, Contracts")
     expect(ledger.first).to_contain_text("2031-09-01 · 5.1y")
-    expect(page.locator("#ai-neoclouds-board .bar-secured")).to_have_count(1)
-    expect(page.locator("#ai-neoclouds-board .bar-unsecured")).to_have_count(1)
+    expect(ledger.first).to_contain_text("SOFR + 5.5%")
+    # Sector wall: each source is its own segment.
+    for segment in ("reported", "reported_split", "after_report", "deals"):
+        expect(page.locator(f"#ai-neoclouds-board rect.wall-{segment}")).to_have_count(1)
     debt_rows = page.locator("#ai-neoclouds-board .ai-neocloud-debt tbody tr")
-    expect(debt_rows).to_have_count(1)
-    expect(debt_rows.first).to_contain_text("2031-09-01")
+    expect(debt_rows).to_have_count(2)
+    # Drilling into one issuer redraws its wall and scopes the ledger to it.
+    page.locator('#ai-neoclouds-board button[data-neocloud-company="CRWV"]').click()
+    expect(page.locator("#ai-neoclouds-board rect.wall-deals")).to_have_count(0)
+    expect(page.locator(".ai-neocloud-detail-block")).to_contain_text(
+        "Principal maturities as reported in 10-Q 2026-06-30"
+    )
+    expect(page.locator(".ai-neocloud-schedule tbody tr")).to_have_count(2)
+    page.locator('#ai-neoclouds-board button[data-neocloud-filter="all"]').click()
+    expect(ledger).to_have_count(1)
+    page.locator(".ai-neocloud-reset").click()
+    expect(page.locator(".ai-neocloud-detail-block")).to_have_count(0)
+    expect(ledger).to_have_count(2)
+    page.locator('#ai-neoclouds-board button[data-neocloud-filter="debt"]').click()
     expect(ledger.first.locator("a")).to_have_attribute(
         "href", "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000001/loan.htm"
     )
@@ -2594,6 +2608,11 @@ AI_CAPEX_PAYLOAD: dict[str, Any] = {
 }
 
 
+def _wall_year(year: int, **amounts: int) -> dict[str, int]:
+    segments = ("reported", "reported_split", "after_report", "deals", "deals_amortizing")
+    return {"year": year, **{segment: amounts.get(segment, 0) for segment in segments}}
+
+
 AI_NEOCLOUDS_PAYLOAD: dict[str, Any] = {
     "as_of": "2026-06-30",
     "source": {"name": "SEC EDGAR", "url": "https://www.sec.gov/edgar/search/"},
@@ -2653,25 +2672,72 @@ AI_NEOCLOUDS_PAYLOAD: dict[str, Any] = {
         "instruments": 2,
         "face": 4_600_000_000,
         "secured_share": 0.565,
-        "maturing_24m": 0,
+        "reported_companies": 1,
+        "due_through_year": 2028,
+        "due_through": 4_400_000_000,
         "undated": {"amount": 0, "count": 0},
+        "unallocated": 0,
         "companies": [
             {
                 "key": "CRWV",
                 "name": "CoreWeave",
-                "instruments": 2,
-                "face": 4_600_000_000,
-                "secured_share": 0.565,
-                "avg_tenor_years": 5.3,
+                "basis": "reported",
+                "schedule": {
+                    "as_of": "2026-06-30",
+                    "form": "10-Q",
+                    "url": (
+                        "https://www.sec.gov/Archives/edgar/data/1769628/"
+                        "0001769628-26-000366/crwv-20260630.htm"
+                    ),
+                    "fiscal_year_end": "--12-31",
+                    "total": 13_900_000_000,
+                    "buckets": [
+                        {"label": "2026 remainder", "year": 2026, "open": False,
+                         "amount": 4_400_000_000},
+                        {"label": "2031+", "year": 2031, "open": True, "amount": 9_500_000_000},
+                    ],
+                },
+                "balance_sheet_debt": 35_551_000_000,
+                "instruments": 1,
+                "face": 2_600_000_000,
+                "secured_share": 1.0,
+                "avg_tenor_years": 5.1,
                 "next_maturity": "2031-09-01",
                 "next_maturity_amount": 2_600_000_000,
-                "maturing_24m": 0,
-                "undated": 0,
-            }
+                "after_report": {"count": 1, "amount": 2_600_000_000},
+                "undated": {"count": 0, "amount": 0},
+                "unallocated": None,
+                "due_through": 4_400_000_000,
+                "wall": [
+                    _wall_year(2026, reported=4_400_000_000),
+                    _wall_year(2031, reported_split=9_500_000_000, after_report=2_600_000_000),
+                ],
+            },
+            {
+                "key": "NBIS",
+                "name": "Nebius",
+                "basis": "deals",
+                "schedule": None,
+                "balance_sheet_debt": 4_103_000_000,
+                "instruments": 1,
+                "face": 2_000_000_000,
+                "secured_share": 0.0,
+                "avg_tenor_years": 7.0,
+                "next_maturity": "2033",
+                "next_maturity_amount": 2_000_000_000,
+                "after_report": {"count": 0, "amount": 0},
+                "undated": {"count": 0, "amount": 0},
+                "unallocated": None,
+                "due_through": 0,
+                "wall": [
+                    _wall_year(2033, deals=2_000_000_000),
+                ],
+            },
         ],
         "maturity_wall": [
-            {"year": 2031, "secured": 2_600_000_000, "unsecured": 0, "unknown": 0, "count": 1},
-            {"year": 2033, "secured": 0, "unsecured": 2_000_000_000, "unknown": 0, "count": 1},
+            _wall_year(2026, reported=4_400_000_000),
+            _wall_year(2031, reported_split=9_500_000_000, after_report=2_600_000_000),
+            _wall_year(2033, deals=2_000_000_000),
         ],
     },
     "private_companies": [
@@ -2706,6 +2772,7 @@ AI_NEOCLOUDS_PAYLOAD: dict[str, Any] = {
             "secured": True,
             "collateral": ["GPUs", "Contracts"],
             "amendment": False,
+            "rate": "SOFR + 5.5%",
         },
         {
             "date": "2026-06-18",

@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from secrets import randbits
 
 # Version 1 adopts pre-versioned databases without rebuilding their tables.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS latest_quotes (
@@ -290,6 +290,29 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
         ):
             _ensure_column(conn, "neocloud_filings", column, definition)
         conn.execute("PRAGMA user_version = 4")
+    if version < 5:
+        for column, definition in (
+            ("rate", "TEXT"),
+            ("amortization_start", "TEXT"),
+            ("amortization_frequency", "INTEGER"),
+        ):
+            _ensure_column(conn, "neocloud_filings", column, definition)
+        # Principal maturity schedules as tagged in each issuer's latest 10-Q/10-K.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS neocloud_debt_schedules (
+                company TEXT PRIMARY KEY,
+                accession TEXT NOT NULL,
+                form TEXT NOT NULL,
+                url TEXT NOT NULL,
+                as_of TEXT,
+                fiscal_year_end TEXT,
+                buckets TEXT NOT NULL,
+                fetched_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("PRAGMA user_version = 5")
     # Also quarantine corrupt rows introduced outside the provider path. The
     # delete trigger participates in this transaction and invalidates readers.
     _quarantine_invalid_bars(conn)

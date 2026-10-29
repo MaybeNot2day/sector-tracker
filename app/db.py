@@ -1680,6 +1680,9 @@ def save_neocloud_filings(
                 None if secured is None else int(bool(secured)),
                 ",".join(collateral) or None,
                 int(bool(row.get("amendment"))),
+                row.get("rate"),
+                row.get("amortization_start"),
+                row.get("amortization_frequency"),
                 parser_version,
                 fetched_at,
             )
@@ -1690,8 +1693,9 @@ def save_neocloud_filings(
             INSERT OR REPLACE INTO neocloud_filings (
                 accession, company, form, filed_date, kind, amount, currency,
                 offering_amount, first_sale_date, summary, url, maturity, secured,
-                collateral, amendment, parser_version, fetched_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                collateral, amendment, rate, amortization_start, amortization_frequency,
+                parser_version, fetched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             values,
         )
@@ -1716,7 +1720,7 @@ def load_neocloud_events(path: Path) -> list[dict[str, object]]:
             """
             SELECT accession, company, form, filed_date, kind, amount, currency,
                    offering_amount, first_sale_date, summary, url, maturity, secured,
-                   collateral, amendment
+                   collateral, amendment, rate, amortization_start, amortization_frequency
             FROM neocloud_filings
             WHERE kind IS NOT NULL
             ORDER BY filed_date, accession
@@ -1739,9 +1743,59 @@ def load_neocloud_events(path: Path) -> list[dict[str, object]]:
             "secured": None if row["secured"] is None else bool(row["secured"]),
             "collateral": str(row["collateral"]).split(",") if row["collateral"] else [],
             "amendment": bool(row["amendment"]),
+            "rate": row["rate"],
+            "amortization_start": row["amortization_start"],
+            "amortization_frequency": row["amortization_frequency"],
         }
         for row in rows
     ]
+
+
+def save_neocloud_debt_schedule(path: Path, schedule: dict[str, object]) -> None:
+    """Replace an issuer's reported maturity schedule with its latest filing's."""
+    init_db(path)
+    with _connect(path) as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO neocloud_debt_schedules (
+                company, accession, form, url, as_of, fiscal_year_end, buckets, fetched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(schedule["company"]),
+                str(schedule["accession"]),
+                str(schedule["form"]),
+                str(schedule["url"]),
+                schedule.get("as_of"),
+                schedule.get("fiscal_year_end"),
+                json.dumps(schedule.get("buckets") or [], separators=(",", ":")),
+                datetime.now(UTC).isoformat(),
+            ),
+        )
+
+
+def load_neocloud_debt_schedules(path: Path) -> dict[str, dict[str, object]]:
+    """Latest reported maturity schedule per issuer, keyed by company."""
+    init_db(path)
+    with _connect(path) as conn:
+        rows = conn.execute(
+            """
+            SELECT company, accession, form, url, as_of, fiscal_year_end, buckets
+            FROM neocloud_debt_schedules
+            """
+        ).fetchall()
+    return {
+        str(row["company"]): {
+            "company": str(row["company"]),
+            "accession": str(row["accession"]),
+            "form": str(row["form"]),
+            "url": str(row["url"]),
+            "as_of": row["as_of"],
+            "fiscal_year_end": row["fiscal_year_end"],
+            "buckets": json.loads(str(row["buckets"])),
+        }
+        for row in rows
+    }
 
 
 def save_ai_gpu_compute_snapshot(path: Path, payload: dict[str, object]) -> None:
