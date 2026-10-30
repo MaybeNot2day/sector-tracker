@@ -16,6 +16,7 @@ import math
 import re
 import xml.etree.ElementTree as ET
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -1483,12 +1484,14 @@ def _debt_profile(
         dated = [(event, amount, maturity) for event, amount, maturity in rows if maturity]
         tenor_weight = sum(amount for event, amount, _ in dated if event["tenor_years"] is not None)
         upcoming = sorted(dated, key=lambda row: maturity_date(str(row[2])))
+        detail = _schedule_detail(schedule) if reported and schedule else None
+        next_due = _next_due(detail, upcoming, after_report)
         companies.append(
             {
                 "key": key,
                 "name": names[key],
                 "basis": "reported" if reported else "deals",
-                "schedule": _schedule_detail(schedule) if reported and schedule else None,
+                "schedule": detail,
                 "balance_sheet_debt": balance_debt.get(key),
                 "instruments": len(rows),
                 "face": sum(amount for _, amount, _ in rows),
@@ -1506,8 +1509,9 @@ def _debt_profile(
                     if tenor_weight
                     else None
                 ),
-                "next_maturity": upcoming[0][2] if upcoming else None,
-                "next_maturity_amount": upcoming[0][1] if upcoming else None,
+                "next_maturity": next_due[0] if next_due else None,
+                "next_maturity_amount": next_due[1] if next_due else None,
+                "next_maturity_source": next_due[2] if next_due else None,
                 "after_report": {
                     "count": len(after_report),
                     "amount": sum(amount for _, amount, _ in after_report),
@@ -1548,6 +1552,34 @@ def _debt_profile(
         "companies": companies,
         "maturity_wall": _wall_rows(sector),
     }
+
+
+def _next_due(
+    detail: dict[str, object] | None,
+    upcoming: Sequence[tuple[dict[str, object], float, str | None]],
+    after_report: Sequence[tuple[dict[str, object], float, str | None]],
+) -> tuple[str, float, str] | None:
+    """Nearest principal due as (label, amount, source).
+
+    A reported schedule outranks deal maturities: deals signed before the report
+    may already be repaid or amortizing, which only the schedule reflects. A deal
+    signed after the report still wins when it falls due in an earlier year.
+    """
+    if detail is None:
+        if not upcoming:
+            return None
+        _, amount, maturity = upcoming[0]
+        return str(maturity), amount, "deal"
+    buckets = cast(list[dict[str, Any]], detail["buckets"])
+    first = next((bucket for bucket in buckets if float(bucket["amount"]) > 0), None)
+    newer = sorted(
+        (row for row in after_report if row[2]), key=lambda row: maturity_date(str(row[2]))
+    )
+    if newer and (first is None or maturity_date(str(newer[0][2])).year < int(first["year"])):
+        return str(newer[0][2]), newer[0][1], "deal"
+    if first is None:
+        return None
+    return str(first["label"]), float(first["amount"]), "reported"
 
 
 def _deal_payments(

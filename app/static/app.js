@@ -8373,8 +8373,11 @@ function renderAiNeocloudDebt() {
     const basis = schedule
       ? `${schedule.form} · ${schedule.as_of}`
       : "deal terms only";
+    const nextSource = company.next_maturity_source === "reported"
+      ? escapeHtml(schedule?.form || "report")
+      : "deal";
     const next = company.next_maturity
-      ? `${escapeHtml(company.next_maturity)} <span class="ai-provider">· ${formatNeocloudUsd(company.next_maturity_amount)}</span>`
+      ? `${escapeHtml(company.next_maturity)} <span class="ai-provider">· ${formatNeocloudUsd(company.next_maturity_amount)} · ${nextSource}</span>`
       : "—";
     return `
       <tr class="${active ? "selected" : ""}">
@@ -8409,7 +8412,7 @@ function renderAiNeocloudDebt() {
     ? `${escapeHtml(selected.name)} · <button type="button" class="ai-table-link ai-neocloud-reset" data-neocloud-company="">All issuers</button>`
     : `Sector · ${Number(debt.reported_companies) || 0} of ${companies.length} issuers report a schedule`;
   container.innerHTML = `
-    <div class="ai-index-layout ai-neocloud-layout">
+    <div class="ai-neocloud-debt-layout">
       <section class="ai-index-chart-panel">
         <div class="ai-index-heading">
           <h3>Debt maturity wall</h3>
@@ -8425,7 +8428,7 @@ function renderAiNeocloudDebt() {
         <h3>Debt stack by issuer · click to drill in</h3>
         <div class="ai-table-wrap">
           <table class="ai-table ai-neocloud-debt">
-            <thead><tr><th>Company</th><th>Reported principal</th><th>Debt deals</th><th>Secured</th><th>Avg tenor</th><th>Next deal maturity</th><th>Due ${dueYear ? `≤ ${dueYear}` : ""}</th></tr></thead>
+            <thead><tr><th>Company</th><th>Reported principal</th><th>Debt deals</th><th>Secured</th><th>Avg tenor</th><th>Next maturity</th><th>Due ${dueYear ? `≤ ${dueYear}` : ""}</th></tr></thead>
             <tbody>${rows || '<tr><td colspan="7">No debt in range</td></tr>'}</tbody>
           </table>
         </div>

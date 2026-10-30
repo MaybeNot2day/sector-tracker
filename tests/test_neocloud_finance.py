@@ -311,7 +311,12 @@ async def test_service_builds_ledger_and_balance_sheet_from_sec_filings(tmp_path
     ]
     # The closing filing carries the terms; tenor runs from the launch filing.
     assert (acme_debt["secured_share"], acme_debt["avg_tenor_years"]) == (1.0, 5.0)
-    assert acme_debt["next_maturity"] == "2031-05-07"
+    # The reported schedule outranks deal dates: its first bucket is due sooner.
+    assert (
+        acme_debt["next_maturity"],
+        acme_debt["next_maturity_amount"],
+        acme_debt["next_maturity_source"],
+    ) == ("2026 remainder", 100e6, "reported")
     assert loans[0]["collateral"] == ["GPUs", "Contracts"]
     assert loans[0]["rate"] is None
 

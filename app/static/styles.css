@@ -6746,6 +6746,16 @@ a.key-date-row:focus-visible {
   border-top: 1px solid var(--line);
 }
 
+/* The debt stack table needs the full width: chart on top, table below. */
+.ai-neocloud-debt-layout .ai-index-chart-panel {
+  border-right: 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.ai-neocloud-debt-layout .ai-index-chart {
+  height: clamp(240px, 22vw, 340px);
+}
+
 .ai-neocloud-section > .ai-index-heading {
   align-items: center;
   margin: 0;
