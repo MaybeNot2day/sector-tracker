@@ -16,7 +16,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 const digest = (path) => createHash("sha256").update(readFileSync(path)).digest("hex").slice(0, 12);
 const appPath = "app/static/app.js";
 let source = readFileSync(appPath, "utf8");
-for (const name of ["formatting", "animations", "quote-freshness"]) {
+for (const name of ["formatting", "animations", "quote-freshness", "charts"]) {
   const specifier = new RegExp(`\\./${name}\\.js(?:\\?v=[a-f0-9]+)?`, "g");
   source = source.replace(specifier, `./${name}.js?v=${digest(`app/static/${name}.js`)}`);
 }
@@ -50,8 +50,9 @@ minify app/static/app.js app/static/app.min.js
 minify app/static/formatting.js app/static/formatting.min.js
 minify app/static/animations.js app/static/animations.min.js
 minify app/static/quote-freshness.js app/static/quote-freshness.min.js
+minify app/static/charts.js app/static/charts.min.js
 minify app/static/styles.css app/static/styles.min.css
-for module in app/static/{app,formatting,animations,quote-freshness}.min.js; do
+for module in app/static/{app,formatting,animations,quote-freshness,charts}.min.js; do
   node --input-type=module --check < "$module"
 done
 echo "OK"

@@ -402,8 +402,8 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
     expect(page.locator("#ai-capex-panel")).to_be_visible()
     expect(page.locator("#ai-token-index-panel")).to_be_hidden()
     expect(page.locator("#ai-capex-board .ai-metric")).to_have_count(4)
-    expect(page.locator("#ai-capex-board .series-main")).to_be_visible()
-    capex_chart_box = page.locator("#ai-capex-board .ai-index-chart").bounding_box()
+    expect(page.locator("#ai-capex-board rect.series-main")).to_have_count(2)
+    capex_chart_box = page.locator("#ai-capex-board .viz").bounding_box()
     assert capex_chart_box is not None
     assert capex_chart_box["height"] >= 200
     assert capex_chart_box["width"] / capex_chart_box["height"] >= 1.6
@@ -428,6 +428,19 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
     capital_help = page.locator('[data-neocloud-panel="capital"] .ai-neocloud-help')
     capital_help.locator("summary").click()
     expect(capital_help.locator("li").first).to_be_visible()
+    # Hovering a quarter shows every series' value, the stacked total and coverage.
+    capital_chart = page.locator('[data-neocloud-panel="capital"] .viz')
+    chart_box = capital_chart.bounding_box()
+    assert chart_box is not None
+    capital_chart.hover(position={"x": chart_box["width"] * 0.8, "y": chart_box["height"] / 2})
+    tooltip = capital_chart.locator(".viz-tip")
+    expect(tooltip).to_be_visible()
+    expect(tooltip.locator(".viz-tip-title")).to_have_text("2026-Q2")
+    expect(tooltip).to_contain_text("Equity deals announced")
+    expect(tooltip.locator(".viz-tip-total")).to_contain_text("$3.3B")
+    expect(tooltip).to_contain_text("Listed issuers reported")
+    page.mouse.move(0, 0)
+    expect(tooltip).to_be_hidden()
 
     # A balance the issuer stopped tagging is flagged with its last reported date.
     neocloud_view("balance")
@@ -458,7 +471,7 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
         expect(page.locator(f"#ai-neoclouds-board rect.wall-{segment}")).to_have_count(1)
     debt_rows = page.locator("#ai-neoclouds-board .ai-neocloud-debt tbody tr")
     expect(debt_rows).to_have_count(2)
-    wall_box = page.locator("#ai-neocloud-debt-section .ai-index-chart").bounding_box()
+    wall_box = page.locator("#ai-neocloud-debt-section .viz").bounding_box()
     assert wall_box is not None
     # The chart keeps its drawing proportions instead of stretching to the row.
     assert abs(wall_box["width"] / wall_box["height"] - 760 / 320) < 0.1
@@ -1567,7 +1580,7 @@ def test_reports_modal_lists_reports_and_renders_escaped_markdown_reader(
     expect(bar_chart.locator("rect.chart-bar.negative")).to_have_count(2)
     expect(bar_chart.locator("text").filter(has_text="Mon")).to_have_count(1)
     line_chart = charts.nth(1)
-    expect(line_chart.locator("polyline")).to_have_count(2)
+    expect(line_chart.locator("path.chart-line")).to_have_count(2)
     legend = line_chart.locator(".report-chart-legend span")
     expect(legend).to_have_count(2)
     expect(legend.first).to_have_text("SPY 2 %")
@@ -2219,8 +2232,8 @@ def test_trends_tab_renders_group_bands_and_links_to_markets(page: Page, base_ur
     expect(cards.nth(1).locator("header strong")).to_have_text("PERPS BASKET")
     expect(cards.nth(1).locator("header em")).to_have_text("-3.60%")
     # Band area + average line render as SVG primitives.
-    expect(cards.first.locator("svg path")).to_have_count(1)
-    expect(cards.first.locator("svg polyline")).to_have_count(1)
+    expect(cards.first.locator("svg path.viz-band")).to_have_count(1)
+    expect(cards.first.locator("svg path.viz-line")).to_have_count(1)
     expect(cards.first.locator("footer")).to_contain_text("7 members · tradfi")
 
     # Range flip refetches the window and keeps the grid populated.

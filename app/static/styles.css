@@ -53,6 +53,8 @@
   --chart-ma-20: #e2a94f;
   --chart-ma-50: #6d9dc9;
   --chart-ma-200: #a985c9;
+  /* Fifth categorical series color, distinct from accent/ma-20 in both themes. */
+  --chart-rose: #d9809f;
   --font-sans: "Geist", "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: "Geist Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   /* Sans column headers keep only subtle tracking; tabs none at all. */
@@ -116,6 +118,7 @@
   --chart-ma-20: #8b6a20;
   --chart-ma-50: #2f6f9f;
   --chart-ma-200: #73519a;
+  --chart-rose: #a8456b;
 }
 
 * {
@@ -2089,7 +2092,7 @@ h1 {
   bottom: 5px;
   left: 0;
   width: var(--score);
-  background: rgba(184, 160, 106, 0.24);
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
 }
 
 .status-tag {
@@ -2566,32 +2569,6 @@ a.key-date-row:focus-visible {
   padding: 12px 14px 10px;
 }
 
-.equity-chart {
-  width: 100%;
-  height: 200px;
-  display: block;
-}
-
-.equity-chart .equity-line {
-  fill: none;
-  stroke-width: 1.8;
-  vector-effect: non-scaling-stroke;
-}
-
-.equity-positive .equity-line { stroke: var(--green); }
-.equity-negative .equity-line { stroke: var(--red); }
-.equity-positive .equity-area { fill: rgba(77, 179, 138, 0.08); }
-.equity-negative .equity-area { fill: rgba(224, 99, 95, 0.08); }
-.equity-positive .equity-dot { fill: var(--green); }
-.equity-negative .equity-dot { fill: var(--red); }
-
-.equity-base {
-  stroke: var(--line-strong);
-  stroke-width: 1;
-  stroke-dasharray: 4 4;
-  vector-effect: non-scaling-stroke;
-}
-
 .equity-axis {
   display: flex;
   justify-content: space-between;
@@ -2857,12 +2834,6 @@ a.key-date-row:focus-visible {
 
 .trend-card header em.negative {
   color: var(--red);
-}
-
-.trend-card svg {
-  display: block;
-  width: 100%;
-  height: 110px;
 }
 
 .trend-card footer {
@@ -4184,7 +4155,13 @@ a.key-date-row:focus-visible {
 .sparkline polyline {
   fill: none;
   stroke-width: 1.6;
+  stroke-linejoin: round;
   vector-effect: non-scaling-stroke;
+}
+
+.sparkline polygon {
+  stroke: none;
+  fill-opacity: 0.14;
 }
 
 .sparkline-positive polyline {
@@ -4193,6 +4170,18 @@ a.key-date-row:focus-visible {
 
 .sparkline-negative polyline {
   stroke: var(--red);
+}
+
+.sparkline-positive polygon {
+  fill: var(--green);
+}
+
+.sparkline-negative polygon {
+  fill: var(--red);
+}
+
+.sparkline.spark-draw polygon {
+  animation: viz-fade 0.9s ease-out both;
 }
 
 .sparkline.spark-draw polyline {
@@ -6213,18 +6202,6 @@ a.key-date-row:focus-visible {
   color: var(--muted-strong);
 }
 
-.report-chart svg {
-  display: block;
-  width: 100%;
-  height: auto;
-}
-
-.report-chart .chart-axis {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  fill: var(--muted);
-}
-
 .report-chart-legend {
   display: flex;
   flex-wrap: wrap;
@@ -6239,12 +6216,6 @@ a.key-date-row:focus-visible {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-}
-
-.report-chart-legend i {
-  width: 10px;
-  height: 3px;
-  border-radius: 1px;
 }
 
 @media (max-width: 700px) {
@@ -6623,78 +6594,8 @@ a.key-date-row:focus-visible {
   grid-template-columns: minmax(340px, 0.8fr) minmax(0, 1.2fr);
 }
 
-.ai-capex-layout .ai-index-chart {
-  height: auto;
-  min-height: 200px;
-  max-height: 380px;
-  aspect-ratio: 16 / 9;
-}
-
 .ai-neocloud-layout {
   grid-template-columns: minmax(0, 1.15fr) minmax(360px, 0.85fr);
-}
-
-.ai-neocloud-layout .ai-index-chart {
-  height: auto;
-  min-height: 200px;
-  aspect-ratio: 760 / 320;
-}
-
-.ai-index-chart .bar-debt {
-  fill: var(--accent);
-}
-
-.ai-index-chart .bar-equity {
-  fill: var(--green);
-}
-
-.ai-index-chart .series-capex {
-  fill: none;
-  stroke: var(--chart-ma-200);
-  stroke-width: 1.8;
-}
-
-.ai-index-chart .series-financing {
-  fill: none;
-  stroke: var(--chart-ma-50);
-  stroke-width: 1.6;
-  stroke-dasharray: 5 4;
-}
-
-.ai-index-legend .bar {
-  height: 8px;
-}
-
-.ai-index-legend .debt { background: var(--accent); }
-.ai-index-legend .equity { background: var(--green); }
-.ai-index-legend .capex { background: var(--chart-ma-200); }
-.ai-index-legend .financing { background: var(--chart-ma-50); }
-/* Maturity wall sources: solid = reported or stated, faded = estimated split. */
-.ai-index-legend .wall-reported,
-.ai-index-legend .wall-reported_split { background: var(--accent); }
-.ai-index-legend .wall-after_report { background: var(--chart-ma-200); }
-.ai-index-legend .wall-deals,
-.ai-index-legend .wall-deals_amortizing { background: var(--chart-ma-50); }
-.ai-index-legend .wall-reported_split,
-.ai-index-legend .wall-deals_amortizing { opacity: 0.45; }
-
-.ai-index-chart .wall-reported,
-.ai-index-chart .wall-reported_split {
-  fill: var(--accent);
-}
-
-.ai-index-chart .wall-after_report {
-  fill: var(--chart-ma-200);
-}
-
-.ai-index-chart .wall-deals,
-.ai-index-chart .wall-deals_amortizing {
-  fill: var(--chart-ma-50);
-}
-
-.ai-index-chart .wall-reported_split,
-.ai-index-chart .wall-deals_amortizing {
-  fill-opacity: 0.45;
 }
 
 .ai-neocloud-company {
@@ -6883,82 +6784,28 @@ a.key-date-row:focus-visible {
   text-transform: uppercase;
 }
 
+/* Frame around a charts.js chart; the chart itself sets its own height. */
 .ai-index-chart {
   width: 100%;
-  height: clamp(300px, 30vw, 440px);
+  padding: 10px 8px 4px 4px;
   border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
   background: var(--chart-bg);
-}
-
-.ai-index-chart svg {
-  display: block;
-  width: 100%;
-  height: 100%;
-}
-
-.ai-index-chart .grid-line {
-  stroke: var(--chart-grid);
-  stroke-width: 1;
-}
-
-.ai-index-chart .series-main {
-  fill: none;
-  stroke: var(--accent);
-  stroke-width: 2;
-}
-
-.ai-index-chart .series-open {
-  fill: none;
-  stroke: var(--green);
-  stroke-width: 1.25;
-}
-
-.ai-index-chart .series-proprietary {
-  fill: none;
-  stroke: var(--chart-ma-50);
-  stroke-width: 1.25;
-}
-
-.ai-index-chart .series-frontier {
-  fill: none;
-  stroke: var(--chart-ma-200);
-  stroke-width: 1.8;
-  stroke-dasharray: 5 3;
-}
-.ai-index-chart .series-china {
-  fill: none;
-  stroke: var(--chart-ma-20);
-  stroke-width: 1.6;
-}
-
-
-.ai-index-chart text {
-  fill: var(--chart-text);
-  font: 9px var(--font-mono);
 }
 
 .ai-index-legend {
   display: flex;
   flex-wrap: wrap;
-  gap: 14px;
-  margin-top: 9px;
-  color: var(--muted);
-  font: 9px var(--font-mono);
+  gap: 6px 16px;
+  margin-top: 10px;
+  color: var(--muted-strong);
+  font: 10px var(--font-mono);
 }
 
-.ai-index-legend i {
-  display: inline-block;
-  width: 13px;
-  height: 2px;
-  margin-right: 5px;
-  vertical-align: middle;
+.ai-index-legend span {
+  display: inline-flex;
+  align-items: center;
 }
-
-.ai-index-legend .main { background: var(--accent); }
-.ai-index-legend .open { background: var(--green); }
-.ai-index-legend .proprietary { background: var(--chart-ma-50); }
-.ai-index-legend .frontier { background: var(--chart-ma-200); }
-.ai-index-legend .china { background: var(--chart-ma-20); }
 
 .ai-index-side {
   min-width: 0;
@@ -7119,6 +6966,222 @@ a.key-date-row:focus-visible {
   text-decoration: underline;
 }
 
+/* Shared SVG charts (charts.js). Sized by their container; drawn at real pixels. */
+.viz {
+  position: relative;
+  width: 100%;
+  min-height: 0;
+}
+
+.viz-svg {
+  display: block;
+  overflow: visible;
+}
+
+.viz-grid {
+  stroke: var(--chart-grid);
+  stroke-width: 1;
+  stroke-dasharray: 2 4;
+}
+
+.viz-grid.viz-zero {
+  stroke: var(--line-strong);
+  stroke-dasharray: none;
+}
+
+.viz-axis {
+  fill: var(--chart-text);
+  font: 10px var(--font-mono);
+}
+
+.viz-reference {
+  stroke: var(--muted);
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+  opacity: 0.75;
+}
+
+.viz-reference-label {
+  fill: var(--muted);
+  font: 9px var(--font-mono);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+}
+
+.viz-line {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.viz-line.viz-dashed {
+  stroke-dasharray: 6 5;
+}
+
+.viz-end-dot {
+  stroke: var(--chart-bg);
+  stroke-width: 2;
+}
+
+.viz-hover[hidden] {
+  display: none;
+}
+
+.viz-hover-band {
+  fill: var(--text);
+  fill-opacity: 0.06;
+}
+
+.viz-crosshair {
+  stroke: var(--muted);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.viz-hover-dot {
+  fill: var(--chart-bg);
+  stroke-width: 2;
+}
+
+.viz-tip {
+  position: absolute;
+  z-index: 5;
+  min-width: 180px;
+  max-width: 380px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+  box-shadow: 0 10px 28px rgb(0 0 0 / 0.28);
+  color: var(--text);
+  font: 11px var(--font-mono);
+  pointer-events: none;
+}
+
+.viz-tip[hidden] {
+  display: none;
+}
+
+.viz-tip-title {
+  margin-bottom: 6px;
+  color: var(--muted-strong);
+  font-size: 10px;
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+}
+
+.viz-tip-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  line-height: 1.65;
+}
+
+.viz-tip-row span {
+  display: inline-flex;
+  align-items: center;
+  color: var(--muted-strong);
+  white-space: nowrap;
+}
+
+.viz-tip-row strong {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.viz-tip-total {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+}
+
+.viz-tip-note span,
+.viz-tip-note strong {
+  color: var(--muted);
+}
+
+.viz-empty {
+  display: grid;
+  height: 100%;
+  place-items: center;
+  color: var(--muted);
+  font: 11px var(--font-mono);
+}
+
+/* Legend and tooltip swatches mirror each series' mark. */
+.viz-swatch {
+  display: inline-block;
+  flex: none;
+  margin-right: 6px;
+  vertical-align: middle;
+  background: var(--swatch);
+}
+
+.viz-swatch-bar {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.viz-swatch-line {
+  width: 16px;
+  height: 0;
+  border-top: 2px solid var(--swatch);
+  background: none;
+}
+
+.viz-swatch-line.dashed {
+  border-top-style: dashed;
+}
+
+.viz-swatch-band {
+  width: 14px;
+  height: 8px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--swatch) 32%, transparent);
+}
+
+.viz-animate .viz-draw {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: viz-draw 0.9s ease-out forwards;
+}
+
+.viz-animate .viz-area,
+.viz-animate .viz-band,
+.viz-animate .viz-dashed,
+.viz-animate .viz-end-dot {
+  animation: viz-fade 0.7s ease-out both;
+}
+
+.viz-animate .viz-bar {
+  transform-box: view-box;
+  animation: viz-grow 0.55s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+@keyframes viz-draw {
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes viz-fade {
+  from { opacity: 0; }
+}
+
+@keyframes viz-grow {
+  from { transform: scaleY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .viz-animate * {
+    animation: none !important;
+  }
+
+  .viz-animate .viz-draw {
+    stroke-dashoffset: 0;
+  }
+}
+
 @media (max-width: 1050px) {
   .ai-index-layout {
     grid-template-columns: 1fr;
@@ -7195,10 +7258,6 @@ a.key-date-row:focus-visible {
 
   .ai-metric:nth-child(even) {
     border-right: 0;
-  }
-
-  .ai-index-chart {
-    height: 280px;
   }
 
   .ai-hardware-model-label {

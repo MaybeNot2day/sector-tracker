@@ -681,7 +681,11 @@ that token only for the current tab session.
 `app/db_schema.py` owns versioned schema/migrations while `app/db.py` implements persistence.
 `app/fringe_grammar.py` is the stdlib-only grammar used by server ingest and standalone uploaders.
 
-The frontend entrypoint imports formatting, animation, and quote-freshness ES modules.
+The frontend entrypoint imports formatting, animation, quote-freshness, and charts ES modules.
+`charts.js` draws every non-trading chart (AI panels, neocloud views, trend cards, the Fringe
+equity curve, report charts) at its real pixel size with nice axis ticks, a crosshair tooltip
+and legends whose swatches match each series; call sites embed `chartMarkup(spec)` and the
+module draws placeholders once they are attached and sized.
 After JavaScript or CSS changes, run `bash scripts/minify-static.sh` (Node/npm required).
 It pins helper imports and entrypoint/style URLs by content hash, then builds committed
 twins with pinned esbuild. The server serves a twin only when its source hash matches;

@@ -5,6 +5,7 @@ import {
 } from "./formatting.js?v=016e638c1af8";
 import { flashCell } from "./animations.js?v=7cf11f1f25c1";
 import { quoteFreshness } from "./quote-freshness.js?v=3abd8feafb2a";
+import { chartLegend, chartMarkup } from "./charts.js?v=4c2ff0226a01";
 
 const board = document.querySelector("#board");
 const dailyBoard = document.querySelector("#daily-board");
@@ -2215,38 +2216,33 @@ function trendCard(group) {
       <strong>${escapeHtml(displayGroupName(group.name))}</strong>
       <em class="${tone}">${deltaPct === null ? "--" : escapeHtml(formatSignedPct(deltaPct))}</em>
     </header>
-    ${trendBandSvg(series)}
+    ${trendBandChart(series, tone)}
     <footer><span>${escapeHtml(spanLabel)}</span><span>${group.members} member${group.members === 1 ? "" : "s"} \u00b7 ${escapeHtml(String(group.category || ""))}</span></footer>
   </button>`;
 }
 
-function trendBandSvg(series) {
-  const W = 320;
-  const H = 110;
-  const pad = 4;
-  const values = series.flatMap((point) => [point.min, point.max]).filter(Number.isFinite);
-  let lo = Math.min(...values);
-  let hi = Math.max(...values);
-  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return "";
-  if (hi - lo < 0.5) {
-    hi += 0.25;
-    lo -= 0.25;
-  }
-  const x = (i) => pad + (i * (W - pad * 2)) / (series.length - 1);
-  const y = (value) => pad + ((hi - value) / (hi - lo)) * (H - pad * 2);
-  const upper = series.map((point, i) => `${x(i).toFixed(1)},${y(point.max).toFixed(1)}`);
-  const lowerBack = [...series]
-    .reverse()
-    .map((point, i) => `${x(series.length - 1 - i).toFixed(1)},${y(point.min).toFixed(1)}`);
-  const avgPoints = series
-    .map((point, i) => `${x(i).toFixed(1)},${y(point.avg).toFixed(1)}`)
-    .join(" ");
-  const baseline = lo <= 100 && hi >= 100 ? y(100).toFixed(1) : null;
-  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Performance band" preserveAspectRatio="none">
-    <path d="M${upper.join(" L")} L${lowerBack.join(" L")} Z" fill="var(--accent)" fill-opacity="0.13"/>
-    ${baseline !== null ? `<line x1="${pad}" y1="${baseline}" x2="${W - pad}" y2="${baseline}" stroke="var(--line)" stroke-dasharray="3 3"/>` : ""}
-    <polyline points="${avgPoints}" fill="none" stroke="var(--accent)" stroke-width="1.6" stroke-linejoin="round"/>
-  </svg>`;
+function trendBandChart(series, tone) {
+  // Members are rebased to 100 at the window start, so 100 is "unchanged".
+  const color = tone === "positive" ? "var(--green)" : tone === "negative" ? "var(--red)" : "var(--accent)";
+  const relative = (value) => {
+    const change = Number(value) - 100;
+    return `${change > 0 ? "+" : ""}${change.toFixed(1)}%`;
+  };
+  return chartMarkup(
+    {
+      x: series.map((point) => point.date),
+      series: [
+        { label: "Member range", type: "band", low: series.map((point) => point.min), high: series.map((point) => point.max), color, opacity: 0.14 },
+        { label: "Group average", type: "line", values: series.map((point) => point.avg), color, width: 1.8, smooth: true, endDot: true },
+      ],
+      y: { format: relative },
+      references: [{ value: 100 }],
+      axes: false,
+      height: "110px",
+      tooltipTitle: (index) => keyDateShort(series[index].date),
+    },
+    { className: "trend-chart", label: "Performance band" },
+  );
 }
 
 function selectView(view) {
@@ -3248,92 +3244,50 @@ function trimZeros(text) {
 }
 
 function chartSvg(spec) {
-  const W = 640;
-  const H = 220;
-  const padTop = 10;
-  const padLeft = 10;
-  const padRight = 10;
-  const plotBottom = H - (spec.labels.length ? 26 : 12);
-  const plotW = W - padLeft - padRight;
-  const plotH = plotBottom - padTop;
-  const all = spec.series.flatMap((series) => series.values);
-  let min = Math.min(...all);
-  let max = Math.max(...all);
-  if (spec.type === "bar") {
-    min = Math.min(min, 0);
-    max = Math.max(max, 0);
-  }
-  if (min === max) {
-    min -= 1;
-    max += 1;
-  }
-  const y = (value) => padTop + ((max - value) / (max - min)) * plotH;
-  const parts = [];
-
-  if (min < 0 && max > 0) {
-    const zero = y(0).toFixed(1);
-    parts.push(`<line x1="${padLeft}" y1="${zero}" x2="${W - padRight}" y2="${zero}" stroke="var(--line)" stroke-dasharray="3 3"/>`);
-  }
-
   const count = Math.max(...spec.series.map((series) => series.values.length));
-  if (spec.type === "bar") {
-    const values = spec.series[0].values;
-    const slot = plotW / values.length;
-    const barW = Math.max(slot * 0.62, 1);
-    values.forEach((value, i) => {
-      const x = padLeft + i * slot + (slot - barW) / 2;
-      const y0 = y(0);
-      const yv = y(value);
-      const top = Math.min(y0, yv);
-      const height = Math.max(Math.abs(y0 - yv), 1);
-      const tone = value < 0 ? "negative" : "positive";
-      const fill = value < 0 ? "var(--red)" : "var(--green)";
-      parts.push(
-        `<rect class="chart-bar ${tone}" x="${x.toFixed(1)}" y="${top.toFixed(1)}" width="${barW.toFixed(1)}" height="${height.toFixed(1)}" fill="${fill}"/>`
-      );
-    });
-  } else {
-    spec.series.forEach((series, seriesIndex) => {
-      const step = plotW / (series.values.length - 1);
-      const points = series.values
-        .map((value, i) => `${(padLeft + i * step).toFixed(1)},${y(value).toFixed(1)}`)
-        .join(" ");
-      parts.push(
-        `<polyline points="${points}" fill="none" stroke="${CHART_SERIES_COLORS[seriesIndex]}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`
-      );
-    });
-  }
-
-  const unitSuffix = spec.unit ? ` ${escapeHtml(spec.unit)}` : "";
-  parts.push(
-    `<text x="${padLeft + 2}" y="${padTop + 10}" class="chart-axis">${escapeHtml(chartNumber(max))}${unitSuffix}</text>`,
-    `<text x="${padLeft + 2}" y="${(plotBottom - 4).toFixed(1)}" class="chart-axis">${escapeHtml(chartNumber(min))}${unitSuffix}</text>`
-  );
-
-  if (spec.labels.length) {
-    const shown = Math.min(spec.labels.length, 8);
-    for (let i = 0; i < shown; i += 1) {
-      const sourceIndex = Math.round((i * (spec.labels.length - 1)) / Math.max(shown - 1, 1));
-      const x = spec.labels.length === 1
-        ? padLeft + plotW / 2
-        : padLeft + (sourceIndex * plotW) / (spec.labels.length - 1);
-      parts.push(
-        `<text x="${x.toFixed(1)}" y="${H - 8}" class="chart-axis" text-anchor="middle">${escapeHtml(spec.labels[sourceIndex] || "")}</text>`
-      );
-    }
-  }
-
-  const legend = spec.series.some((series) => series.name)
+  const labels = Array.from({ length: count }, (_, index) => spec.labels[index] || "");
+  const unitSuffix = spec.unit ? ` ${spec.unit}` : "";
+  const format = (value) => `${chartNumber(value)}${unitSuffix}`;
+  const series = spec.type === "bar"
+    ? [{
+        label: spec.series[0].name || spec.title || "Value",
+        type: "bar",
+        values: spec.series[0].values,
+        className: "chart-bar",
+        barClass: (value) => (value < 0 ? "negative" : "positive"),
+        colorFor: (value) => (value < 0 ? "var(--red)" : "var(--green)"),
+        color: "var(--green)",
+      }]
+    : spec.series.map((item, index) => ({
+        label: item.name || `Series ${index + 1}`,
+        type: "line",
+        values: item.values,
+        color: CHART_SERIES_COLORS[index],
+        width: 2,
+        endDot: true,
+        className: "chart-line",
+      }));
+  const legend = spec.series.some((item) => item.name)
     ? `<div class="report-chart-legend">${spec.series
-        .map((series, i) => {
-          const last = series.values[series.values.length - 1];
-          return `<span><i style="background:${CHART_SERIES_COLORS[i]}"></i>${escapeHtml(series.name || `Series ${i + 1}`)} ${escapeHtml(chartNumber(last))}${unitSuffix}</span>`;
+        .map((item, index) => {
+          const last = item.values[item.values.length - 1];
+          const kind = spec.type === "bar" ? "bar" : "line";
+          return `<span><i class="viz-swatch viz-swatch-${kind}" style="--swatch:${CHART_SERIES_COLORS[index]}"></i>${escapeHtml(item.name || `Series ${index + 1}`)} ${escapeHtml(format(last))}</span>`;
         })
         .join("")}</div>`
     : "";
   const caption = spec.title ? `<figcaption>${escapeHtml(spec.title)}</figcaption>` : "";
-  const label = escapeHtml(spec.title || "Report chart");
-  return `<figure class="report-chart">${caption}<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${label}" preserveAspectRatio="none">${parts.join("")}</svg>${legend}</figure>`;
+  const chart = chartMarkup(
+    {
+      x: labels,
+      series,
+      y: { format },
+      height: "220px",
+      tooltipTitle: (index) => labels[index] || `Point ${index + 1}`,
+    },
+    { label: spec.title || "Report chart" },
+  );
+  return `<figure class="report-chart">${caption}${chart}${legend}</figure>`;
 }
 
 function mdInline(text) {
@@ -5038,27 +4992,22 @@ function fringeEquityChart(curve) {
   if (curve.length < 2) {
     return '<div class="empty-state">The curve builds as daily marks accrue</div>';
   }
-  const width = 720;
-  const height = 200;
-  const pad = 8;
   const equities = curve.map((point) => Number(point.equity));
-  const min = Math.min(...equities, 10000);
-  const max = Math.max(...equities, 10000);
-  const span = max - min || 1;
-  const x = (index) => pad + (index / (curve.length - 1)) * (width - pad * 2);
-  const y = (value) => height - pad - ((value - min) / span) * (height - pad * 2);
-  const pts = equities.map((value, index) => `${x(index).toFixed(1)},${y(value).toFixed(1)}`);
-  const base = y(10000).toFixed(1);
   const last = equities[equities.length - 1];
   const tone = last >= 10000 ? "positive" : "negative";
-  const area = `M ${pts[0]} L ${pts.join(" L ")} L ${x(curve.length - 1).toFixed(1)},${base} L ${x(0).toFixed(1)},${base} Z`;
+  const color = tone === "positive" ? "var(--green)" : "var(--red)";
   return `<div class="equity-chart-wrap">
-    <svg class="equity-chart equity-${tone}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="Equity curve, now ${escapeHtml(formatUsdWhole(last))}">
-      <path class="equity-area" d="${area}"></path>
-      <line class="equity-base" x1="${pad}" y1="${base}" x2="${width - pad}" y2="${base}"></line>
-      <polyline class="equity-line" points="${pts.join(" ")}"></polyline>
-      <circle class="equity-dot" cx="${x(curve.length - 1).toFixed(1)}" cy="${y(last).toFixed(1)}" r="3"></circle>
-    </svg>
+    ${chartMarkup(
+      {
+        x: curve.map((point) => point.date),
+        xFormat: keyDateShort,
+        series: [{ label: "Equity", type: "line", values: equities, color, width: 2, area: true, endDot: true }],
+        y: { format: formatUsdWhole },
+        references: [{ value: 10000, label: "Start $10k" }],
+        height: "220px",
+      },
+      { className: `equity-chart equity-${tone}`, label: `Equity curve, now ${formatUsdWhole(last)}` },
+    )}
     <div class="equity-axis">
       <span>${escapeHtml(curve[0].date)}</span>
       <span>peak ${escapeHtml(formatUsdWhole(Math.max(...equities)))} \u00b7 trough ${escapeHtml(formatUsdWhole(Math.min(...equities)))} \u00b7 now ${escapeHtml(formatUsdWhole(last))}</span>
@@ -5374,12 +5323,12 @@ function scaleTileValues(tiles) {
 }
 
 // Green/red wash deepening toward a +/-3% clamp; null marks stay neutral.
+// Mixed into the surface color so the scale follows the light/dark theme.
 function mapTileColor(pct) {
   if (typeof pct !== "number") return "var(--surface-soft)";
-  const alpha = Math.min(Math.abs(pct) / 3, 1) * 0.58 + 0.1;
-  return pct >= 0
-    ? `rgba(45, 148, 106, ${alpha.toFixed(3)})`
-    : `rgba(196, 78, 74, ${alpha.toFixed(3)})`;
+  const weight = (Math.min(Math.abs(pct) / 3, 1) * 0.58 + 0.1) * 100;
+  const tone = pct >= 0 ? "var(--green)" : "var(--red)";
+  return `color-mix(in srgb, ${tone} ${weight.toFixed(1)}%, var(--surface-soft))`;
 }
 
 // Squarified treemap (Bruls et al.): places value-weighted items into rect,
@@ -6451,18 +6400,20 @@ function sparklineSvg(values, animate = false) {
   if (points.length < 2) return '<span class="sparkline-empty">--</span>';
   const width = 64;
   const height = 22;
+  // One-unit inset keeps the stroke inside the box at the extremes.
+  const inset = 1;
   const min = Math.min(...points);
   const max = Math.max(...points);
   const span = max - min || 1;
-  const path = points
-    .map((value, index) => {
-      const x = (index / (points.length - 1)) * width;
-      const y = height - ((value - min) / span) * height;
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(" ");
+  const coords = points.map((value, index) => {
+    const x = (index / (points.length - 1)) * width;
+    const y = height - inset - ((value - min) / span) * (height - inset * 2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  const path = coords.join(" ");
+  const area = `0,${height} ${path} ${width},${height}`;
   const tone = points[points.length - 1] >= points[0] ? "positive" : "negative";
-  return `<svg class="sparkline sparkline-${tone}${animate ? " spark-draw" : ""}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true"><polyline points="${path}"></polyline></svg>`;
+  return `<svg class="sparkline sparkline-${tone}${animate ? " spark-draw" : ""}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true"><polygon points="${area}"></polygon><polyline points="${path}"></polyline></svg>`;
 }
 
 function filterMarketsByGroup(groupName) {
@@ -8052,6 +8003,9 @@ function renderAiTokenIndex() {
       <td>${formatAiPrice(model.effective_price)}</td>
     </tr>
   `).join("");
+  // Points without any priced series are dropped; the broad index draws last, on top.
+  const indexRows = (latestAiIndex.series || []).slice(-90);
+  const indexSeries = aiIndexSeriesDefs(indexRows);
   aiIndexBoard.innerHTML = `
     <div class="ai-metrics ai-index-metrics">${metrics}</div>
     <div class="ai-index-layout">
@@ -8060,16 +8014,10 @@ function renderAiTokenIndex() {
           <h3>Usage-weighted price history</h3>
           <span>Observed input/output mix</span>
         </div>
-        <div class="ai-index-chart" role="img" aria-label="Usage-weighted token price history">
-          ${aiIndexChart(latestAiIndex.series || [])}
+        <div class="ai-index-chart">
+          ${aiIndexChart(indexSeries, indexRows)}
         </div>
-        <div class="ai-index-legend">
-          <span><i class="main"></i>Broad</span>
-          <span><i class="open"></i>Open-weight</span>
-          <span><i class="proprietary"></i>Proprietary</span>
-          <span><i class="frontier"></i>Frontier</span>
-          <span><i class="china"></i>China</span>
-        </div>
+        <div class="ai-index-legend">${chartLegend([...indexSeries].reverse())}</div>
       </section>
       <section class="ai-index-side">
         <h3>Top models by observed tokens</h3>
@@ -8089,53 +8037,33 @@ function renderAiTokenIndex() {
   `;
 }
 
-function aiIndexChart(series) {
-  const rows = series.slice(-90);
+function aiIndexSeriesDefs(rows) {
+  const values = (key) => rows.map((row) => {
+    const value = Number(row[key]);
+    return Number.isFinite(value) ? value : null;
+  });
+  return [
+    { label: "Proprietary", type: "line", values: values("proprietary_price"), color: "var(--chart-ma-50)", width: 1.4, smooth: true, className: "series-proprietary" },
+    { label: "China", type: "line", values: values("china_price"), color: "var(--chart-rose)", width: 1.4, smooth: true, className: "series-china" },
+    { label: "Frontier", type: "line", values: values("frontier_price"), color: "var(--chart-ma-200)", width: 1.6, dashed: true, smooth: true, className: "series-frontier" },
+    { label: "Open-weight", type: "line", values: values("open_price"), color: "var(--green)", width: 1.4, smooth: true, className: "series-open" },
+    { label: "Broad", type: "line", values: values("index_price"), color: "var(--accent)", width: 2.4, smooth: true, area: true, endDot: true, className: "series-main" },
+  ];
+}
+
+function aiIndexChart(series, rows) {
   if (!rows.length) return '<div class="empty-state">No index history yet</div>';
-  const keys = ["index_price", "open_price", "proprietary_price", "frontier_price", "china_price"];
-  const values = rows.flatMap((row) => keys.map((key) => Number(row[key])).filter(Number.isFinite));
-  if (!values.length) return '<div class="empty-state">No priced observations</div>';
-  const width = 760;
-  const height = 320;
-  const pad = { left: 54, right: 14, top: 16, bottom: 27 };
-  let min = Math.min(...values);
-  let max = Math.max(...values);
-  const spread = Math.max(max - min, Math.max(Math.abs(max), 1) * 0.08);
-  min = Math.max(0, min - spread * 0.12);
-  max += spread * 0.12;
-  const x = (index) =>
-    pad.left + (index / Math.max(rows.length - 1, 1)) * (width - pad.left - pad.right);
-  const y = (value) =>
-    pad.top + ((max - value) / (max - min)) * (height - pad.top - pad.bottom);
-  const points = (key) => rows
-    .map((row, index) => {
-      const value = Number(row[key]);
-      return Number.isFinite(value) ? `${x(index).toFixed(1)},${y(value).toFixed(1)}` : null;
-    })
-    .filter(Boolean)
-    .join(" ");
-  const firstDate = escapeHtml(rows[0].date);
-  const lastDate = escapeHtml(rows[rows.length - 1].date);
-  const grid = [0, 0.5, 1].map((fraction) => {
-    const gridY = pad.top + fraction * (height - pad.top - pad.bottom);
-    const label = max - fraction * (max - min);
-    return `
-      <line class="grid-line" x1="${pad.left}" y1="${gridY}" x2="${width - pad.right}" y2="${gridY}" />
-      <text x="5" y="${gridY + 3}">$${label.toFixed(2)}</text>
-    `;
-  }).join("");
-  return `
-    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
-      ${grid}
-      <polyline class="series-proprietary" points="${points("proprietary_price")}" />
-      <polyline class="series-china" points="${points("china_price")}" />
-      <polyline class="series-frontier" points="${points("frontier_price")}" />
-      <polyline class="series-open" points="${points("open_price")}" />
-      <polyline class="series-main" points="${points("index_price")}" />
-      <text x="${pad.left}" y="${height - 7}">${firstDate}</text>
-      <text x="${width - pad.right}" y="${height - 7}" text-anchor="end">${lastDate}</text>
-    </svg>
-  `;
+  return chartMarkup(
+    {
+      x: rows.map((row) => row.date),
+      xFormat: keyDateShort,
+      series,
+      y: { format: (value) => `$${value.toFixed(value >= 10 ? 1 : 2)}` },
+      height: "clamp(300px, 28vw, 420px)",
+      tooltipTitle: (index) => rows[index].date,
+    },
+    { label: "Usage-weighted token price history" },
+  );
 }
 
 async function fetchAiCapex(force = false) {
@@ -8195,6 +8123,7 @@ function renderAiCapex() {
     </tr>
   `).join("");
   const latestSeries = latestAiCapex.series?.at(-1);
+  const capexRows = (latestAiCapex.series || []).slice(-12);
   aiCapexBoard.innerHTML = `
     <div class="ai-metrics">${metrics}</div>
     <div class="ai-index-layout ai-capex-layout">
@@ -8203,12 +8132,11 @@ function renderAiCapex() {
           <h3>Calendar-quarter reported capex</h3>
           <span>USD · public company statements</span>
         </div>
-        <div class="ai-index-chart" role="img" aria-label="Aggregate quarterly reported capital expenditure">
-          ${aiCapexChart(latestAiCapex.series || [])}
+        <div class="ai-index-chart">
+          ${aiCapexChart(capexRows)}
         </div>
         <div class="ai-index-legend">
-          <span><i class="main"></i>Aggregate capex</span>
-          <span>${latestSeries?.company_count || 0} issuers in latest calendar quarter</span>
+          ${chartLegend(aiCapexSeries(capexRows), [`${latestSeries?.company_count || 0} issuers in latest calendar quarter`])}
         </div>
       </section>
       <section class="ai-index-side ai-capex-side">
@@ -8227,6 +8155,31 @@ function renderAiCapex() {
       coverage until every issuer reports.
     </div>
   `;
+}
+
+function aiCapexSeries(rows) {
+  return [{
+    label: "Aggregate capex",
+    type: "bar",
+    values: rows.map((row) => Number(row.total_capex)),
+    color: "var(--accent)",
+    className: "series-main",
+  }];
+}
+
+function aiCapexChart(rows) {
+  if (!rows.length) return '<div class="empty-state">No capex history yet</div>';
+  return chartMarkup(
+    {
+      x: rows.map((row) => row.period),
+      series: aiCapexSeries(rows),
+      y: { format: formatNeocloudUsd },
+      aspect: "16 / 7",
+      // A quarter is complete only once every issuer has reported it.
+      tooltipExtra: (index) => [["Issuers reported", String(rows[index].company_count || 0)]],
+    },
+    { label: "Aggregate quarterly reported capital expenditure" },
+  );
 }
 
 async function fetchAiNeoclouds(force = false) {
@@ -8348,6 +8301,8 @@ function renderAiNeoclouds() {
   const views = NEOCLOUD_VIEWS.map(([value, label]) => `
     <button type="button" data-neocloud-view="${value}" aria-pressed="false">${label}</button>
   `).join("");
+  const capitalRows = series.slice(-8);
+  const capitalDefs = aiNeocloudSeries(capitalRows);
   aiNeocloudsBoard.innerHTML = `
     <div class="ai-metrics">${metrics}</div>
     <div class="ai-neocloud-views">
@@ -8361,15 +8316,10 @@ function renderAiNeoclouds() {
             <h3>Deals announced vs. listed spending</h3>
             <span>USD · by calendar quarter</span>
           </div>
-          <div class="ai-index-chart" role="img" aria-label="Announced debt and equity deals with listed capex and net financing by calendar quarter">
-            ${aiNeocloudChart(series)}
+          <div class="ai-index-chart">
+            ${aiNeocloudChart(capitalRows, capitalDefs)}
           </div>
-          <div class="ai-index-legend">
-            <span><i class="bar debt"></i>Debt deals announced</span>
-            <span><i class="bar equity"></i>Equity deals announced</span>
-            <span><i class="capex"></i>Listed capex</span>
-            <span><i class="financing"></i>Listed net financing cash flow</span>
-          </div>
+          <div class="ai-index-legend">${chartLegend(capitalDefs.series)}</div>
         </section>
         <section class="ai-index-side">
           <h3>Private issuers · Form D</h3>
@@ -8499,11 +8449,8 @@ function renderAiNeocloudDebt() {
     Number(unallocated)
       ? `${formatNeocloudUsd(unallocated)} reported for later years with no deal to date it`
       : "",
-  ].filter(Boolean).map((note) => `<span>${escapeHtml(note)}</span>`).join("");
-  const legend = NEOCLOUD_WALL_SEGMENTS
-    .filter(([field]) => wall.some((row) => Number(row[field]) > 0))
-    .map(([field, label]) => `<span><i class="bar wall-${field}"></i>${escapeHtml(label)}</span>`)
-    .join("");
+  ].filter(Boolean);
+  const wallDefs = aiNeocloudWallSeries(wall);
   const heading = selected
     ? `${escapeHtml(selected.name)} · <button type="button" class="ai-table-link ai-neocloud-reset" data-neocloud-company="">All issuers</button>`
     : `Sector · ${Number(debt.reported_companies) || 0} of ${companies.length} issuers report a schedule`;
@@ -8514,10 +8461,10 @@ function renderAiNeocloudDebt() {
           <h3>Principal due by year</h3>
           <span>${heading}</span>
         </div>
-        <div class="ai-index-chart" role="img" aria-label="Debt principal due each year by source">
-          ${aiNeocloudMaturityChart(wall)}
+        <div class="ai-index-chart">
+          ${aiNeocloudMaturityChart(wallDefs)}
         </div>
-        <div class="ai-index-legend">${legend}${notes}</div>
+        <div class="ai-index-legend">${chartLegend(wallDefs.series, notes)}</div>
         ${selected ? aiNeocloudDebtDetail(selected) : ""}
       </section>
       <section class="ai-index-side">
@@ -8824,145 +8771,90 @@ function updateAiHardwareEstimate(rateOverride = null, nameOverride = null) {
   }
 }
 
-function aiCapexChart(series) {
-  const rows = series.slice(-12);
-  const values = rows.map((row) => Number(row.total_capex) / 1e9).filter(Number.isFinite);
-  if (!values.length) return '<div class="empty-state">No capex history yet</div>';
-  const width = 760;
-  const height = 320;
-  const pad = { left: 54, right: 14, top: 16, bottom: 27 };
-  const max = Math.max(...values, 1) * 1.08;
-  const x = (index) =>
-    pad.left + (index / Math.max(rows.length - 1, 1)) * (width - pad.left - pad.right);
-  const y = (value) =>
-    pad.top + ((max - value) / max) * (height - pad.top - pad.bottom);
-  const points = rows.map((row, index) =>
-    `${x(index).toFixed(1)},${y(Number(row.total_capex) / 1e9).toFixed(1)}`,
-  ).join(" ");
-  const grid = [0, 0.5, 1].map((fraction) => {
-    const gridY = pad.top + fraction * (height - pad.top - pad.bottom);
-    return `
-      <line class="grid-line" x1="${pad.left}" y1="${gridY}" x2="${width - pad.right}" y2="${gridY}" />
-      <text x="5" y="${gridY + 3}">$${(max * (1 - fraction)).toFixed(0)}B</text>
-    `;
-  }).join("");
-  return `
-    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
-      ${grid}
-      <polyline class="series-main" points="${points}" />
-      <text x="${pad.left}" y="${height - 7}">${escapeHtml(rows[0].period)}</text>
-      <text x="${width - pad.right}" y="${height - 7}" text-anchor="end">${escapeHtml(rows.at(-1).period)}</text>
-    </svg>
-  `;
-}
-
-function aiNeocloudChart(series) {
-  const rows = series.slice(-8);
-  if (!rows.length) return '<div class="empty-state">No quarterly filings yet</div>';
-  const width = 760;
-  const height = 320;
-  const pad = { left: 54, right: 14, top: 16, bottom: 27 };
-  const billions = (value) => (Number(value) || 0) / 1e9;
+function aiNeocloudSeries(rows) {
   // Lines skip quarters most listed issuers have not reported yet, so a
   // half-reported quarter does not read as a collapse in spending.
   const maxCount = Math.max(...rows.map((row) => Number(row.company_count) || 0), 0);
   const reported = (row) => maxCount > 0 && Number(row.company_count) >= maxCount * 0.75;
-  const values = rows.flatMap((row) => [
-    billions(row.announced_debt) + billions(row.announced_equity),
-    ...(reported(row) ? [billions(row.capex), billions(row.net_financing)] : []),
-  ]);
-  const max = Math.max(...values, 1) * 1.08;
-  const min = Math.min(0, ...values);
-  const plotHeight = height - pad.top - pad.bottom;
-  const y = (value) => pad.top + ((max - value) / (max - min)) * plotHeight;
-  const band = (width - pad.left - pad.right) / rows.length;
-  const center = (index) => pad.left + band * (index + 0.5);
-  const barWidth = Math.min(46, band * 0.5);
-  const bars = rows.map((row, index) => {
-    const debt = billions(row.announced_debt);
-    const total = debt + billions(row.announced_equity);
-    const left = (center(index) - barWidth / 2).toFixed(1);
-    return `
-      <rect class="bar-debt" x="${left}" y="${y(debt).toFixed(1)}" width="${barWidth.toFixed(1)}" height="${(y(0) - y(debt)).toFixed(1)}" />
-      <rect class="bar-equity" x="${left}" y="${y(total).toFixed(1)}" width="${barWidth.toFixed(1)}" height="${(y(debt) - y(total)).toFixed(1)}" />
-      <text x="${center(index).toFixed(1)}" y="${height - 7}" text-anchor="middle">${escapeHtml(row.period)}</text>
-    `;
-  }).join("");
-  const line = (field) => rows
-    .map((row, index) => (reported(row) ? `${center(index).toFixed(1)},${y(billions(row[field])).toFixed(1)}` : null))
-    .filter(Boolean)
-    .join(" ");
-  const ticks = [max, max / 2, 0, ...(min < 0 ? [min] : [])].map((value) => `
-    <line class="grid-line" x1="${pad.left}" y1="${y(value).toFixed(1)}" x2="${width - pad.right}" y2="${y(value).toFixed(1)}" />
-    <text x="5" y="${(y(value) + 3).toFixed(1)}">$${value.toFixed(0)}B</text>
-  `).join("");
-  return `
-    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
-      ${ticks}
-      ${bars}
-      <polyline class="series-capex" points="${line("capex")}" />
-      <polyline class="series-financing" points="${line("net_financing")}" />
-    </svg>
-  `;
+  const listed = (field) => rows.map((row) => (reported(row) ? Number(row[field]) : null));
+  return {
+    maxCount,
+    series: [
+      { label: "Debt deals announced", type: "bar", values: rows.map((row) => Number(row.announced_debt)), color: "var(--accent)", className: "bar-debt" },
+      { label: "Equity deals announced", type: "bar", values: rows.map((row) => Number(row.announced_equity)), color: "var(--green)", className: "bar-equity" },
+      { label: "Listed capex", type: "line", values: listed("capex"), color: "var(--chart-ma-200)", width: 2.2, endDot: true, className: "series-capex" },
+      { label: "Listed net financing cash flow", type: "line", values: listed("net_financing"), color: "var(--chart-ma-50)", width: 2, dashed: true, className: "series-financing" },
+    ],
+  };
 }
 
-function aiNeocloudMaturityChart(wall) {
+function aiNeocloudChart(rows, defs) {
+  if (!rows.length) return '<div class="empty-state">No quarterly filings yet</div>';
+  return chartMarkup(
+    {
+      x: rows.map((row) => row.period),
+      series: defs.series,
+      y: { format: formatNeocloudUsd },
+      aspect: "19 / 8",
+      tooltipExtra: (index) => [[
+        "Listed issuers reported",
+        `${Number(rows[index].company_count) || 0} of ${defs.maxCount}`,
+      ]],
+    },
+    { label: "Announced debt and equity deals with listed capex and net financing by calendar quarter" },
+  );
+}
+
+const NEOCLOUD_WALL_STYLES = {
+  reported: { color: "var(--accent)" },
+  reported_split: { color: "var(--accent)", opacity: 0.45 },
+  after_report: { color: "var(--chart-ma-200)" },
+  deals: { color: "var(--chart-ma-50)" },
+  deals_amortizing: { color: "var(--chart-ma-50)", opacity: 0.45 },
+};
+
+function aiNeocloudWallSeries(wall) {
   const fields = NEOCLOUD_WALL_SEGMENTS.map(([field]) => field);
-  const billions = (value) => (Number(value) || 0) / 1e9;
-  const total = (row) => fields.reduce((sum, field) => sum + billions(row[field]), 0);
+  const total = (row) => fields.reduce((sum, field) => sum + (Number(row[field]) || 0), 0);
   const rows = wall.filter((row) => total(row) > 0);
-  if (!rows.length) return '<div class="empty-state">No dated maturities</div>';
-  const width = 760;
-  const height = 320;
-  const pad = { left: 54, right: 14, top: 16, bottom: 27 };
+  if (!rows.length) return { years: [], series: [] };
   // One slot per calendar year, so gaps between maturity years stay visible.
   const first = Number(rows[0].year);
   const last = Number(rows.at(-1).year);
   const byYear = new Map(rows.map((row) => [Number(row.year), row]));
   const years = Array.from({ length: last - first + 1 }, (_, index) => first + index);
-  // Scale to the data so a $200M issuer is as readable as the sector.
-  const max = Math.max(...rows.map(total)) * 1.08;
-  const plotHeight = height - pad.top - pad.bottom;
-  const y = (value) => pad.top + ((max - value) / max) * plotHeight;
-  const band = (width - pad.left - pad.right) / years.length;
-  const barWidth = Math.min(46, band * 0.6);
-  // Every year with principal due is labeled; empty years only when there is room.
-  const labelEvery = Math.ceil(years.length / 12);
-  const bars = years.map((year, index) => {
-    const row = byYear.get(year);
-    const center = pad.left + band * (index + 0.5);
-    const label = row || index % labelEvery === 0
-      ? `<text x="${center.toFixed(1)}" y="${height - 7}" text-anchor="middle">${year}</text>`
-      : "";
-    if (!row) return label;
-    let base = 0;
-    const left = (center - barWidth / 2).toFixed(1);
-    const segments = fields.map((field) => {
-      const value = billions(row[field]);
-      if (value <= 0) return "";
-      const top = base + value;
-      const rect = `<rect class="wall-${field}" x="${left}" y="${y(top).toFixed(1)}" width="${barWidth.toFixed(1)}" height="${(y(base) - y(top)).toFixed(1)}"><title>${year} · ${formatNeocloudUsd(Number(row[field]))}</title></rect>`;
-      base = top;
-      return rect;
-    }).join("");
-    return segments + label;
-  }).join("");
-  const ticks = [max, max / 2, 0].map((value) => `
-    <line class="grid-line" x1="${pad.left}" y1="${y(value).toFixed(1)}" x2="${width - pad.right}" y2="${y(value).toFixed(1)}" />
-    <text x="5" y="${(y(value) + 3).toFixed(1)}">${formatNeocloudUsd(value * 1e9)}</text>
-  `).join("");
-  return `
-    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
-      ${ticks}
-      ${bars}
-    </svg>
-  `;
+  const series = NEOCLOUD_WALL_SEGMENTS.map(([field, label]) => {
+    const values = years.map((year) => Number(byYear.get(year)?.[field]) || 0);
+    return {
+      label,
+      type: "bar",
+      values,
+      ...NEOCLOUD_WALL_STYLES[field],
+      className: `wall-${field}`,
+      legend: values.some((value) => value > 0),
+    };
+  });
+  return { years, series };
+}
+
+function aiNeocloudMaturityChart({ years, series }) {
+  if (!years.length) return '<div class="empty-state">No dated maturities</div>';
+  return chartMarkup(
+    {
+      x: years.map(String),
+      series,
+      y: { format: formatNeocloudUsd },
+      aspect: "19 / 8",
+    },
+    { label: "Debt principal due each year by source" },
+  );
 }
 
 function formatNeocloudUsd(value) {
   if (value === null || value === undefined) return "—";
   const number = Number(value);
   if (!Number.isFinite(number)) return "—";
+  if (number === 0) return "$0";
   const sign = number < 0 ? "-" : "";
   const absolute = Math.abs(number);
   if (absolute >= 1e9) {

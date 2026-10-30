@@ -399,7 +399,7 @@ app.include_router(analytics_router)
 
 
 _MINIFIED_SOURCES = (
-    "app.js", "styles.css", "formatting.js", "animations.js", "quote-freshness.js",
+    "app.js", "styles.css", "formatting.js", "animations.js", "quote-freshness.js", "charts.js",
 )
 _MIN_HEADER = re.compile(rb"^/\*src=([0-9a-f]{64})\*/")
 
