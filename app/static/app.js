@@ -235,6 +235,59 @@ const NEOCLOUD_WALL_SEGMENTS = [
   ["deals", "Deal terms, due at maturity (no reported schedule)"],
   ["deals_amortizing", "Deal terms, equal installments assumed (est.)"],
 ];
+let aiNeocloudView = "capital";
+const NEOCLOUD_VIEWS = [
+  ["capital", "Capital raised"],
+  ["balance", "Balance sheets"],
+  ["debt", "Debt & maturities"],
+  ["ledger", "Ledger"],
+];
+// Reading guides for each Neocloud section: what the numbers are and what
+// they signal. Kept next to the views so wording and columns change together.
+const NEOCLOUD_HELP = {
+  capital: {
+    caption: "How the build-out is financed: deals announced each quarter against what listed issuers actually spent and raised.",
+    points: [
+      "Bars are debt and equity deals announced in SEC filings, at headline size (facility size or principal at signing), not cash received that quarter.",
+      "Solid line: capex of listed issuers. Dashed line: their net financing cash flow, meaning new debt and equity minus repayments.",
+      "Dashed line at or above the solid line: spending is funded by outside capital rather than operations. Normal in a build-out, but it depends on markets staying open.",
+      "A rising debt share of the bars means the sector leans more on leverage; equity-heavy quarters dilute shareholders instead.",
+      "The latest quarter fills in as 10-Qs arrive; the lines skip quarters until three quarters of listed issuers have reported.",
+      "Private issuers: equity actually sold per Form D. Rounds without a Form D and private debt are not visible; IPO filing is the S-1/F-1 date.",
+    ],
+  },
+  balance: {
+    caption: "Latest reported balance sheet and the last four reported quarters for each listed issuer.",
+    points: [
+      "Net debt is debt minus cash. Leases are fixed obligations on top of debt, mostly data-center and equipment leases.",
+      "Backlog (remaining performance obligations) is contracted future revenue, the cash flow lenders underwrite. Backlog well above debt is a cushion.",
+      "Capex / rev. above 1× means spending more than the business earns: typical in a build-out, sustainable only while financing stays available.",
+      "Net financing 4Q close to capex 4Q means growth is funded externally. Interest 4Q against revenue 4Q shows how expensive that funding is.",
+      "Balance dates differ by issuer (fiscal years, foreign filers). * marks a figure last tagged in an older filing; hover for its date.",
+    ],
+  },
+  debt: {
+    caption: "When debt comes due, how it is secured and how long it runs. Click an issuer to see its own reported schedule.",
+    points: [
+      "Solid bars: principal the issuer itself reports as outstanding in its 10-Q/10-K, amortization included. The most reliable layer.",
+      "Faded bars are estimates: the report's open-ended last bucket split by the issuer's deal maturities, or equal installments assumed for amortizing deals.",
+      "Purple: deals signed after the latest report, at commitment size. Blue: deal terms for issuers without a reported schedule, which can exceed what is actually drawn.",
+      "A tall year is a refinancing wall: issuers must repay or refinance then, so it depends on credit markets and GPU values at that time.",
+      "Secured: share of debt backed by GPUs, data centers or customer contracts. Unsecured convertibles rely on the share price instead.",
+      "Tenor near or above GPU useful life (about 5–6 years) means the collateral can age out before the debt is repaid.",
+    ],
+  },
+  ledger: {
+    caption: "Every financing and contract filing found in SEC EDGAR, newest first.",
+    points: [
+      "Amount is the headline figure at signing; Form D rows show the amount actually sold.",
+      "Rate is the fixed coupon or the spread over SOFR. Maturity shows the date, tenor from the first filing and the amortization start when stated.",
+      "Launch, pricing and closing filings of one deal are merged into one row; the filing count shows how many.",
+      "Amendment rows change an existing facility and are not counted as new debt.",
+      "Contracts and leases are customer agreements that back the financing, not financing themselves.",
+    ],
+  },
+};
 
 let latestAiHardware = null;
 let aiHardwareFetchedAt = 0;
@@ -876,6 +929,11 @@ function init() {
       aiNeocloudDebtCompany = key === aiNeocloudDebtCompany ? "" : key;
       renderAiNeocloudDebt();
       renderAiNeocloudLedger();
+      return;
+    }
+    const view = event.target.closest("button[data-neocloud-view], button[data-neocloud-view-link]");
+    if (view) {
+      selectNeocloudView(view.dataset.neocloudView || view.dataset.neocloudViewLink);
       return;
     }
     const button = event.target.closest("button[data-neocloud-filter]");
@@ -8287,39 +8345,45 @@ function renderAiNeoclouds() {
   const filters = NEOCLOUD_FILTERS.map(([value, label]) => `
     <button type="button" data-neocloud-filter="${value}" aria-pressed="false">${label}</button>
   `).join("");
+  const views = NEOCLOUD_VIEWS.map(([value, label]) => `
+    <button type="button" data-neocloud-view="${value}" aria-pressed="false">${label}</button>
+  `).join("");
   aiNeocloudsBoard.innerHTML = `
     <div class="ai-metrics">${metrics}</div>
-    <div class="ai-index-layout ai-neocloud-layout">
-      <section class="ai-index-chart-panel">
-        <div class="ai-index-heading">
-          <h3>Quarterly capital formation</h3>
-          <span>USD · SEC filings</span>
-        </div>
-        <div class="ai-index-chart" role="img" aria-label="Announced debt and equity deals with listed capex and net financing by calendar quarter">
-          ${aiNeocloudChart(series)}
-        </div>
-        <div class="ai-index-legend">
-          <span><i class="bar debt"></i>Debt deals announced</span>
-          <span><i class="bar equity"></i>Equity deals announced</span>
-          <span><i class="capex"></i>Listed capex</span>
-          <span><i class="financing"></i>Listed net financing cash flow</span>
-        </div>
-      </section>
-      <section class="ai-index-side">
-        <h3>Private issuers · Form D</h3>
-        <div class="ai-table-wrap">
-          <table class="ai-table">
-            <thead><tr><th>Company</th><th>Last filing</th><th>Raised · 3Y</th><th>Last round</th><th>IPO filing</th></tr></thead>
-            <tbody>${privateRows || '<tr><td colspan="5">No Form D notices in range</td></tr>'}</tbody>
-          </table>
-        </div>
-      </section>
+    <div class="ai-neocloud-views">
+      <div class="category-tabs" role="group" aria-label="Neocloud section">${views}</div>
     </div>
-    <section class="ai-neocloud-section">
-      <div class="ai-index-heading">
-        <h3>Listed issuers · latest balance sheet</h3>
-        <span>Trailing figures = last four reported quarters</span>
+    <section class="ai-neocloud-view" data-neocloud-panel="capital">
+      ${neocloudSectionHead("Capital raised", NEOCLOUD_HELP.capital)}
+      <div class="ai-index-layout ai-neocloud-layout">
+        <section class="ai-index-chart-panel">
+          <div class="ai-index-heading">
+            <h3>Deals announced vs. listed spending</h3>
+            <span>USD · by calendar quarter</span>
+          </div>
+          <div class="ai-index-chart" role="img" aria-label="Announced debt and equity deals with listed capex and net financing by calendar quarter">
+            ${aiNeocloudChart(series)}
+          </div>
+          <div class="ai-index-legend">
+            <span><i class="bar debt"></i>Debt deals announced</span>
+            <span><i class="bar equity"></i>Equity deals announced</span>
+            <span><i class="capex"></i>Listed capex</span>
+            <span><i class="financing"></i>Listed net financing cash flow</span>
+          </div>
+        </section>
+        <section class="ai-index-side">
+          <h3>Private issuers · Form D</h3>
+          <div class="ai-table-wrap">
+            <table class="ai-table">
+              <thead><tr><th>Company</th><th>Last filing</th><th>Raised · 3Y</th><th>Last round</th><th>IPO filing</th></tr></thead>
+              <tbody>${privateRows || '<tr><td colspan="5">No Form D notices in range</td></tr>'}</tbody>
+            </table>
+          </div>
+        </section>
       </div>
+    </section>
+    <section class="ai-neocloud-view" data-neocloud-panel="balance">
+      ${neocloudSectionHead("Balance sheets", NEOCLOUD_HELP.balance)}
       <div class="ai-table-wrap">
         <table class="ai-table">
           <thead><tr>
@@ -8331,12 +8395,16 @@ function renderAiNeoclouds() {
         </table>
       </div>
     </section>
-    <div id="ai-neocloud-debt-section" class="ai-neocloud-section"></div>
-    <section class="ai-neocloud-section">
-      <div class="ai-index-heading">
-        <h3>Financing ledger<span id="ai-neocloud-ledger-scope"></span></h3>
-        <div class="category-tabs" role="group" aria-label="Financing ledger filter">${filters}</div>
-      </div>
+    <section class="ai-neocloud-view" data-neocloud-panel="debt">
+      ${neocloudSectionHead("Debt & maturities", NEOCLOUD_HELP.debt)}
+      <div id="ai-neocloud-debt-section"></div>
+    </section>
+    <section class="ai-neocloud-view" data-neocloud-panel="ledger">
+      ${neocloudSectionHead(
+        'Financing ledger<span id="ai-neocloud-ledger-scope"></span>',
+        NEOCLOUD_HELP.ledger,
+        `<div class="category-tabs" role="group" aria-label="Financing ledger filter">${filters}</div>`,
+      )}
       <div class="ai-table-wrap ai-neocloud-ledger-wrap">
         <table class="ai-table ai-neocloud-ledger">
           <thead><tr><th>Filed</th><th>Company</th><th>Type</th><th>Amount</th><th>Rate</th><th>Security</th><th>Maturity</th><th>Detail</th></tr></thead>
@@ -8351,8 +8419,38 @@ function renderAiNeoclouds() {
   `;
   renderAiNeocloudDebt();
   renderAiNeocloudLedger();
+  selectNeocloudView(aiNeocloudView);
 }
 
+function selectNeocloudView(view) {
+  aiNeocloudView = NEOCLOUD_VIEWS.some(([value]) => value === view) ? view : "capital";
+  aiNeocloudsBoard.querySelectorAll("[data-neocloud-panel]").forEach((panel) => {
+    panel.hidden = panel.dataset.neocloudPanel !== aiNeocloudView;
+  });
+  aiNeocloudsBoard.querySelectorAll("button[data-neocloud-view]").forEach((button) => {
+    const active = button.dataset.neocloudView === aiNeocloudView;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+}
+
+// Section header: title, one-line takeaway and a collapsible reading guide.
+// Help text is static copy, so only the optional controls carry markup.
+function neocloudSectionHead(title, help, controls = "") {
+  return `
+    <header class="ai-neocloud-head">
+      <div>
+        <h3>${title}</h3>
+        <p>${escapeHtml(help.caption)}</p>
+      </div>
+      ${controls}
+    </header>
+    <details class="ai-neocloud-help">
+      <summary>How to read this</summary>
+      <ul>${help.points.map((point) => `<li>${escapeHtml(point)}</li>`).join("")}</ul>
+    </details>
+  `;
+}
 
 function renderAiNeocloudDebt() {
   const container = aiNeocloudsBoard.querySelector("#ai-neocloud-debt-section");
@@ -8370,14 +8468,12 @@ function renderAiNeocloudDebt() {
   const rows = companies.map((company) => {
     const active = company.key === aiNeocloudDebtCompany;
     const schedule = company.schedule;
-    const basis = schedule
-      ? `${schedule.form} · ${schedule.as_of}`
-      : "deal terms only";
+    const basis = schedule ? `${schedule.form} · ${schedule.as_of}` : "deal terms only";
     const nextSource = company.next_maturity_source === "reported"
       ? escapeHtml(schedule?.form || "report")
       : "deal";
     const next = company.next_maturity
-      ? `${escapeHtml(company.next_maturity)} <span class="ai-provider">· ${formatNeocloudUsd(company.next_maturity_amount)} · ${nextSource}</span>`
+      ? `${escapeHtml(company.next_maturity)}<span class="ai-capex-symbol">${formatNeocloudUsd(company.next_maturity_amount)} · ${nextSource}</span>`
       : "—";
     return `
       <tr class="${active ? "selected" : ""}">
@@ -8386,7 +8482,7 @@ function renderAiNeocloudDebt() {
           <span class="ai-capex-symbol">${escapeHtml(basis)}</span>
         </td>
         <td>${schedule ? formatNeocloudUsd(schedule.total) : "—"}</td>
-        <td>${Number(company.instruments) || 0} <span class="ai-provider">· ${formatNeocloudUsd(company.face)}</span></td>
+        <td>${Number(company.instruments) || 0}<span class="ai-capex-symbol">${formatNeocloudUsd(company.face)}</span></td>
         <td>${share(company.secured_share)}</td>
         <td>${formatNeocloudYears(company.avg_tenor_years)}</td>
         <td>${next}</td>
@@ -8412,10 +8508,10 @@ function renderAiNeocloudDebt() {
     ? `${escapeHtml(selected.name)} · <button type="button" class="ai-table-link ai-neocloud-reset" data-neocloud-company="">All issuers</button>`
     : `Sector · ${Number(debt.reported_companies) || 0} of ${companies.length} issuers report a schedule`;
   container.innerHTML = `
-    <div class="ai-neocloud-debt-layout">
+    <div class="ai-index-layout ai-neocloud-layout ai-neocloud-debt-grid">
       <section class="ai-index-chart-panel">
         <div class="ai-index-heading">
-          <h3>Debt maturity wall</h3>
+          <h3>Principal due by year</h3>
           <span>${heading}</span>
         </div>
         <div class="ai-index-chart" role="img" aria-label="Debt principal due each year by source">
@@ -8425,10 +8521,10 @@ function renderAiNeocloudDebt() {
         ${selected ? aiNeocloudDebtDetail(selected) : ""}
       </section>
       <section class="ai-index-side">
-        <h3>Debt stack by issuer · click to drill in</h3>
+        <h3>Debt stack · click an issuer</h3>
         <div class="ai-table-wrap">
           <table class="ai-table ai-neocloud-debt">
-            <thead><tr><th>Company</th><th>Reported principal</th><th>Debt deals</th><th>Secured</th><th>Avg tenor</th><th>Next maturity</th><th>Due ${dueYear ? `≤ ${dueYear}` : ""}</th></tr></thead>
+            <thead><tr><th>Company</th><th>Reported</th><th>Deals</th><th>Secured</th><th>Tenor</th><th>Next due</th><th>Due ${dueYear ? `≤ ${dueYear}` : ""}</th></tr></thead>
             <tbody>${rows || '<tr><td colspan="7">No debt in range</td></tr>'}</tbody>
           </table>
         </div>
@@ -8465,6 +8561,7 @@ function aiNeocloudDebtDetail(company) {
     const count = Number(afterReport.count);
     parts.push(`<p>${count} debt ${count === 1 ? "deal" : "deals"} signed after the report: ${formatNeocloudUsd(afterReport.amount)} of commitments.</p>`);
   }
+  parts.push(`<button type="button" class="ai-table-link ai-neocloud-ledger-link" data-neocloud-view-link="ledger">Show ${escapeHtml(company.name)} filings in the ledger →</button>`);
   return `<div class="ai-neocloud-detail-block">${parts.join("")}</div>`;
 }
 

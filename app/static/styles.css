@@ -6717,7 +6717,8 @@ a.key-date-row:focus-visible {
   background: var(--surface-selected);
 }
 
-.ai-neocloud-reset {
+.ai-neocloud-reset,
+.ai-neocloud-ledger-link {
   padding: 0;
   border: 0;
   background: none;
@@ -6742,25 +6743,70 @@ a.key-date-row:focus-visible {
   margin-bottom: 8px;
 }
 
-.ai-neocloud-section {
-  border-top: 1px solid var(--line);
-}
-
-/* The debt stack table needs the full width: chart on top, table below. */
-.ai-neocloud-debt-layout .ai-index-chart-panel {
-  border-right: 0;
-  border-bottom: 1px solid var(--line);
-}
-
-.ai-neocloud-debt-layout .ai-index-chart {
-  height: clamp(240px, 22vw, 340px);
-}
-
-.ai-neocloud-section > .ai-index-heading {
+.ai-neocloud-views {
+  display: flex;
   align-items: center;
-  margin: 0;
-  padding: 10px 12px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--line);
+  background: var(--surface-raised);
+}
+
+.ai-neocloud-view[hidden] {
+  display: none;
+}
+
+.ai-neocloud-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 12px 6px;
+}
+
+.ai-neocloud-head h3 {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.ai-neocloud-head p {
+  max-width: 860px;
+  margin: 0;
+  color: var(--muted-strong);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.ai-neocloud-help {
+  padding: 0 12px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted-strong);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ai-neocloud-help summary {
+  width: max-content;
+  color: var(--accent);
+  cursor: pointer;
+  font: 10px var(--font-mono);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+}
+
+.ai-neocloud-help ul {
+  max-width: 960px;
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.ai-neocloud-help li + li {
+  margin-top: 4px;
+}
+
+/* Debt view: the stack table gets slightly more room than the chart. */
+.ai-neocloud-debt-grid {
+  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
 }
 
 .ai-neocloud-ledger-wrap {

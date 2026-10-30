@@ -32,7 +32,10 @@ hyperscalers and chip suppliers from Yahoo Finance company statements, including
 changes, trailing-four-quarter spend, and capex/revenue intensity. Reported total capex is an
 AI-infrastructure proxy because issuers do not consistently isolate AI-only spend. Neoclouds
 (`GET /api/ai/neoclouds`) tracks how GPU clouds and AI data-center builders are financed, from
-SEC EDGAR only. Listed issuers (CoreWeave, Nebius, IREN, WhiteFiber, Applied Digital, Cipher,
+SEC EDGAR only. Under five headline numbers it splits into Capital raised, Balance sheets, Debt &
+maturities, and Ledger views; each opens with a one-line takeaway and a collapsible "How to read
+this" guide (`NEOCLOUD_HELP` in `app.js`) explaining what the figures measure and signal.
+Listed issuers (CoreWeave, Nebius, IREN, WhiteFiber, Applied Digital, Cipher,
 TeraWulf, Core Scientific, Hut 8) get cash, debt, leases, contracted backlog (RPO), and
 trailing-four-quarter revenue, capex, net financing cash flow, and interest from XBRL company
 facts. Their deals come from 8-K items 1.01/2.03/3.02, 6-K reports, and prospectus covers:

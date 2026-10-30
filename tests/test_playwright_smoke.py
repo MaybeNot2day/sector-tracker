@@ -416,11 +416,26 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
     expect(page.locator("#ai-capex-panel")).to_be_hidden()
     expect(page.locator("#ai-source-link")).to_have_text("SEC EDGAR source")
     expect(page.locator("#ai-neoclouds-board .ai-metric")).to_have_count(5)
+
+    def neocloud_view(view: str) -> None:
+        page.locator(f'#ai-neoclouds-board button[data-neocloud-view="{view}"]').click()
+        expect(page.locator(f'[data-neocloud-panel="{view}"]')).to_be_visible()
+
+    # Capital raised is the default view; every view explains how to read it.
+    expect(page.locator('[data-neocloud-panel="capital"]')).to_be_visible()
+    expect(page.locator('[data-neocloud-panel="debt"]')).to_be_hidden()
     expect(page.locator("#ai-neoclouds-board .bar-debt")).to_have_count(2)
+    capital_help = page.locator('[data-neocloud-panel="capital"] .ai-neocloud-help')
+    capital_help.locator("summary").click()
+    expect(capital_help.locator("li").first).to_be_visible()
+
     # A balance the issuer stopped tagging is flagged with its last reported date.
+    neocloud_view("balance")
     stale_debt = page.locator("#ai-neoclouds-board td.ai-neocloud-stale")
     expect(stale_debt).to_have_text("$3.1B*")
     expect(stale_debt).to_have_attribute("title", "Last tagged 2026-03-31")
+
+    neocloud_view("ledger")
     ledger = page.locator("#ai-neocloud-ledger tr")
     expect(ledger).to_have_count(2)
     page.locator('#ai-neoclouds-board button[data-neocloud-filter="debt"]').click()
@@ -429,11 +444,24 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
     expect(ledger.first).to_contain_text("Secured · GPUs, Contracts")
     expect(ledger.first).to_contain_text("2031-09-01 · 5.1y")
     expect(ledger.first).to_contain_text("SOFR + 5.5%")
+    expect(ledger.first.locator("a")).to_have_attribute(
+        "href", "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000001/loan.htm"
+    )
+    page.locator('#ai-neoclouds-board button[data-neocloud-filter="contract"]').click()
+    expect(ledger).to_have_count(1)
+    expect(ledger.first).to_contain_text("€2B")
+    page.locator('#ai-neoclouds-board button[data-neocloud-filter="all"]').click()
+
     # Sector wall: each source is its own segment.
+    neocloud_view("debt")
     for segment in ("reported", "reported_split", "after_report", "deals"):
         expect(page.locator(f"#ai-neoclouds-board rect.wall-{segment}")).to_have_count(1)
     debt_rows = page.locator("#ai-neoclouds-board .ai-neocloud-debt tbody tr")
     expect(debt_rows).to_have_count(2)
+    wall_box = page.locator("#ai-neocloud-debt-section .ai-index-chart").bounding_box()
+    assert wall_box is not None
+    # The chart keeps its drawing proportions instead of stretching to the row.
+    assert abs(wall_box["width"] / wall_box["height"] - 760 / 320) < 0.1
     # Drilling into one issuer redraws its wall and scopes the ledger to it.
     page.locator('#ai-neoclouds-board button[data-neocloud-company="CRWV"]').click()
     expect(page.locator("#ai-neoclouds-board rect.wall-deals")).to_have_count(0)
@@ -441,18 +469,14 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
         "Principal maturities as reported in 10-Q 2026-06-30"
     )
     expect(page.locator(".ai-neocloud-schedule tbody tr")).to_have_count(2)
-    page.locator('#ai-neoclouds-board button[data-neocloud-filter="all"]').click()
+    page.locator(".ai-neocloud-ledger-link").click()
+    expect(page.locator('[data-neocloud-panel="ledger"]')).to_be_visible()
     expect(ledger).to_have_count(1)
+    neocloud_view("debt")
     page.locator(".ai-neocloud-reset").click()
     expect(page.locator(".ai-neocloud-detail-block")).to_have_count(0)
+    neocloud_view("ledger")
     expect(ledger).to_have_count(2)
-    page.locator('#ai-neoclouds-board button[data-neocloud-filter="debt"]').click()
-    expect(ledger.first.locator("a")).to_have_attribute(
-        "href", "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000001/loan.htm"
-    )
-    page.locator('#ai-neoclouds-board button[data-neocloud-filter="contract"]').click()
-    expect(ledger).to_have_count(1)
-    expect(ledger.first).to_contain_text("€2B")
 
     page.locator("#ai-hardware-tab").click()
     expect(page.locator("#ai-hardware-panel")).to_be_visible()
