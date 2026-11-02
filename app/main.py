@@ -187,6 +187,10 @@ def configure_logging() -> None:
         handler = logging.StreamHandler()
         handler.setFormatter(logging.Formatter(_LOG_FORMAT))
         root.addHandler(handler)
+    # HTTP clients log every request at INFO; at a 10 s poll cadence that
+    # buries the app's own warnings. Their failures surface through callers.
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(max(level, logging.WARNING))
 
 
 def _log_loop_crash(task: asyncio.Task[None]) -> None:
