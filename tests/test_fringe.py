@@ -31,8 +31,10 @@ from app.services.fringe import (
     _pnl_pct,
     _position_notional,
     _risk_mode,
+    _target_price,
     parse_fringe_actions,
 )
+from app.services.hyperliquid_discovery import CRYPTO_GROUP_NAME
 
 # --- grammar ---------------------------------------------------------------
 
@@ -784,21 +786,31 @@ def test_market_context_shape_movers_and_clamped_days(
                 AssetConfig(symbol="AAA", type="equity", source="yahoo"),
                 AssetConfig(symbol="BBB", type="equity", source="yahoo"),
             ],
-        )
+        ),
+        # Auto-discovered Hyperliquid listings (prod: USELESS) are not curated
+        # watchlist names and must not crowd the movers.
+        GroupConfig(
+            name=CRYPTO_GROUP_NAME,
+            assets=[AssetConfig(symbol="USELESS", type="crypto", source="hyperliquid")],
+        ),
     ]
     path = configure_app({}, groups=groups)
     client = TestClient(app)
 
-    # 21 daily closes: AAA grinds up, BBB bleeds.
+    # 21 daily closes: AAA grinds up, BBB bleeds, the auto listing moons.
     db.save_bars(path, daily_bars("AAA", [100.0 + i for i in range(21)]))
     db.save_bars(path, daily_bars("BBB", [200.0 - 2 * i for i in range(21)]))
-    db.save_board_snapshot(path, "2026-07-15", {"regime": "risk-on"})
-    db.save_board_snapshot(path, "2026-07-16", {"regime": "chop"})
-    db.upsert_etf_flow_history(path, [("BTC", "2026-07-16", 100_000_000.0)])
-    tomorrow = (datetime.now(ZoneInfo("America/New_York")).date() + timedelta(days=1)).isoformat()
+    db.save_bars(path, daily_bars("USELESS", [1.0 + i for i in range(21)]))
+    today = datetime.now(ZoneInfo("America/New_York")).date()
+    day_before = (today - timedelta(days=2)).isoformat()
+    yesterday = (today - timedelta(days=1)).isoformat()
+    db.save_board_snapshot(path, day_before, {"regime": "risk-on"})
+    db.save_board_snapshot(path, yesterday, {"regime": "chop"})
+    db.upsert_etf_flow_history(path, [("BTC", yesterday, 100_000_000.0)])
+    tomorrow = (today + timedelta(days=1)).isoformat()
     db.replace_key_dates(path, slug="brief", events=[(tomorrow, "08:30 ET", "CPI", "MACRO")])
     db.apply_fringe_actions(
-        path, slug="fringe", report_date="2026-07-16", actions=[act("open", "AAA", "long")]
+        path, slug="fringe", report_date=yesterday, actions=[act("open", "AAA", "long")]
     )
 
     payload = client.get("/api/market-context", params={"days": 500}).json()
@@ -814,7 +826,7 @@ def test_market_context_shape_movers_and_clamped_days(
         "fringe_book",
     }
     # Snapshots are the exact rows /api/snapshots serves (oldest first, date-keyed).
-    assert [row["date"] for row in payload["snapshots"]] == ["2026-07-15", "2026-07-16"]
+    assert [row["date"] for row in payload["snapshots"]] == [day_before, yesterday]
     assert payload["snapshots"][1]["regime"] == "chop"
     # Movers from the cached daily closes: 120 vs 115 five bars back, etc.
     movers = payload["movers"]
@@ -822,7 +834,7 @@ def test_market_context_shape_movers_and_clamped_days(
     assert movers["5d"]["laggards"][0] == {"symbol": "BBB", "pct": -5.88}
     assert movers["20d"]["leaders"][0] == {"symbol": "AAA", "pct": 20.0}
     assert movers["20d"]["laggards"][0] == {"symbol": "BBB", "pct": -20.0}
-    assert payload["etf_flows"] == {"BTC": [{"date": "2026-07-16", "flow": 100_000_000.0}]}
+    assert payload["etf_flows"] == {"BTC": [{"date": yesterday, "flow": 100_000_000.0}]}
     assert [item["title"] for item in payload["key_dates"]] == ["CPI"]
     assert [idea["ticker"] for idea in payload["fringe_book"]["open"]] == ["AAA"]
     assert payload["fringe_book"]["recently_closed"] == []
@@ -875,6 +887,7 @@ def test_parse_bullet_reads_conf_and_stop_tags() -> None:
         ("0.6", 60.0),
         ("99.9%", 95.0),  # clamped: certainty is not a probability estimate
         ("2", 5.0),
+        ("1%", 5.0),  # an explicit percent is never a fraction
         ("confident", None),
         (None, None),
     ],
@@ -883,6 +896,22 @@ def test_confidence_parsing_clamps_to_probability_band(
     raw: str | None, expected: float | None
 ) -> None:
     assert _confidence_pct(raw) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("$120", 120.0),
+        ("75k", 75000.0),
+        ("1,250.5", 1250.5),
+        ("120 key level", 120.0),
+        ("+20% from entry", None),
+        ("back to 0.55 after +20%", 0.55),
+        ("retest", None),
+    ],
+)
+def test_target_price_reads_prices_not_words_or_percents(raw: str, expected: float | None) -> None:
+    assert _target_price(raw) == expected
 
 
 def test_kelly_fraction_math_and_geometry_guards() -> None:
@@ -1139,7 +1168,7 @@ def test_fringe_excursions_from_daily_bars(tmp_path: Path) -> None:
             bar(20, 200.0, 100.0),
             Bar(
                 symbol="NVDA",
-                provider="stooq",
+                provider="hyperliquid",
                 interval="1d",
                 timestamp=datetime(2026, 7, 12, 13, 30, tzinfo=UTC),
                 open=50_000.0,
@@ -1151,7 +1180,7 @@ def test_fringe_excursions_from_daily_bars(tmp_path: Path) -> None:
     )
     # Long window 07-10 -> 07-16: worst low 150, best high 180; the 07-20 bar
     # sits outside the window and must not leak in. The largest coherent
-    # provider series is Yahoo, so incompatible one-row Stooq units are ignored.
+    # provider series is Yahoo, so incompatible one-row Hyperliquid units are ignored.
     mae, mfe = db.fringe_excursions(
         path,
         symbol="NVDA",

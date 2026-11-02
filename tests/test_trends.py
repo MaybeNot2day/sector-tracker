@@ -96,3 +96,53 @@ def test_days_window_trims_to_trailing_sessions(tmp_path: Path) -> None:
     crypto_groups = [GroupConfig(name="Perps", assets=[_asset("AAA", "crypto_perp")])]
     crypto_payload = group_trends_payload(path, crypto_groups, days=14)
     assert cast(list[dict[str, Any]], crypto_payload["groups"])[0]["category"] == "crypto"
+
+
+def test_weekend_sessions_traded_only_by_24_7_members_stay_out_of_the_band(
+    tmp_path: Path,
+) -> None:
+    # Prod ROBOTICS: weekend points used only the Hyperliquid member, so the
+    # avg jumped 91.6 -> 132.96 (min == max) and back to 91.0 on Monday.
+    path = tmp_path / "board.sqlite3"
+    friday = datetime(2026, 8, 7, 20, 0, tzinfo=UTC)
+    days = [friday + timedelta(days=i) for i in range(4)]  # Fri, Sat, Sun, Mon
+    bars = []
+    for day, eq in zip([days[0], days[3]], [100.0, 90.0], strict=True):
+        bars.append(_bar("EQA", day, eq))
+        bars.append(_bar("EQB", day, eq))
+    for day, perp in zip(days, [10.0, 14.0, 15.0, 11.0], strict=True):
+        bars.append(_bar("PERP", day, perp))
+    db.save_bars(path, bars)
+    groups = [
+        GroupConfig(
+            name="Robotics",
+            assets=[_asset("EQA"), _asset("EQB"), _asset("PERP", "crypto_perp")],
+        )
+    ]
+
+    payload = group_trends_payload(path, groups, days=14)
+
+    series = cast(list[dict[str, Any]], payload["groups"])[0]["series"]
+    assert [point["date"] for point in series] == ["2026-08-07", "2026-08-10"]
+    assert series[-1]["avg"] == round((90.0 + 90.0 + 110.0) / 3, 2)
+
+
+def test_member_missing_a_common_session_carries_its_last_close(tmp_path: Path) -> None:
+    path = tmp_path / "board.sqlite3"
+    bars = []
+    for i, close in enumerate([10.0, 11.0, 12.0, 13.0, 14.0]):
+        day = DAY0 + timedelta(days=i)
+        bars.append(_bar("AAA", day, close))
+        bars.append(_bar("BBB", day, close * 2))
+        if i != 2:  # CCC misses one session but clears the coverage bar.
+            bars.append(_bar("CCC", day, 50.0))
+    db.save_bars(path, bars)
+    groups = [GroupConfig(name="Trio", assets=[_asset("AAA"), _asset("BBB"), _asset("CCC")])]
+
+    payload = group_trends_payload(path, groups, days=14)
+
+    series = cast(list[dict[str, Any]], payload["groups"])[0]["series"]
+    gap = series[2]
+    # CCC's flat 100 still counts on the session it missed.
+    assert gap["min"] == 100.0
+    assert gap["avg"] == round((120.0 + 120.0 + 100.0) / 3, 2)

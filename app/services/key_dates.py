@@ -35,7 +35,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 DEFAULT_CATEGORY = "EVENT"
 TABLE_CATEGORY = "MACRO"
@@ -57,7 +58,7 @@ _EVENT = re.compile(
     ))?
     \s*(?:[\u2014\u2013:]|-)\s+                         # — – - : separator
     (?P<title>.+?)
-    (?:\s*[\[(](?P<category>[A-Za-z][A-Za-z0-9 &/-]{0,15})[\])])?  # [MACRO]
+    (?:\s*[\[(](?P<category>(?i:MACRO|EVENT|EARNINGS|OPEX|HOLIDAY|CRYPTO))[\])])?  # [MACRO]
     $
     """,
     re.VERBOSE,
@@ -78,8 +79,13 @@ _TIME = re.compile(r"\b(\d{1,2}:\d{2})\b")
 # Session tokens legal in when-cells/bullets in place of a clock time.
 _SESSION = re.compile(r"\b(?:AMC|BMO)\b")
 _YEAR = re.compile(r"\b(20\d{2})\b")
+# Whole month names or abbreviations only: "Pre-market 08:00" and
+# "Decision 14:00" are not March 8 / December 14. A day followed by ":"
+# is a clock time.
 _MONTH_DAY = re.compile(
-    r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b",
+    r"\b(january|february|march|april|may|june|july|august|september|october"
+    r"|november|december|jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec)\b\.?"
+    r"\s+(\d{1,2})\b(?!:\d)",
     re.IGNORECASE,
 )
 _MONTH_NUMBERS = {
@@ -372,3 +378,94 @@ def _parse_iso(value: str | None) -> date | None:
         return date.fromisoformat(value)
     except ValueError:
         return None
+
+
+_EVENT_TIME = re.compile(r"\b(\d{1,2}):(\d{2})\s*([A-Za-z]{2,4})?\b")
+# Coarse zone map; ZoneInfo handles DST for the aliases that have it.
+_ZONES = {
+    "ET": "America/New_York",
+    "EST": "America/New_York",
+    "EDT": "America/New_York",
+    "CET": "Europe/Paris",
+    "CEST": "Europe/Paris",
+    "BST": "Europe/London",
+    "GMT": "UTC",
+    "UTC": "UTC",
+}
+_KEY_TOKEN = re.compile(r"[a-z0-9]+")
+# Words two briefs vary on while naming the same print ("US Chicago PMI
+# (Oct)" vs "Chicago PMI"): geography prefixes, period qualifiers, years.
+_KEY_NOISE = frozenset(
+    "us usa the of and january february march april may june july august september "
+    "october november december jan feb mar apr jun jul aug sept sep oct nov dec".split()
+)
+_KEY_YEAR = re.compile(r"(?:19|20)\d\d")
+_KEY_SEGMENT = re.compile(r"\s+[\u2014\u2013]\s+|:\s")
+
+
+def event_moment_utc(event_date: date, event_time: str | None) -> datetime | None:
+    """UTC instant of a stored event when its time carries a known zone."""
+    if not event_time:
+        return None
+    match = _EVENT_TIME.search(event_time)
+    if match is None or match.group(3) is None:
+        return None
+    zone_name = _ZONES.get(match.group(3).upper())
+    if zone_name is None:
+        return None
+    hour, minute = int(match.group(1)), int(match.group(2))
+    if hour > 23 or minute > 59:
+        return None
+    local = datetime(event_date.year, event_date.month, event_date.day, hour, minute)
+    return local.replace(tzinfo=ZoneInfo(zone_name)).astimezone(UTC)
+
+
+def event_time_slot(event_date: str, event_time: str | None) -> str | None:
+    """Comparable clock for one event: the UTC instant when zoned, else HH:MM."""
+    if not event_time:
+        return None
+    day = _parse_iso(event_date)
+    moment = event_moment_utc(day, event_time) if day is not None else None
+    if moment is not None:
+        return moment.strftime("%H:%MZ")
+    match = _EVENT_TIME.search(event_time)
+    if match is None:
+        return " ".join(event_time.split()).upper()
+    return f"{int(match.group(1)):02d}:{match.group(2)}"
+
+
+def event_sort_key(event_date: str, event_time: str | None) -> tuple[str, int, float, str]:
+    """Chronological order: date, timed before untimed, then parsed clock.
+
+    "8:30 ET" sorts before "10:00 ET" (text order would not); zoned times
+    compare as UTC instants so CET and ET prints interleave correctly.
+    """
+    if not event_time:
+        return (event_date, 1, 0.0, "")
+    day = _parse_iso(event_date)
+    moment = event_moment_utc(day, event_time) if day is not None else None
+    if moment is not None:
+        return (event_date, 0, moment.timestamp(), event_time)
+    match = _EVENT_TIME.search(event_time)
+    if match is not None and day is not None:
+        wall = datetime(day.year, day.month, day.day, tzinfo=UTC) + timedelta(
+            hours=int(match.group(1)), minutes=int(match.group(2))
+        )
+        return (event_date, 0, wall.timestamp(), event_time)
+    # Session tokens (BMO/AMC) and odd stamps: after clock times, by text.
+    return (event_date, 0, float("inf"), event_time)
+
+
+def event_key(title: str) -> str:
+    """Normalized identity of an event title for cross-report dedupe.
+
+    Only the lead segment counts: "Chicago PMI — consensus 54.8" names the
+    same print as "US Chicago PMI (Oct)".
+    """
+    lead = _KEY_SEGMENT.split(title, maxsplit=1)[0]
+    tokens = [
+        token
+        for token in _KEY_TOKEN.findall(lead.casefold())
+        if token not in _KEY_NOISE and not _KEY_YEAR.fullmatch(token)
+    ]
+    return " ".join(sorted(set(tokens))) or " ".join(title.casefold().split())

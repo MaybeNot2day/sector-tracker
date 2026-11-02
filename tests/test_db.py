@@ -256,7 +256,7 @@ def test_load_bars_by_symbol_limits_each_partition_in_sql(tmp_path: Path) -> Non
         )
         for symbol, provider, count in (
             ("AAPL", "yahoo", 7),
-            ("AAPL", "stooq", 5),
+            ("AAPL", "hyperliquid", 5),
             ("BTC", "hyperliquid", 6),
         )
         for day in range(count)
@@ -275,12 +275,12 @@ def test_load_bars_by_symbol_limits_each_partition_in_sql(tmp_path: Path) -> Non
 
     assert set(loaded) == {
         ("AAPL", "yahoo"),
-        ("AAPL", "stooq"),
+        ("AAPL", "hyperliquid"),
         ("BTC", "hyperliquid"),
     }
     assert {key: [bar.timestamp for bar in series] for key, series in loaded.items()} == {
         ("AAPL", "yahoo"): [start + timedelta(days=day) for day in (4, 5, 6)],
-        ("AAPL", "stooq"): [start + timedelta(days=day) for day in (2, 3, 4)],
+        ("AAPL", "hyperliquid"): [start + timedelta(days=day) for day in (2, 3, 4)],
         ("BTC", "hyperliquid"): [start + timedelta(days=day) for day in (3, 4, 5)],
     }
     assert all(len(series) == 3 for series in loaded.values())
@@ -307,11 +307,11 @@ def test_load_daily_close_tails_keeps_one_provider_series(tmp_path: Path) -> Non
             )
             for day in range(3)
         ],
-        # Stooq stores the SAME newest session with a slightly different
+        # Hyperliquid stores the SAME newest session with a slightly different
         # close; it must neither mix into Yahoo's tail nor duplicate the date.
         Bar(
             symbol="AAPL",
-            provider="stooq",
+            provider="hyperliquid",
             interval="1d",
             timestamp=start + timedelta(days=2),
             open=9.0,

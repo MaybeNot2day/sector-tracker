@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from secrets import randbits
 
 # Version 1 adopts pre-versioned databases without rebuilding their tables.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS latest_quotes (
@@ -313,6 +313,19 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
             """
         )
         conn.execute("PRAGMA user_version = 5")
+    if version < 6:
+        # Schedules record the parser that produced their fiscal-year mapping so
+        # parser fixes re-read stored filings instead of waiting for a new 10-Q.
+        _ensure_column(
+            conn, "neocloud_debt_schedules", "parser_version", "INTEGER NOT NULL DEFAULT 0"
+        )
+        # Multi-tranche offerings: JSON list of {amount, maturity, rate}.
+        _ensure_column(conn, "neocloud_filings", "tranches", "TEXT")
+        # OpenRouter's weekly rankings carry complete data only for the latest
+        # day; earlier refreshes stored the 1-14 leftover rows of older days as
+        # index points. A real day prices hundreds of models.
+        conn.execute("DELETE FROM ai_token_index WHERE model_count < 100")
+        conn.execute("PRAGMA user_version = 6")
     # Also quarantine corrupt rows introduced outside the provider path. The
     # delete trigger participates in this transaction and invalidates readers.
     _quarantine_invalid_bars(conn)

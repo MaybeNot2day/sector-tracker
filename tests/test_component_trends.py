@@ -180,11 +180,11 @@ def push_app(tmp_path: Path) -> Iterator[Any]:
     app.state.settings = SimpleNamespace(
         edit_token="sekrit", database_path=tmp_path / "board.sqlite3"
     )
-    component_trends._cache.update({"at": 0.0, "payload": None, "failed_at": None})
+    component_trends._cache.update({"at": 0.0, "payload": None, "failed_at": None, "failures": 0})
 
     yield app.state
 
-    component_trends._cache.update({"at": 0.0, "payload": None, "failed_at": None})
+    component_trends._cache.update({"at": 0.0, "payload": None, "failed_at": None, "failures": 0})
     if had_settings:
         app.state.settings = original
     else:
@@ -220,7 +220,7 @@ async def test_failed_scrape_round_is_negatively_cached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = 0
-    component_trends._cache.update({"at": 0.0, "payload": None, "failed_at": None})
+    component_trends._cache.update({"at": 0.0, "payload": None, "failed_at": None, "failures": 0})
 
     async def fail_category(client: object, slug: str, label: str) -> None:
         nonlocal calls
@@ -237,9 +237,8 @@ async def test_failed_scrape_round_is_negatively_cached(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fallback_source", ["memory", "pushed"])
 async def test_partial_scrape_keeps_failed_categories_and_retries_soon(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fallback_source: str
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = 100_000.0
     as_of = "2026-10-07T12:00:00Z"
@@ -263,11 +262,9 @@ async def test_partial_scrape_keeps_failed_categories_and_retries_soon(
     monkeypatch.setattr(
         component_trends,
         "_cache",
-        {"at": 0.0, "payload": previous if fallback_source == "memory" else None, "failed_at": None},
+        {"at": 0.0, "payload": previous, "failed_at": None, "failures": 0},
     )
-    store_path = tmp_path / "trends.json" if fallback_source == "pushed" else None
-    if store_path is not None:
-        store_path.write_text(json.dumps(previous), encoding="utf-8")
+    store_path = None
 
     def handler(request: httpx.Request) -> httpx.Response:
         slug = request.url.path.rstrip("/").rsplit("/", 1)[-1]
@@ -340,3 +337,68 @@ async def test_full_scrape_failure_marks_existing_charts_stale(
     assert stale["categories"][0]["charts"] == previous["categories"][0]["charts"]
     assert stale["categories"][0]["stale"] is True
     assert "stale" not in previous["categories"][0]
+
+
+@pytest.mark.asyncio
+async def test_stale_pushed_store_is_served_stale_without_live_scrapes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Production: Cloudflare 403s the server, so every live scrape after a
+    # cooldown burned 6 failing requests per page view.
+    store_path = tmp_path / "component_trends.json"
+    pushed = {
+        "as_of": "2000-01-01T00:00:00Z",
+        "source": "https://pcpartpicker.com/trends/",
+        "categories": copy.deepcopy(VALID_PUSH["categories"]),
+    }
+    store_path.write_text(json.dumps(pushed), encoding="utf-8")
+    monkeypatch.setattr(
+        component_trends,
+        "_cache",
+        {"at": 0.0, "payload": None, "failed_at": None, "failures": 0},
+    )
+    calls = 0
+
+    async def fetch_category(client: object, slug: str, label: str) -> None:
+        nonlocal calls
+        calls += 1
+
+    monkeypatch.setattr(component_trends, "_fetch_category", fetch_category)
+
+    payload = await component_trends.component_trends_payload(store_path)
+
+    assert calls == 0
+    assert payload["stale"] is True
+    assert payload["categories"][0]["charts"] == pushed["categories"][0]["charts"]
+    assert payload["categories"][0]["stale"] is True
+
+
+@pytest.mark.asyncio
+async def test_consecutive_scrape_failures_back_off_longer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 100_000.0
+    calls = 0
+    monkeypatch.setattr(component_trends, "monotonic", lambda: now)
+    monkeypatch.setattr(
+        component_trends,
+        "_cache",
+        {"at": 0.0, "payload": None, "failed_at": None, "failures": 0},
+    )
+
+    async def fail_category(client: object, slug: str, label: str) -> None:
+        nonlocal calls
+        calls += 1
+
+    monkeypatch.setattr(component_trends, "_fetch_category", fail_category)
+    rounds = len(component_trends.CATEGORIES)
+
+    await component_trends.component_trends_payload()
+    assert calls == rounds
+    now += component_trends.FAILURE_RETRY_SECONDS + 1
+    await component_trends.component_trends_payload()
+    assert calls == 2 * rounds
+    # The second failure in a row waits longer than the first retry interval.
+    now += component_trends.FAILURE_RETRY_SECONDS + 1
+    await component_trends.component_trends_payload()
+    assert calls == 2 * rounds

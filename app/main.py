@@ -8,13 +8,14 @@ import re
 import secrets
 import shutil
 import tempfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, date, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from threading import Lock
 from time import monotonic, time
-from typing import Annotated, Literal, cast
+from typing import Annotated, Any, Literal, cast
 
 from fastapi import (
     Depends,
@@ -45,7 +46,6 @@ from app.config import (
 from app.models import AssetConfig, AssetType, GroupConfig, ProviderName
 from app.providers.base import QuoteProvider
 from app.providers.hyperliquid import HyperliquidProvider
-from app.providers.stooq import StooqProvider
 from app.providers.yahoo import YahooProvider
 from app.routes.analytics import router as analytics_router
 from app.routes.status import router as status_router
@@ -78,7 +78,7 @@ from app.services.component_trends import (
 from app.services.component_trends import store_file as component_trends_store
 from app.services.crypto_etf_flows import CryptoEtfFlowService
 from app.services.daily_board import DailyBoardService
-from app.services.earnings import EarningsCalendarService, week_start
+from app.services.earnings import EarningsCalendarService, eastern_today, week_start
 from app.services.econ_calendar import EconCalendarService, key_dates_payload
 from app.services.fringe import FringeService, parse_fringe_actions
 from app.services.gpu_compute import GPUComputeService
@@ -169,6 +169,26 @@ class FringeCloseRequest(BaseModel):
     reason: str = Field(default="auto-stop", min_length=1, max_length=300)
 
 
+_LOG_FORMAT = "%(levelname)s %(name)s: %(message)s"
+
+
+def configure_logging() -> None:
+    """Route app loggers to stderr with level + logger name (journald stamps time).
+
+    LOG_LEVEL (default INFO) sets the root level. uvicorn's own loggers keep
+    their handlers and do not propagate, so nothing is printed twice; an
+    already-configured root (tests, embedding hosts) keeps its handlers.
+    """
+    level_name = os.environ.get("LOG_LEVEL", "INFO").strip().upper()
+    level = logging.getLevelNamesMapping().get(level_name, logging.INFO)
+    root = logging.getLogger()
+    root.setLevel(level)
+    if not root.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+        root.addHandler(handler)
+
+
 def _log_loop_crash(task: asyncio.Task[None]) -> None:
     # A crashed poll loop previously died silently; the board just froze.
     if task.cancelled():
@@ -180,6 +200,7 @@ def _log_loop_crash(task: asyncio.Task[None]) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    configure_logging()
     settings = Settings()
     ensure_runtime_watchlist(settings)
     ensure_runtime_database(settings)
@@ -194,7 +215,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     providers: dict[ProviderName, QuoteProvider] = {
         "yahoo": YahooProvider(),
         "hyperliquid": HyperliquidProvider(),
-        "stooq": StooqProvider(),
     }
 
     app.state.settings = settings
@@ -330,21 +350,41 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await stop_task(app.state.hyperliquid_discovery_task)
         if app.state.sofr_task is not None:
             await stop_task(app.state.sofr_task)
-        if app.state.candle_stream_service is not None:
-            await app.state.candle_stream_service.aclose()
         await asyncio.gather(
-            *(provider.aclose() for provider in providers.values()),
-            app.state.news_service.aclose(),
-            app.state.options_service.aclose(),
-            app.state.econ_calendar_service.aclose(),
-            app.state.earnings_service.aclose(),
-            app.state.ai_data_service.aclose(),
-            app.state.ai_capex_service.aclose(),
-            app.state.neocloud_finance_service.aclose(),
-            app.state.gpu_compute_service.aclose(),
-            app.state.sofr_service.aclose(),
-            return_exceptions=True,
+            *(
+                _close_service(f"{name} provider", partial(providers.get, name))
+                for name in providers
+            ),
+            *(
+                _close_service(attr, partial(getattr, app.state, attr))
+                for attr in _SHUTDOWN_SERVICES
+            ),
         )
+
+
+# Closed independently at shutdown: a missing or failing service must not
+# keep the rest from releasing their HTTP clients.
+_SHUTDOWN_SERVICES = (
+    "candle_stream_service",
+    "news_service",
+    "options_service",
+    "econ_calendar_service",
+    "earnings_service",
+    "ai_data_service",
+    "ai_capex_service",
+    "neocloud_finance_service",
+    "gpu_compute_service",
+    "sofr_service",
+)
+
+
+async def _close_service(name: str, resolve: Callable[[], Any]) -> None:
+    try:
+        service = resolve()
+        if service is not None:
+            await service.aclose()
+    except Exception:
+        logger.exception("shutdown: closing %s failed", name)
 
 
 SECURITY_HEADERS = (
@@ -971,7 +1011,7 @@ async def earnings_calendar(start: str | None = Query(default=None)) -> dict[str
     first per day and carry an options-implied move when available.
     """
     if start is None:
-        monday = week_start(datetime.now(UTC).date())
+        monday = week_start(eastern_today())
     else:
         try:
             monday = week_start(date.fromisoformat(start))

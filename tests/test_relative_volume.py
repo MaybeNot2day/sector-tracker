@@ -110,3 +110,20 @@ def test_bar_dates_are_compared_in_utc() -> None:
     bars = completed + [_bar(datetime(2026, 7, 3, 4, 0, tzinfo=tokyo), 50.0)]
 
     assert _relative_volume(_quote(volume=None, timestamp=quote_ts), bars) == 0.5
+
+
+def test_us_equity_session_day_survives_utc_midnight() -> None:
+    # Hyperliquid-first quote (timestamp=now, no volume) at 00:30 UTC Wed
+    # 2026-11-04 = 19:30 EST Tue: Tuesday's bar is still the session bar.
+    quote = Quote.from_last_and_prev_close(
+        symbol="AAPL",
+        asset_type="equity",
+        provider="hyperliquid",
+        last=100.0,
+        previous_close=99.0,
+        timestamp=datetime(2026, 11, 4, 0, 30, tzinfo=UTC),
+    )
+    tuesday = datetime(2026, 11, 3, 14, 30, tzinfo=UTC)
+    completed = [_bar(tuesday - timedelta(days=21 - i), 100.0) for i in range(20)]
+
+    assert _relative_volume(quote, completed + [_bar(tuesday, 50.0)]) == 0.5

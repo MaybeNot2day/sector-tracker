@@ -3,14 +3,19 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from statistics import fmean, median
 from time import monotonic
 from typing import Any
 
 from app import db
-from app.calendar_windows import months_before
+from app.calendar_windows import (
+    is_us_trading_day,
+    months_before,
+    us_session_date,
+    us_session_open_at,
+)
 from app.models import AssetConfig, Bar, GroupConfig, ProviderName, Quote
 from app.services.hyperliquid_discovery import AUTO_GROUP_NAMES
 from app.services.macro import vix_read
@@ -131,11 +136,14 @@ class DailyBoardService:
         # which during a full provider outage is the date of the last
         # successful fetch — writing under that key would silently overwrite
         # a PAST day's persisted snapshot with degraded metrics.
-        today = datetime.now(UTC).date().isoformat()
-        as_of_date = str(overview.get("as_of", ""))[:10]
-        if as_of_date and as_of_date != today:
+        today = _utc_now().date()
+        if not is_us_trading_day(today):
+            # No session: a weekend row would be a copy of Friday's board.
             return
-        snapshot_date = today
+        as_of_date = str(overview.get("as_of", ""))[:10]
+        if as_of_date and as_of_date != today.isoformat():
+            return
+        snapshot_date = today.isoformat()
         self._last_snapshot_write = now
         try:
             db.save_board_snapshot(self.database_path, snapshot_date, _snapshot_payload(overview))
@@ -171,6 +179,10 @@ class DailyBoardService:
     ) -> dict[str, dict[str, object]]:
         _, summaries = self.build_board(groups, grouped_quotes)
         return summaries
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 def _unique_assets(groups: list[GroupConfig]) -> dict[str, AssetConfig]:
@@ -232,7 +244,8 @@ def _asset_metrics_prepared(
         _calendar_window(bars, year_start) if continuous else bars
     )
     one_day = _quote_change_pct(quote)
-    five_day = _return_from_close(current, closes, 6)
+    shift = _missing_session_bar_shift(quote, bars)
+    five_day = _return_from_close(current, closes, 6 - shift)
     dma20 = _mean_tail(closes, 20)
     dma50 = _mean_tail(closes, 50)
     dma200 = _mean_tail(closes, 200)
@@ -284,6 +297,7 @@ def _market_summary_prepared(
     continuous = _continuous_daily(asset, bars)
     as_of = datetime.now(UTC)
     week_anchor = as_of - timedelta(weeks=1)
+    shift = _missing_session_bar_shift(quote, bars)
     year_window = _calendar_window(bars, as_of - timedelta(weeks=52)) if continuous else bars
     return {
         "sparkline": _sparkline_values(current, closes),
@@ -291,15 +305,15 @@ def _market_summary_prepared(
             "1D": _quote_change_pct(quote),
             "1W": (
                 _calendar_return(current, bars, week_anchor)
-                if continuous else _return_from_close(current, closes, 6)
+                if continuous else _return_from_close(current, closes, 6 - shift)
             ),
             "1M": (
                 _calendar_return(current, bars, months_before(as_of, 1))
-                if continuous else _return_from_close(current, closes, 22)
+                if continuous else _return_from_close(current, closes, 22 - shift)
             ),
             "3M": (
                 _calendar_return(current, bars, months_before(as_of, 3))
-                if continuous else _return_from_close(current, closes, 64)
+                if continuous else _return_from_close(current, closes, 64 - shift)
             ),
             # No quote.timestamp here: a stale Dec-31-stamped quote in early
             # January would anchor the year backwards and report the entire
@@ -307,7 +321,7 @@ def _market_summary_prepared(
             "YTD": _ytd_return(current, bars),
             "1Y": (
                 _calendar_return(current, bars, months_before(as_of, 12))
-                if continuous else _return_from_close(current, closes, 252)
+                if continuous else _return_from_close(current, closes, 252 - shift)
             ),
         },
         "range_52w": _range_52w(current, year_window, continuous=continuous),
@@ -321,7 +335,7 @@ def _market_summary_prepared(
 
 
 def _open_change_pct(quote: Quote | None, bars: list[Bar]) -> float | None:
-    """Move since today's open (UTC day for 24/7 markets).
+    """Move since today's open (exchange session day; UTC day for 24/7 markets).
 
     Prefers the cached daily bar's open — exact and FX-normalized — and
     falls back to the quote's opening print early in the session before
@@ -345,17 +359,60 @@ def _open_change_pct(quote: Quote | None, bars: list[Bar]) -> float | None:
     return round((current - open_price) / open_price * 100, 4)
 
 
+def _as_utc(value: datetime) -> datetime:
+    # Cached bars can come back naive; .astimezone on a naive datetime
+    # guesses the host's local zone.
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _bar_date(bar: Bar) -> date:
+    """Session date a daily bar is stamped with (open or midnight, UTC)."""
+    return _as_utc(bar.timestamp).date()
+
+
+def _uses_us_session(quote: Quote) -> bool:
+    return quote.asset_type in {"equity", "etf"} and not quote.symbol.upper().endswith(
+        (".KS", ".KQ")
+    )
+
+
+def _quote_session_date(quote: Quote | None) -> date:
+    """Trading date the quote belongs to.
+
+    US equities resolve in America/New_York: a 24/7 mark stamped after
+    00:00 UTC is still the previous ET session's evening, not a new day.
+    """
+    if quote is None:
+        return datetime.now(UTC).date()
+    as_of = _as_utc(quote.timestamp)
+    return us_session_date(as_of) if _uses_us_session(quote) else as_of.date()
+
+
+def _missing_session_bar_shift(quote: Quote | None, bars: list[Bar]) -> int:
+    """1 when a US session is under way but its daily bar is not cached yet.
+
+    Session-count windows anchor on closes[-N] assuming closes[-1] is the
+    current session; without that bar each window would span one extra day.
+    Only the exact previous session counts: older history is a gap of unknown
+    size, not one missing bar.
+    """
+    if quote is None or not bars or not _uses_us_session(quote):
+        return 0
+    as_of = _as_utc(quote.timestamp)
+    day = us_session_date(as_of)
+    if not is_us_trading_day(day) or as_of < us_session_open_at(day):
+        return 0
+    previous = day - timedelta(days=1)
+    while not is_us_trading_day(previous):
+        previous -= timedelta(days=1)
+    return 1 if _bar_date(bars[-1]) == previous else 0
+
+
 def _today_bar_open(quote: Quote | None, bars: list[Bar]) -> float | None:
     if not bars:
         return None
     last = bars[-1]
-    as_of = quote.timestamp if quote is not None else datetime.now(UTC)
-    if as_of.tzinfo is None:
-        as_of = as_of.replace(tzinfo=UTC)
-    bar_time = last.timestamp
-    if bar_time.tzinfo is None:
-        bar_time = bar_time.replace(tzinfo=UTC)
-    if bar_time.astimezone(UTC).date() != as_of.astimezone(UTC).date():
+    if _bar_date(last) != _quote_session_date(quote):
         return None
     return last.open if last.open > 0 else None
 
@@ -370,15 +427,7 @@ def _relative_volume(quote: Quote | None, bars: list[Bar]) -> float | None:
     if not bars:
         return None
     last_bar = bars[-1]
-    as_of = quote.timestamp if quote is not None else datetime.now(UTC)
-    # Same naive-tzinfo hardening as _today_bar_open: cached bars can
-    # come back naive, and .astimezone on a naive datetime guesses local.
-    if as_of.tzinfo is None:
-        as_of = as_of.replace(tzinfo=UTC)
-    bar_time = last_bar.timestamp
-    if bar_time.tzinfo is None:
-        bar_time = bar_time.replace(tzinfo=UTC)
-    last_is_today = bar_time.astimezone(UTC).date() == as_of.astimezone(UTC).date()
+    last_is_today = _bar_date(last_bar) == _quote_session_date(quote)
     completed = bars[:-1] if last_is_today else bars
     baseline = [bar.volume for bar in completed[-20:] if bar.volume]
     if len(baseline) < 10:

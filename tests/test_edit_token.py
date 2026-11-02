@@ -81,7 +81,7 @@ def configure_asset_mutation(
         monkeypatch.setattr(
             app.state,
             "quote_service",
-            SimpleNamespace(providers={"yahoo": provider, "stooq": provider}),
+            SimpleNamespace(providers={"yahoo": provider, "hyperliquid": provider}),
             raising=False,
         )
         monkeypatch.setattr(app.state, "groups", groups, raising=False)
@@ -310,7 +310,7 @@ def test_create_asset_rejects_definitive_provider_not_found(
             id="conflicting-type",
         ),
         pytest.param(
-            {"symbol": "AAPL", "type": "equity", "source": "stooq"},
+            {"symbol": "AAPL", "type": "equity", "source": "hyperliquid"},
             id="conflicting-source",
         ),
     ],

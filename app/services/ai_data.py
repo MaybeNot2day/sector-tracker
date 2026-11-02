@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from statistics import median
 from time import monotonic
-from typing import Any
+from typing import Any, NamedTuple, cast
 
 import httpx
 
@@ -18,6 +18,13 @@ from app import db
 MODELS_URL = "https://openrouter.ai/api/v1/models"
 RANKINGS_URL = "https://openrouter.ai/api/frontend/v1/rankings/models?view=week"
 REQUEST_TIMEOUT_SECONDS = 20.0
+# A failed OpenRouter fetch waits this long before the next attempt; until
+# then requests get the last good rows (flagged stale) without a round trip.
+FAILURE_RETRY_SECONDS = 120.0
+# The week rankings view carries every model only for its newest day; older
+# days keep a handful of leftover rows. A day priced from fewer models is a
+# sample, not an index point (live complete days carry ~300+ models).
+MIN_INDEX_MODELS = 100
 # Frontier tier: proprietary models at the capability frontier. The main rule
 # is data-driven — an Artificial Analysis intelligence index of 45 or above —
 # because the leading labs' flagship model families (GPT, Claude Opus,
@@ -63,6 +70,12 @@ class AIDataError(RuntimeError):
     """The upstream AI dataset is unavailable or malformed."""
 
 
+class _Upstream(NamedTuple):
+    rows: list[dict[str, Any]]
+    fetched_at: datetime
+    stale: bool
+
+
 class AIDataService:
     """Fetch, normalize, cache, and persist the first two AI datasets.
 
@@ -83,10 +96,10 @@ class AIDataService:
         self.cache_seconds = cache_seconds
         self._client = client
         self._owns_client = client is None
-        self._models_cache: tuple[float, list[dict[str, Any]]] | None = None
-        self._rankings_cache: tuple[float, list[dict[str, Any]]] | None = None
-        self._models_lock = asyncio.Lock()
-        self._rankings_lock = asyncio.Lock()
+        # kind -> (monotonic load time, rows, wall-clock fetch time)
+        self._caches: dict[str, tuple[float, list[dict[str, Any]], datetime]] = {}
+        self._failed_at: dict[str, float] = {}
+        self._locks = {"models": asyncio.Lock(), "rankings": asyncio.Lock()}
 
     async def aclose(self) -> None:
         if self._owns_client and self._client is not None:
@@ -94,11 +107,11 @@ class AIDataService:
         self._client = None
 
     async def get_models(self) -> dict[str, object]:
-        raw_models = await self._get_models_raw()
-        models = [model for raw in raw_models if (model := _normalize_model(raw)) is not None]
+        upstream = await self._get_models_raw()
+        models = [model for raw in upstream.rows if (model := _normalize_model(raw)) is not None]
         models.sort(key=lambda item: (str(item["provider"]), str(item["name"])))
 
-        observed_date = datetime.now(UTC).date().isoformat()
+        observed_date = upstream.fetched_at.date().isoformat()
         await asyncio.to_thread(
             db.save_ai_model_snapshots,
             self.database_path,
@@ -113,7 +126,8 @@ class AIDataService:
             and price > 0
         ]
         return {
-            "as_of": datetime.now(UTC).isoformat(),
+            "as_of": upstream.fetched_at.isoformat(),
+            "stale": upstream.stale,
             "source": {
                 "name": "OpenRouter",
                 "url": MODELS_URL,
@@ -129,22 +143,15 @@ class AIDataService:
         }
 
     async def get_token_index(self) -> dict[str, object]:
-        raw_models, rankings = await asyncio.gather(
+        models_upstream, rankings_upstream = await asyncio.gather(
             self._get_models_raw(),
             self._get_rankings_raw(),
         )
-        normalized = [
-            (raw, model) for raw in raw_models if (model := _normalize_model(raw)) is not None
-        ]
-        models_by_key: dict[str, dict[str, object]] = {}
-        for raw, model in normalized:
-            for key in (raw.get("canonical_slug"), raw.get("id")):
-                if isinstance(key, str) and key:
-                    models_by_key[key] = model
+        catalog = _catalog_by_slug_variant(models_upstream.rows)
 
         aggregates: dict[str, dict[str, Any]] = defaultdict(_empty_index_bucket)
-        detail_rows: dict[str, list[dict[str, object]]] = defaultdict(list)
-        for raw in rankings:
+        detail_rows: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+        for raw in rankings_upstream.rows:
             day = str(raw.get("date") or "")[:10]
             if len(day) != 10:
                 continue
@@ -158,18 +165,20 @@ class AIDataService:
 
             bucket = aggregates[day]
             bucket["total_tokens"] += tokens
-            model = _ranking_model(raw, models_by_key)
-            if model is None:
+            match = _ranking_model(raw, catalog)
+            if match is None:
                 continue
-            input_price = _finite_number(model.get("input_price_per_token"))
-            output_price = _finite_number(model.get("output_price_per_token"))
+            priced, model = match
+            input_price = _finite_number(priced.get("input_price_per_token"))
+            output_price = _finite_number(priced.get("output_price_per_token"))
             if input_price is None or output_price is None:
                 continue
 
             cost = prompt_tokens * input_price + completion_tokens * output_price
+            model_id = str(model["id"])
             bucket["priced_tokens"] += tokens
             bucket["cost_usd"] += cost
-            bucket["model_ids"].add(str(model["id"]))
+            bucket["model_ids"].add(model_id)
             segment = "open" if bool(model["is_open_weight"]) else "proprietary"
             bucket[f"{segment}_tokens"] += tokens
             bucket[f"{segment}_cost_usd"] += cost
@@ -181,57 +190,59 @@ class AIDataService:
             if is_china:
                 bucket["china_tokens"] += tokens
                 bucket["china_cost_usd"] += cost
-            detail_rows[day].append(
+            detail = detail_rows[day].setdefault(
+                model_id,
                 {
-                    "id": model["id"],
+                    "id": model_id,
                     "name": model["name"],
                     "provider": model["provider"],
                     "is_open_weight": model["is_open_weight"],
                     "is_frontier": is_frontier,
                     "is_china": is_china,
-                    "tokens": int(tokens),
-                    "cost_usd": cost,
-                    "effective_price": round(cost / tokens * 1_000_000, 4),
-                }
+                    "tokens": 0.0,
+                    "cost_usd": 0.0,
+                },
             )
+            detail["tokens"] += tokens
+            detail["cost_usd"] += cost
 
-        live_series: list[dict[str, object]] = []
-        for day in sorted(aggregates):
-            point = _index_point(day, aggregates[day])
-            if point is not None:
-                live_series.append(point)
+        # The week view only carries the newest day in full; older days hold a
+        # handful of leftover rows whose "index" would be a 1-6 model sample.
+        live_series = [
+            point
+            for day in sorted(aggregates)
+            if (point := _index_point(day, aggregates[day])) is not None
+            and int(cast(int, point["model_count"])) >= MIN_INDEX_MODELS
+        ]
         if not live_series:
             raise AIDataError("token_index_empty")
 
         await asyncio.to_thread(db.save_ai_token_index_points, self.database_path, live_series)
-        stored_series = await asyncio.to_thread(
+        series = await asyncio.to_thread(
             db.load_ai_token_index_points,
             self.database_path,
             365,
         )
-        series_by_date = {str(point["date"]): point for point in stored_series}
-        series_by_date.update({str(point["date"]): point for point in live_series})
-        series = [series_by_date[day] for day in sorted(series_by_date)]
+        series_by_date = {str(point["date"]): point for point in series}
 
         latest_live = live_series[-1]
         latest_date = str(latest_live["date"])
-        latest_details = detail_rows.get(latest_date, [])
+        latest_details = list(detail_rows.get(latest_date, {}).values())
         priced_tokens = _finite_number(latest_live["priced_tokens"]) or 0.0
-        total_cost = sum(_finite_number(item.get("cost_usd")) or 0.0 for item in latest_details)
+        total_cost = sum(float(item["cost_usd"]) for item in latest_details)
         for item in latest_details:
-            tokens = _finite_number(item.get("tokens")) or 0.0
-            cost = _finite_number(item.get("cost_usd")) or 0.0
+            tokens = float(item["tokens"])
+            cost = float(item.pop("cost_usd"))
+            item["tokens"] = int(tokens)
+            item["effective_price"] = round(cost / tokens * 1_000_000, 4)
             item["usage_share_pct"] = round(tokens / priced_tokens * 100, 2)
             item["cost_share_pct"] = round(cost / total_cost * 100, 2) if total_cost > 0 else 0.0
-            item.pop("cost_usd", None)
-        latest_details.sort(
-            key=lambda item: _finite_number(item.get("tokens")) or 0.0,
-            reverse=True,
-        )
+        latest_details.sort(key=lambda item: int(item["tokens"]), reverse=True)
 
         return {
             "as_of": latest_date,
             "generated_at": datetime.now(UTC).isoformat(),
+            "stale": models_upstream.stale or rankings_upstream.stale,
             "source": {
                 "name": "OpenRouter Rankings",
                 "url": "https://openrouter.ai/rankings",
@@ -257,38 +268,34 @@ class AIDataService:
                 ),
                 "constituent_rule": (
                     "Every ranked model with an exact current OpenRouter catalog slug and "
-                    "text pricing joins automatically on refresh."
+                    "text pricing joins automatically on refresh. Batch and free variants "
+                    f"are priced at their own catalog rate. Days with fewer than "
+                    f"{MIN_INDEX_MODELS} priced models are not recorded."
                 ),
                 "open_weight_proxy": True,
                 "china_provider_prefixes": sorted(CHINA_MODEL_PROVIDER_PREFIXES),
             },
-            "latest": latest_live,
+            # The stored point wins when it already covered more of the day.
+            "latest": series_by_date.get(latest_date, latest_live),
             "series": series,
             "top_models": latest_details[:15],
         }
 
-    async def _get_models_raw(self) -> list[dict[str, Any]]:
-        return await self._get_cached(MODELS_URL, "models", self._models_lock)
+    async def _get_models_raw(self) -> _Upstream:
+        return await self._get_cached(MODELS_URL, "models")
 
-    async def _get_rankings_raw(self) -> list[dict[str, Any]]:
-        return await self._get_cached(RANKINGS_URL, "rankings", self._rankings_lock)
+    async def _get_rankings_raw(self) -> _Upstream:
+        return await self._get_cached(RANKINGS_URL, "rankings")
 
-    async def _get_cached(
-        self,
-        url: str,
-        kind: str,
-        lock: asyncio.Lock,
-    ) -> list[dict[str, Any]]:
-        cache = self._models_cache if kind == "models" else self._rankings_cache
-        now = monotonic()
-        if cache is not None and now - cache[0] < self.cache_seconds:
-            return cache[1]
+    async def _get_cached(self, url: str, kind: str) -> _Upstream:
+        cached = self._cached_or_backoff(kind)
+        if cached is not None:
+            return cached
 
-        async with lock:
-            cache = self._models_cache if kind == "models" else self._rankings_cache
-            now = monotonic()
-            if cache is not None and now - cache[0] < self.cache_seconds:
-                return cache[1]
+        async with self._locks[kind]:
+            cached = self._cached_or_backoff(kind)
+            if cached is not None:
+                return cached
             try:
                 response = await self._http_client().get(url, headers=_HEADERS)
                 response.raise_for_status()
@@ -298,16 +305,33 @@ class AIDataService:
                     raise AIDataError(f"{kind}_payload_invalid")
                 typed_rows = list(rows)
             except (httpx.HTTPError, ValueError, AIDataError) as exc:
-                if cache is not None:
-                    return cache[1]
-                raise AIDataError(f"{kind}_unavailable") from exc
+                self._failed_at[kind] = monotonic()
+                previous = self._caches.get(kind)
+                if previous is None:
+                    raise AIDataError(f"{kind}_unavailable") from exc
+                return _Upstream(previous[1], previous[2], stale=True)
 
-            next_cache = (monotonic(), typed_rows)
-            if kind == "models":
-                self._models_cache = next_cache
-            else:
-                self._rankings_cache = next_cache
-            return typed_rows
+            self._failed_at.pop(kind, None)
+            fetched_at = datetime.now(UTC)
+            self._caches[kind] = (monotonic(), typed_rows, fetched_at)
+            return _Upstream(typed_rows, fetched_at, stale=False)
+
+    def _cached_or_backoff(self, kind: str) -> _Upstream | None:
+        """Fresh cache, or the stale cache while a failed refresh cools down.
+
+        Returns None when an upstream fetch is due. During the cooldown
+        without any cache this fails fast instead of hitting OpenRouter again.
+        """
+        now = monotonic()
+        cached = self._caches.get(kind)
+        if cached is not None and now - cached[0] < self.cache_seconds:
+            return _Upstream(cached[1], cached[2], stale=False)
+        failed_at = self._failed_at.get(kind)
+        if failed_at is None or now - failed_at >= FAILURE_RETRY_SECONDS:
+            return None
+        if cached is None:
+            raise AIDataError(f"{kind}_unavailable")
+        return _Upstream(cached[1], cached[2], stale=True)
 
     def _http_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -347,6 +371,7 @@ def _normalize_model(raw: dict[str, Any]) -> dict[str, object] | None:
         else None
     )
     context_length = _nonnegative_number(raw.get("context_length"))
+    hugging_face_id = raw.get("hugging_face_id")
     provider = name.partition(":")[0].strip() if ":" in name else model_id.partition("/")[0]
     input_per_million = input_price * 1_000_000
     output_per_million = output_price * 1_000_000
@@ -366,21 +391,52 @@ def _normalize_model(raw: dict[str, Any]) -> dict[str, object] | None:
         ),
         "blended_price_per_million": round((3 * input_per_million + output_per_million) / 4, 6),
         "is_free": input_price == 0 and output_price == 0,
-        "is_open_weight": isinstance(raw.get("hugging_face_id"), str),
+        # OpenRouter sends "" (not null) for many proprietary models.
+        "is_open_weight": isinstance(hugging_face_id, str) and bool(hugging_face_id.strip()),
         "supports_reasoning": bool(raw.get("reasoning")),
         "intelligence_index": intelligence,
     }
 
 
+def _catalog_by_slug_variant(
+    raw_models: list[dict[str, Any]],
+) -> dict[tuple[str, str], dict[str, object]]:
+    """Index normalized catalog models by (permaslug, variant suffix).
+
+    Rankings name a model by its dated canonical slug, which OpenRouter shares
+    between the standard entry and its ":batch"/":free" siblings; the variant
+    suffix picks the entry whose pricing applies ("" for standard).
+    """
+    catalog: dict[tuple[str, str], dict[str, object]] = {}
+    for raw in raw_models:
+        model = _normalize_model(raw)
+        if model is None:
+            continue
+        base_id, _, variant = str(model["id"]).partition(":")
+        for slug in (raw.get("canonical_slug"), base_id):
+            if isinstance(slug, str) and slug:
+                catalog.setdefault((slug, variant), model)
+    return catalog
+
+
 def _ranking_model(
     row: dict[str, Any],
-    models_by_key: dict[str, dict[str, object]],
-) -> dict[str, object] | None:
-    for field in ("variant_permaslug", "model_permaslug"):
-        key = row.get(field)
-        if isinstance(key, str) and key in models_by_key:
-            return models_by_key[key]
-    return None
+    catalog: dict[tuple[str, str], dict[str, object]],
+) -> tuple[dict[str, object], dict[str, object]] | None:
+    """Return (catalog entry whose prices apply, model the usage counts toward).
+
+    Variant traffic is priced at the variant's own rate but attributed to the
+    standard model, so one model never appears twice in the leaderboard.
+    """
+    slug = row.get("model_permaslug")
+    if not isinstance(slug, str) or not slug:
+        return None
+    variant_slug = row.get("variant_permaslug")
+    variant = variant_slug.partition(":")[2] if isinstance(variant_slug, str) else ""
+    priced = catalog.get((slug, variant))
+    if priced is None:
+        return None
+    return priced, catalog.get((slug, ""), priced)
 
 
 def _empty_index_bucket() -> dict[str, Any]:

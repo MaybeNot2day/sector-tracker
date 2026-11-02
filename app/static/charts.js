@@ -24,6 +24,8 @@ const MAX_PENDING = 400;
 const pending = new Map();
 const charts = new WeakMap();
 let nextId = 0;
+// The chart whose tooltip a touch tap pinned; a tap anywhere else hides it.
+let touchPinned = null;
 
 const resizeObserver =
   typeof ResizeObserver === "function"
@@ -37,6 +39,19 @@ if (typeof MutationObserver === "function" && typeof document !== "undefined") {
       record.removedNodes.forEach((node) => forEachChart(node, release));
     }
   }).observe(document.documentElement, { childList: true, subtree: true });
+}
+
+if (typeof document !== "undefined") {
+  document.addEventListener(
+    "pointerdown",
+    (event) => {
+      if (touchPinned && !touchPinned.contains(event.target)) {
+        hide(touchPinned);
+        touchPinned = null;
+      }
+    },
+    true,
+  );
 }
 
 export function chartMarkup(spec, { className = "", label = "" } = {}) {
@@ -67,13 +82,16 @@ export function niceTicks(min, max, count) {
     max += pad;
   }
   const step = niceStep((max - min) / Math.max(count, 1));
-  const lo = Math.floor(min / step) * step;
-  const hi = Math.ceil(max / step) * step;
+  // Integer step multiples avoid float accumulation (0.1 + 0.2 ≠ 0.3), so
+  // the zero tick is exactly 0 and every label stays clean.
+  const first = Math.floor(min / step);
+  const last = Math.ceil(max / step);
   const ticks = [];
-  for (let value = lo; value <= hi + step / 2; value += step) {
-    ticks.push(Number(value.toPrecision(12)));
+  for (let index = first; index <= last; index += 1) {
+    // `+ 0` folds -0 into 0 so a "-0" label never appears.
+    ticks.push(Number((index * step).toPrecision(12)) + 0);
   }
-  return { lo, hi, ticks };
+  return { lo: ticks[0], hi: ticks[ticks.length - 1], ticks };
 }
 
 function niceStep(raw) {
@@ -152,7 +170,8 @@ function renderXY(spec, width, height, id) {
       (item.values || []).forEach((value) => values.push(value));
     }
   });
-  stacks.forEach((stack) => values.push(stack.positive, stack.negative));
+  // An empty stack is all zeros; only real bars may pull 0 into the domain.
+  if (bars.length) stacks.forEach((stack) => values.push(stack.positive, stack.negative));
   (spec.references || []).forEach((reference) => values.push(reference.value));
   const finite = values.filter((value) => Number.isFinite(value));
   let min = Math.min(...finite);
@@ -287,9 +306,9 @@ function bandPath(item, layout) {
   const upper = [];
   const lower = [];
   for (let index = 0; index < count; index += 1) {
-    const low = Number(item.low?.[index]);
-    const high = Number(item.high?.[index]);
-    if (!Number.isFinite(low) || !Number.isFinite(high)) continue;
+    const low = pointValue(item.low?.[index]);
+    const high = pointValue(item.high?.[index]);
+    if (low === null || high === null) continue;
     upper.push([x(index), y(high)]);
     lower.push([x(index), y(low)]);
   }
@@ -304,8 +323,8 @@ function linePath(item, layout, gradientId, defs) {
   const segments = [];
   let current = [];
   for (let index = 0; index < count; index += 1) {
-    const value = Number(item.values?.[index]);
-    if (item.values?.[index] === null || item.values?.[index] === undefined || !Number.isFinite(value)) {
+    const value = pointValue(item.values?.[index]);
+    if (value === null) {
       if (current.length) segments.push(current);
       current = [];
       continue;
@@ -405,8 +424,15 @@ function bindHover(element, state) {
     show(element, layout, index);
   };
   element.addEventListener("pointermove", move);
-  element.addEventListener("pointerdown", move);
-  element.addEventListener("pointerleave", () => hide(element));
+  element.addEventListener("pointerdown", (event) => {
+    move(event);
+    touchPinned = event.pointerType === "touch" ? element : null;
+  });
+  // A finger lifting fires pointerleave right after the tap; a touch tooltip
+  // stays until the next tap elsewhere instead.
+  element.addEventListener("pointerleave", (event) => {
+    if (event.pointerType !== "touch") hide(element);
+  });
 }
 
 function hide(element) {
@@ -434,16 +460,15 @@ function show(element, layout, index) {
     if (item.tooltip === false) return;
     const formatValue = item.format || format;
     if (item.type === "band") {
-      const low = Number(item.low?.[index]);
-      const high = Number(item.high?.[index]);
-      if (Number.isFinite(low) && Number.isFinite(high)) {
+      const low = pointValue(item.low?.[index]);
+      const high = pointValue(item.high?.[index]);
+      if (low !== null && high !== null) {
         rows.push(tipRow(item, `${formatValue(low)} – ${formatValue(high)}`));
       }
       return;
     }
-    const raw = item.values?.[index];
-    const value = Number(raw);
-    if (raw === null || raw === undefined || !Number.isFinite(value)) return;
+    const value = pointValue(item.values?.[index]);
+    if (value === null) return;
     if (item.type === "bar" && value === 0) return;
     rows.push(tipRow(item, formatValue(value)));
     if (item.type === "line") {
@@ -463,9 +488,14 @@ function show(element, layout, index) {
   const title = spec.tooltipTitle ? spec.tooltipTitle(index) : labels[index];
   tip.innerHTML = `<div class="viz-tip-title">${esc(title)}</div>${rows.join("")}`;
   tip.hidden = false;
+  // Measure from the left edge: a previous position near the right edge
+  // would squeeze the box and under-report its width.
+  tip.style.left = "4px";
+  // Flip to the cursor's left near the right edge, then clamp both edges so
+  // the tooltip never leaves the chart (CSS caps its width to the chart).
   const tipWidth = tip.offsetWidth;
   const leftPos = px + 14 + tipWidth > layout.width ? px - 14 - tipWidth : px + 14;
-  tip.style.left = `${Math.max(4, leftPos)}px`;
+  tip.style.left = `${Math.max(4, Math.min(leftPos, layout.width - tipWidth - 4))}px`;
   tip.style.top = `${top}px`;
 }
 
@@ -473,6 +503,14 @@ function tipRow(item, value) {
   const kind = item.type === "line" ? (item.dashed ? "line dashed" : "line") : item.type;
   const opacity = item.opacity !== undefined ? `;opacity:${item.opacity}` : "";
   return `<div class="viz-tip-row"><span><i class="viz-swatch viz-swatch-${kind}" style="--swatch:${item.color}${opacity}"></i>${esc(item.label)}</span><strong>${esc(value)}</strong></div>`;
+}
+
+// Number(null) is 0, so a missing point must be caught before coercion: it is
+// a gap, never a zero.
+function pointValue(raw) {
+  if (raw === null || raw === undefined || raw === "") return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
 }
 
 // charts.js deliberately has no imports: minify-static.sh content-pins module

@@ -11,12 +11,13 @@ The service composes a Monday-Friday week view: per day the top rows by
 rank (board-held symbols first, then market cap, then analyst coverage)
 are enriched with exact times and surprise history; the rest are counted.
 The caches are independent, so watchlist edits re-rank instantly without
-refetching.
+refetching; the composed payload is cached per held set.
 
-Implied move (ATM IV scaled to the first expiration after the report) is
-computed only for held symbols through the existing MarketData.app options
-service — the free tier's request budget cannot cover a whole week of
-tickers.
+Implied move (ATM IV scaled to the first expiration after the report's
+reaction session) is computed only for held symbols reporting today or
+later, through the existing MarketData.app options service. Each report's
+move is cached for hours and all lookups share a small daily request budget:
+the free tier's 100 credits/day must stay available for the chart modal.
 """
 
 from __future__ import annotations
@@ -31,6 +32,8 @@ from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 import httpx
+
+from app.services.options import OptionsDataError
 
 logger = logging.getLogger(__name__)
 
@@ -61,9 +64,33 @@ SURPRISE_CACHE_MAX = 512
 RELEASE_TIME_CACHE_MAX = 512
 DETAILED_PER_DAY = 7
 LAST_QUARTERS = 4
+# Implied moves: a report's IV shifts slowly, so one lookup per report every
+# few hours is plenty. MarketData's free tier allows 100 credits per day
+# (resetting 09:30 ET); one lookup costs at most an expirations request plus
+# one chain request, and the calendar may spend at most this many per day.
+IMPLIED_MOVE_CACHE_SECONDS = 12 * 3600.0
+IMPLIED_MOVE_RETRY_SECONDS = 3600.0
+IMPLIED_MOVE_CACHE_MAX = 256
+IMPLIED_MOVE_DAILY_REQUESTS = 20
+IMPLIED_MOVE_REQUESTS_PER_LOOKUP = 2
+_MARKETDATA_QUOTA_RESET = timedelta(hours=9, minutes=30)
+# Failures that hit every symbol alike: stop the pass instead of burning
+# the budget on the remaining reports.
+_TOKEN_WIDE_OPTIONS_ERRORS = frozenset(
+    {
+        "options_not_configured",
+        "marketdata_auth_failed",
+        "marketdata_device_locked",
+        "marketdata_entitlement_required",
+        "marketdata_rate_limited",
+    }
+)
 # Bounded fan-out for surprise fetches: a week enriches at most ~35 symbols.
 _SURPRISE_CONCURRENCY = 8
 _DISPLAY_TZ = ZoneInfo("Europe/Berlin")
+# "Today" for the calendar is the US Eastern trading date.
+_EASTERN = ZoneInfo("America/New_York")
+_MARKET_CLOSE_HOUR = 16
 _TRADINGVIEW_EXCHANGES = ("NASDAQ", "NYSE", "AMEX", "OTC")
 _TRADINGVIEW_EXCHANGE_PRIORITY = {
     exchange: priority for priority, exchange in enumerate(_TRADINGVIEW_EXCHANGES)
@@ -73,9 +100,18 @@ _MONEY = re.compile(r"[^0-9.\-]")
 
 
 class OptionsSnapshotService(Protocol):
+    async def get_expirations(self, symbol: str) -> list[str]:
+        """MarketDataOptionsService.get_expirations contract."""
+        ...
+
     async def get_snapshot(self, symbol: str, expiration: str | None = None) -> dict[str, object]:
         """MarketDataOptionsService.get_snapshot contract."""
         ...
+
+
+def eastern_today() -> date:
+    """The US Eastern trading date; a UTC date skips ahead every evening."""
+    return datetime.now(_EASTERN).date()
 
 
 def week_start(today: date) -> date:
@@ -225,7 +261,12 @@ class EarningsCalendarService:
         self._surprise_cache: dict[str, tuple[float, list[bool | None]]] = {}
         self._release_time_cache: dict[tuple[str, str], tuple[float, str | None]] = {}
         self._release_time_failed_at: float | None = None
-        self._payload_cache: dict[str, tuple[float, dict[str, object]]] = {}
+        self._payload_cache: dict[tuple[str, frozenset[str]], tuple[float, dict[str, object]]] = {}
+        # (report date, symbol) -> (fresh until, implied move or None).
+        self._implied_cache: dict[tuple[str, str], tuple[float, float | None]] = {}
+        self._implied_paused_until = 0.0
+        self._quota_day: date | None = None
+        self._quota_used = 0
         self._lock = asyncio.Lock()
 
     async def get_week_cached(
@@ -239,14 +280,18 @@ class EarningsCalendarService:
         The scheduler's warm loop refreshes ahead of expiry, so user requests
         never pay the cold-compose cost of a fresh week.
         """
-        key = start.isoformat()
+        # The held set ranks rows and picks implied-move symbols: a watchlist
+        # edit must recompose instead of serving the old ranking for 30 min.
+        key = (start.isoformat(), frozenset(held))
         cached = self._payload_cache.get(key)
         if cached is not None and monotonic() - cached[0] < PAYLOAD_CACHE_SECONDS:
             return cached[1]
         payload = await self.get_week(start, held, options_service)
         self._payload_cache[key] = (monotonic(), payload)
         while len(self._payload_cache) > PAYLOAD_CACHE_MAX:
-            del self._payload_cache[min(self._payload_cache)]
+            del self._payload_cache[
+                min(self._payload_cache, key=lambda item: self._payload_cache[item][0])
+            ]
         return payload
 
     async def get_week(
@@ -284,13 +329,17 @@ class EarningsCalendarService:
 
         surprises = await self._surprise_histories([row["symbol"] for _, row in detailed])
         implied = await self._implied_moves(
-            [(day, row["symbol"]) for day, row in detailed if row["symbol"] in held],
+            [
+                (day, row["symbol"], row["session"])
+                for day, row in detailed
+                if row["symbol"] in held
+            ],
             options_service,
         )
         for report_day, row in detailed:
             row["held"] = row["symbol"] in held
             row["last4q"] = surprises.get(row["symbol"], [])
-            row["implied_move_pct"] = implied.get(row["symbol"])
+            row["implied_move_pct"] = implied.get((report_day.isoformat(), row["symbol"]))
             row["release_at"] = release_times.get((report_day.isoformat(), row["symbol"]))
         return {
             "as_of": datetime.now(UTC).isoformat(),
@@ -323,6 +372,13 @@ class EarningsCalendarService:
             logger.warning("earnings calendar fetch failed for %s", key, exc_info=True)
             self._day_failed_at[key] = now
             return cached[1] if cached is not None else []
+        if cached is not None:
+            # Nasdaq reports "time not supplied" for dates already past; keep
+            # the pre/after-market session an earlier fetch of this day knew.
+            known = {row["symbol"]: row["session"] for row in cached[1]}
+            for row in rows:
+                if row["session"] == "tns" and known.get(row["symbol"], "tns") != "tns":
+                    row["session"] = known[row["symbol"]]
         self._day_cache[key] = (now, rows)
         self._day_failed_at.pop(key, None)
         # The board only ever shows a handful of weeks; drop the oldest keys.
@@ -420,6 +476,10 @@ class EarningsCalendarService:
         for key in missing:
             report_date, session = wanted[key]
             release_at = _select_release_at(candidates.get(key[1], []), report_date, session)
+            if release_at is None:
+                # TradingView only knows the *next* release: once a report is
+                # out its timestamp moves on, so keep the one learned earlier.
+                release_at = stale.get(key)
             results[key] = release_at
             self._release_time_cache[key] = (now, release_at)
         self._release_time_failed_at = None
@@ -431,48 +491,126 @@ class EarningsCalendarService:
 
     async def _implied_moves(
         self,
-        reports: list[tuple[date, str]],
+        reports: list[tuple[date, str, str]],
         options_service: OptionsSnapshotService | None,
-    ) -> dict[str, float]:
+    ) -> dict[tuple[str, str], float]:
+        """(report date, symbol) -> implied move % for reports still ahead.
+
+        Lookups run soonest report first, each cached for hours (absence
+        included), and stop once the daily MarketData budget is spent.
+        """
         if options_service is None or not reports:
             return {}
-        moves: dict[str, float] = {}
-        for report_date, symbol in reports:
+        now_et = datetime.now(_EASTERN)
+        today = now_et.date()
+        # After the close today's expiration no longer trades.
+        first_open = today + timedelta(days=1 if now_et.hour >= _MARKET_CLOSE_HOUR else 0)
+        clock = monotonic()
+        moves: dict[tuple[str, str], float] = {}
+        due: list[tuple[tuple[str, str], str, date]] = []
+        for report_date, symbol, session in sorted(reports):
+            # Before-open reports move today's session; after-close (and
+            # unknown-timing) reports move the next one.
+            reaction_day = report_date if session == "bmo" else report_date + timedelta(days=1)
+            if report_date < today or reaction_day < first_open:
+                continue  # already reported: nothing left for options to price
+            key = (report_date.isoformat(), symbol)
+            cached = self._implied_cache.get(key)
+            if cached is not None:
+                if cached[1] is not None:
+                    moves[key] = cached[1]
+                if clock < cached[0]:
+                    continue
+            due.append((key, symbol, reaction_day))
+
+        if clock < self._implied_paused_until:
+            return moves
+        for index, (key, symbol, reaction_day) in enumerate(due):
+            if not self._reserve_quota(now_et):
+                logger.info(
+                    "implied-move budget of %d MarketData requests spent for today; "
+                    "%d report(s) wait",
+                    IMPLIED_MOVE_DAILY_REQUESTS,
+                    len(due) - index,
+                )
+                break
             try:
-                move = await self._implied_move(options_service, symbol, report_date)
+                move = await self._implied_move(options_service, symbol, reaction_day, today)
+            except OptionsDataError as exc:
+                if exc.code in _TOKEN_WIDE_OPTIONS_ERRORS:
+                    logger.warning(
+                        "implied moves paused for %.0f min: MarketData answered %s",
+                        IMPLIED_MOVE_RETRY_SECONDS / 60,
+                        exc.code,
+                    )
+                    self._remember_implied(key, clock + IMPLIED_MOVE_RETRY_SECONDS, moves)
+                    self._implied_paused_until = clock + IMPLIED_MOVE_RETRY_SECONDS
+                    break
+                if exc.status_code < 500:
+                    # Definitive absence (no listed options, empty chain).
+                    logger.info("no implied move for %s: %s", symbol, exc.code)
+                    moves.pop(key, None)
+                    self._store_implied(key, clock + IMPLIED_MOVE_CACHE_SECONDS, None)
+                else:
+                    logger.warning("implied move for %s unavailable: %s", symbol, exc.code)
+                    self._remember_implied(key, clock + IMPLIED_MOVE_RETRY_SECONDS, moves)
+                continue
             except Exception:
-                move = None  # unsupported venue / options outage: show a dash
-            if move is not None:
-                moves[symbol] = move
+                logger.warning("implied move for %s failed", symbol, exc_info=True)
+                self._remember_implied(key, clock + IMPLIED_MOVE_RETRY_SECONDS, moves)
+                continue
+            self._store_implied(key, clock + IMPLIED_MOVE_CACHE_SECONDS, move)
+            if move is None:
+                moves.pop(key, None)
+            else:
+                moves[key] = move
         return moves
+
+    def _reserve_quota(self, now_et: datetime) -> bool:
+        """Charge one lookup against the budget of the current MarketData day."""
+        quota_day = (now_et - _MARKETDATA_QUOTA_RESET).date()
+        if quota_day != self._quota_day:
+            self._quota_day = quota_day
+            self._quota_used = 0
+        if self._quota_used + IMPLIED_MOVE_REQUESTS_PER_LOOKUP > IMPLIED_MOVE_DAILY_REQUESTS:
+            return False
+        self._quota_used += IMPLIED_MOVE_REQUESTS_PER_LOOKUP
+        return True
+
+    def _remember_implied(
+        self, key: tuple[str, str], fresh_until: float, moves: dict[tuple[str, str], float]
+    ) -> None:
+        """Transient failure: retry later, keep serving the last known move."""
+        self._store_implied(key, fresh_until, moves.get(key))
+
+    def _store_implied(self, key: tuple[str, str], fresh_until: float, move: float | None) -> None:
+        self._implied_cache[key] = (fresh_until, move)
+        while len(self._implied_cache) > IMPLIED_MOVE_CACHE_MAX:
+            del self._implied_cache[
+                min(self._implied_cache, key=lambda item: self._implied_cache[item][0])
+            ]
 
     async def _implied_move(
         self,
         options_service: OptionsSnapshotService,
         symbol: str,
-        report_date: date,
+        reaction_day: date,
+        today: date,
     ) -> float | None:
-        snapshot = await options_service.get_snapshot(symbol)
-        raw_expirations = snapshot.get("expirations")
-        expirations = (
-            [value for value in raw_expirations if isinstance(value, str)]
-            if isinstance(raw_expirations, list)
-            else []
-        )
-        target = next((exp for exp in sorted(expirations) if exp >= report_date.isoformat()), None)
-        if target is not None and target != snapshot.get("expiration"):
-            snapshot = await options_service.get_snapshot(symbol, target)
+        # Only the expiration list (no default chain) to find the target, then
+        # exactly the one chain that prices the report.
+        expirations = await options_service.get_expirations(symbol)
+        target = next((exp for exp in sorted(expirations) if exp >= reaction_day.isoformat()), None)
+        if target is None:
+            return None
+        snapshot = await options_service.get_snapshot(symbol, target)
         metrics = snapshot.get("metrics")
         atm_iv = metrics.get("atm_iv") if isinstance(metrics, dict) else None
-        expiration = str(snapshot.get("expiration") or "")
-        if not isinstance(atm_iv, int | float) or atm_iv <= 0 or not expiration:
+        if not isinstance(atm_iv, int | float) or atm_iv <= 0:
             return None
-        try:
-            days_to_exp = (date.fromisoformat(expiration) - report_date).days
-        except ValueError:
-            return None
-        # ATM IV annualizes the distribution; scale it down to the horizon
-        # between the report and the expiration that prices it.
+        days_to_exp = (date.fromisoformat(target) - today).days
+        # ATM IV is annualized and prices the whole span from now until the
+        # expiration; scale it to that horizon.
         return round(float(atm_iv) * math.sqrt(max(days_to_exp, 1) / 365.0) * 100, 1)
 
     def _http(self) -> httpx.AsyncClient:

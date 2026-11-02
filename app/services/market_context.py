@@ -20,6 +20,7 @@ from app import db
 from app.models import Bar, GroupConfig, ProviderName
 from app.services.econ_calendar import EconCalendarService, key_dates_payload
 from app.services.fringe import FringeService
+from app.services.hyperliquid_discovery import AUTO_GROUP_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,9 @@ async def _movers(database_path: Path, groups: list[GroupConfig]) -> dict[str, o
     changes: dict[int, list[dict[str, object]]] = {n: [] for n in MOVER_WINDOWS}
     seen: set[str] = set()
     for group in groups:
+        # Auto-discovered Hyperliquid listings are not part of the curated universe.
+        if group.name in AUTO_GROUP_NAMES:
+            continue
         for asset in group.assets:
             if asset.symbol in seen:
                 continue

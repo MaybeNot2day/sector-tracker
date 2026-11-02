@@ -290,14 +290,19 @@ def _drop_off_grid_tail(bars: list[Bar], interval: str) -> list[Bar]:
     (equal to meta.regularMarketTime) duplicating the in-progress bar. Each
     fetch produces a different tail timestamp, so persisting them accretes
     phantom overlapping candles in the bars cache (PK includes timestamp).
-    A genuine partial bar sits ON the interval grid — exactly one interval
-    after its predecessor — so anything closer is the live print.
+    Genuine bars start on the clock grid, but not always one interval after
+    their predecessor: the 30-minute 15:30 regular bar is followed by the
+    16:00 post-market bar. A tail is the live print only when it is both
+    closer than one interval AND off the half-hour (or finer) grid.
     """
     step = _INTERVAL_SECONDS.get(interval)
     if step is None or len(bars) < 2:
         return bars
-    gap = (bars[-1].timestamp - bars[-2].timestamp).total_seconds()
-    return bars[:-1] if gap < step else bars
+    tail = bars[-1].timestamp
+    gap = (tail - bars[-2].timestamp).total_seconds()
+    grid = min(step, 1800)
+    on_grid = int(tail.timestamp()) % grid == 0
+    return bars[:-1] if gap < step and not on_grid else bars
 
 
 def _bars_with_usd_display(

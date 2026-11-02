@@ -184,3 +184,45 @@ async def test_daily_warmer_calls_provider_with_current_day_cached_history(tmp_p
     await scheduler._refresh_daily_history(state)
     assert provider.requested == ["SPY"]
     assert db.load_bars(path, "SPY", "1d", "yahoo")[0].close == 105.0
+
+
+@pytest.mark.asyncio
+async def test_earnings_warm_loop_keeps_the_eastern_week_on_friday_evening(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import date
+
+    from app.services import earnings
+
+    # Friday 20:30 ET: the UTC date is already Saturday.
+    friday_evening = datetime(2026, 8, 22, 0, 30, tzinfo=UTC)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> datetime:
+            return friday_evening.astimezone(tz)
+
+    monkeypatch.setattr(earnings, "datetime", Clock)
+    weeks: list[date] = []
+
+    class Service:
+        async def get_week_cached(
+            self, start: date, held: set[str], options_service: object = None
+        ) -> dict[str, object]:
+            weeks.append(start)
+            return {}
+
+    sleeps = 0
+
+    async def one_cycle(seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(scheduler.asyncio, "sleep", one_cycle)
+    state = SimpleNamespace(groups=[], earnings_service=Service())
+    with pytest.raises(asyncio.CancelledError):
+        await scheduler.earnings_warm_loop(state)
+
+    assert weeks == [date(2026, 8, 17)]

@@ -12,6 +12,7 @@ from typing import SupportsFloat, SupportsIndex, cast
 
 from app.db_schema import initialize_schema
 from app.models import AssetType, Bar, ProviderName, Quote, is_valid_bar
+from app.services.key_dates import event_key, event_sort_key, event_time_slot
 
 _initialized_paths: dict[Path, tuple[int, int]] = {}
 _init_lock = Lock()
@@ -576,8 +577,7 @@ def load_daily_close_tails(
                                ORDER BY timestamp DESC,
                                         CASE provider
                                             WHEN 'yahoo' THEN 0
-                                            WHEN 'stooq' THEN 1
-                                            ELSE 2
+                                            ELSE 1
                                         END
                            ) AS series_row
                     FROM bars
@@ -907,45 +907,67 @@ def _replace_key_dates(
 
 
 def _rebuild_key_dates(conn: sqlite3.Connection) -> None:
-    """Project all source attributions into one newest-mention calendar row."""
-    conn.execute(
+    """Project all source attributions into one calendar row per event.
+
+    Two briefs often name one print differently ("US Chicago PMI (Oct)" vs
+    "Chicago PMI"); rows sharing a date, clock slot and normalized event key
+    collapse, and the latest report (newest created_at, then slug) wins.
+    """
+    sources = conn.execute(
         """
-        DELETE FROM key_dates
-        WHERE NOT EXISTS (
-            SELECT 1
-            FROM key_date_sources AS source
-            WHERE source.event_date = key_dates.event_date
-              AND source.title = key_dates.title
-        )
+        SELECT source_slug, event_date, event_time, title, category, created_at
+        FROM key_date_sources
+        ORDER BY created_at DESC, source_slug DESC
         """
+    ).fetchall()
+    winners: dict[tuple[str, str], sqlite3.Row] = {}
+    claimed: set[tuple[str, str | None, str]] = set()
+    for row in sources:
+        event_date, title = str(row["event_date"]), str(row["title"])
+        time_text = row["event_time"]
+        slot = (event_date, event_time_slot(event_date, time_text), event_key(title))
+        if (event_date, title) in winners or slot in claimed:
+            continue
+        winners[(event_date, title)] = row
+        claimed.add(slot)
+    existing = conn.execute("SELECT event_date, title FROM key_dates").fetchall()
+    conn.executemany(
+        "DELETE FROM key_dates WHERE event_date = ? AND title = ?",
+        [
+            (row["event_date"], row["title"])
+            for row in existing
+            if (str(row["event_date"]), str(row["title"])) not in winners
+        ],
     )
-    conn.execute(
+    conn.executemany(
         """
         INSERT INTO key_dates (
             event_date, event_time, title, category, source_slug, created_at
         )
-        SELECT event_date, event_time, title, category, source_slug, created_at
-        FROM (
-            SELECT source.*,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY event_date, title
-                       ORDER BY created_at DESC, source_slug DESC
-                   ) AS source_rank
-            FROM key_date_sources AS source
-        )
-        WHERE source_rank = 1
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(event_date, title) DO UPDATE SET
             event_time = excluded.event_time,
             category = excluded.category,
             source_slug = excluded.source_slug,
             created_at = excluded.created_at
-        """
+        """,
+        [
+            (
+                row["event_date"],
+                row["event_time"],
+                row["title"],
+                row["category"],
+                row["source_slug"],
+                row["created_at"],
+            )
+            for row in winners.values()
+        ],
     )
 
 
 def load_key_dates(path: Path, *, start: str, end: str, limit: int) -> list[dict[str, object]]:
-    """Events with start <= date <= end, soonest first; NULL times sort last
-    within a day (all-day items like unlocks trail timed prints)."""
+    """Events with start <= date <= end, soonest first by parsed clock time;
+    untimed rows trail within a day (all-day items like unlocks)."""
     init_db(path)
     with _connect(path) as conn:
         rows = conn.execute(
@@ -953,11 +975,17 @@ def load_key_dates(path: Path, *, start: str, end: str, limit: int) -> list[dict
             SELECT id, event_date, event_time, title, category, source_slug
             FROM key_dates
             WHERE event_date >= ? AND event_date <= ?
-            ORDER BY event_date, event_time IS NULL, event_time, title
-            LIMIT ?
             """,
-            (start, end, limit),
+            (start, end),
         ).fetchall()
+    # Text order would put "10:00 ET" before "8:30 ET"; sort on parsed time.
+    rows = sorted(
+        rows,
+        key=lambda row: (
+            event_sort_key(str(row["event_date"]), row["event_time"]),
+            str(row["title"]),
+        ),
+    )[:limit]
     return [
         {
             "id": int(row["id"]),
@@ -1459,7 +1487,12 @@ def save_ai_token_index_points(
     path: Path,
     points: Sequence[dict[str, object]],
 ) -> None:
-    """Upsert daily OpenRouter usage-weighted price-index observations."""
+    """Upsert daily OpenRouter usage-weighted price-index observations.
+
+    A stored day is only replaced by an observation covering at least as many
+    models and tokens: a later, thinner rebuild of the same day must never
+    overwrite the complete point.
+    """
     if not points:
         return
     init_db(path)
@@ -1501,6 +1534,8 @@ def save_ai_token_index_points(
                 open_share_pct = excluded.open_share_pct,
                 model_count = excluded.model_count,
                 fetched_at = excluded.fetched_at
+            WHERE excluded.model_count >= ai_token_index.model_count
+                AND excluded.total_tokens >= ai_token_index.total_tokens
             """,
             rows,
         )
@@ -1663,6 +1698,7 @@ def save_neocloud_filings(
     for row in rows:
         secured = row.get("secured")
         collateral = cast(Sequence[str], row.get("collateral") or ())
+        tranches = row.get("tranches")
         values.append(
             (
                 str(row["accession"]),
@@ -1683,6 +1719,7 @@ def save_neocloud_filings(
                 row.get("rate"),
                 row.get("amortization_start"),
                 row.get("amortization_frequency"),
+                json.dumps(tranches, separators=(",", ":")) if tranches else None,
                 parser_version,
                 fetched_at,
             )
@@ -1694,8 +1731,8 @@ def save_neocloud_filings(
                 accession, company, form, filed_date, kind, amount, currency,
                 offering_amount, first_sale_date, summary, url, maturity, secured,
                 collateral, amendment, rate, amortization_start, amortization_frequency,
-                parser_version, fetched_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                tranches, parser_version, fetched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             values,
         )
@@ -1720,7 +1757,8 @@ def load_neocloud_events(path: Path) -> list[dict[str, object]]:
             """
             SELECT accession, company, form, filed_date, kind, amount, currency,
                    offering_amount, first_sale_date, summary, url, maturity, secured,
-                   collateral, amendment, rate, amortization_start, amortization_frequency
+                   collateral, amendment, rate, amortization_start, amortization_frequency,
+                   tranches
             FROM neocloud_filings
             WHERE kind IS NOT NULL
             ORDER BY filed_date, accession
@@ -1746,20 +1784,24 @@ def load_neocloud_events(path: Path) -> list[dict[str, object]]:
             "rate": row["rate"],
             "amortization_start": row["amortization_start"],
             "amortization_frequency": row["amortization_frequency"],
+            "tranches": json.loads(str(row["tranches"])) if row["tranches"] else [],
         }
         for row in rows
     ]
 
 
-def save_neocloud_debt_schedule(path: Path, schedule: dict[str, object]) -> None:
+def save_neocloud_debt_schedule(
+    path: Path, schedule: dict[str, object], *, parser_version: int
+) -> None:
     """Replace an issuer's reported maturity schedule with its latest filing's."""
     init_db(path)
     with _connect(path) as conn:
         conn.execute(
             """
             INSERT OR REPLACE INTO neocloud_debt_schedules (
-                company, accession, form, url, as_of, fiscal_year_end, buckets, fetched_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                company, accession, form, url, as_of, fiscal_year_end, buckets,
+                parser_version, fetched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(schedule["company"]),
@@ -1769,18 +1811,21 @@ def save_neocloud_debt_schedule(path: Path, schedule: dict[str, object]) -> None
                 schedule.get("as_of"),
                 schedule.get("fiscal_year_end"),
                 json.dumps(schedule.get("buckets") or [], separators=(",", ":")),
+                parser_version,
                 datetime.now(UTC).isoformat(),
             ),
         )
 
 
 def load_neocloud_debt_schedules(path: Path) -> dict[str, dict[str, object]]:
-    """Latest reported maturity schedule per issuer, keyed by company."""
+    """Latest reported maturity schedule per issuer, keyed by company, with the
+    parser version that read it so parser fixes trigger a re-read."""
     init_db(path)
     with _connect(path) as conn:
         rows = conn.execute(
             """
-            SELECT company, accession, form, url, as_of, fiscal_year_end, buckets
+            SELECT company, accession, form, url, as_of, fiscal_year_end, buckets,
+                   parser_version
             FROM neocloud_debt_schedules
             """
         ).fetchall()
@@ -1793,6 +1838,7 @@ def load_neocloud_debt_schedules(path: Path) -> dict[str, dict[str, object]]:
             "as_of": row["as_of"],
             "fiscal_year_end": row["fiscal_year_end"],
             "buckets": json.loads(str(row["buckets"])),
+            "parser_version": int(row["parser_version"]),
         }
         for row in rows
     }

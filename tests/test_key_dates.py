@@ -26,8 +26,7 @@ from starlette.testclient import TestClient
 
 from app import db
 from app.main import app
-from app.services.econ_calendar import _event_moment_utc
-from app.services.key_dates import MAX_EVENTS, KeyDate, parse_key_dates
+from app.services.key_dates import MAX_EVENTS, KeyDate, event_moment_utc, parse_key_dates
 
 EASTERN_TODAY = datetime.now(ZoneInfo("America/New_York")).date()
 
@@ -139,7 +138,7 @@ def test_iso_calendar_bullet_inherits_zone_and_resolves_utc_instant(
         f"## Economic Calendar ({heading_zone})\n- 2026-07-15 {clock} — CPI [MACRO]\n"
     )
     assert events == [KeyDate("2026-07-15", stored_time, "CPI", "MACRO")]
-    moment = _event_moment_utc(date.fromisoformat(events[0].date), events[0].time)
+    moment = event_moment_utc(date.fromisoformat(events[0].date), events[0].time)
     assert moment is not None
     assert moment.isoformat() == utc_time
 
@@ -390,6 +389,85 @@ def test_load_key_dates_orders_timed_prints_before_all_day_items(tmp_path: Path)
         ("2026-07-15", "STRK unlock"),
         ("2026-07-16", "Retail Sales"),
         ("2026-07-16", "ARB unlock"),
+    ]
+
+
+def test_load_key_dates_orders_same_day_prints_by_clock_not_text(tmp_path: Path) -> None:
+    path = tmp_path / "db.sqlite3"
+    db.replace_key_dates(
+        path,
+        slug="brief",
+        events=[
+            ("2026-07-16", "10:00 ET", "Consumer Sentiment", "MACRO"),
+            ("2026-07-16", "14:30 CEST", "Retail Sales", "MACRO"),  # 08:30 ET
+            ("2026-07-16", "9:45 ET", "Industrial Production", "MACRO"),
+        ],
+    )
+    rows = db.load_key_dates(path, start="2026-07-16", end="2026-07-16", limit=10)
+    assert [row["title"] for row in rows] == [
+        "Retail Sales",
+        "Industrial Production",
+        "Consumer Sentiment",
+    ]
+
+
+def test_same_print_from_two_reports_keeps_the_latest_report(tmp_path: Path) -> None:
+    # Prod: Chicago PMI listed by us-asia-close (consensus 56.1) and later by
+    # macro-tape-brief (54.8) under slightly different titles.
+    path = tmp_path / "db.sqlite3"
+    db.replace_key_dates(
+        path,
+        slug="us-asia-close",
+        events=[
+            ("2026-10-30", "14:45 CET", "US Chicago PMI (Oct) — consensus 56.1", "MACRO"),
+            ("2026-10-30", "08:30 ET", "US Core PCE (MoM)", "MACRO"),
+        ],
+    )
+    db.replace_key_dates(
+        path,
+        slug="macro-tape-brief",
+        events=[
+            ("2026-10-30", "09:45 ET", "Chicago PMI — consensus 54.8", "MACRO"),
+            ("2026-10-30", "08:30 ET", "US Core PCE (YoY)", "MACRO"),
+        ],
+    )
+
+    rows = db.load_key_dates(path, start="2026-10-30", end="2026-10-30", limit=10)
+
+    pmi = [row for row in rows if "Chicago PMI" in str(row["title"])]
+    assert len(pmi) == 1
+    assert pmi[0]["source_slug"] == "macro-tape-brief"
+    # Distinct prints at the same time stay separate.
+    assert sorted(str(row["title"]) for row in rows if "PCE" in str(row["title"])) == [
+        "US Core PCE (MoM)",
+        "US Core PCE (YoY)",
+    ]
+
+
+def test_yoy_and_mom_variants_stay_distinct_events() -> None:
+    body = (
+        "## Key Dates\n- 2026-11-12 08:30 ET — US CPI (YoY)\n- 2026-11-12 08:30 ET — US CPI (MoM)\n"
+    )
+    events = parse_key_dates(body)
+    assert [(event.title, event.category) for event in events] == [
+        ("US CPI (YoY)", "EVENT"),
+        ("US CPI (MoM)", "EVENT"),
+    ]
+
+
+def test_month_prefixes_inside_words_are_not_dates() -> None:
+    body = (
+        "## Economic Calendar\n\n"
+        "| When | Event |\n|---|---|\n"
+        "| Pre-market 08:00 ET | Earnings wave |\n"
+        "| Decision 14:00 | BoE rate decision |\n"
+        "| Nov 3 14:30 | Explicit date |\n"
+    )
+    events = parse_key_dates(body, default_date="2026-10-30")
+    assert [(event.date, event.title) for event in events] == [
+        ("2026-10-30", "Earnings wave"),
+        ("2026-10-30", "BoE rate decision"),
+        ("2026-11-03", "Explicit date"),
     ]
 
 

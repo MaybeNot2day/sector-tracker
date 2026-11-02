@@ -41,6 +41,16 @@ def test_clean_hourly_grid_is_kept() -> None:
     assert _drop_off_grid_tail(grid, "1h") == grid
 
 
+def test_post_market_bar_after_short_closing_bar_is_kept() -> None:
+    # includePrePost hourly bars: the regular session's last bar starts 15:30
+    # ET and the post-market bar at 16:00 ET, only 30 minutes later. That
+    # 16:00 bar is real (20:00 UTC on the half-hour grid), not a live print.
+    regular = _grid(7, timedelta(hours=1))  # 09:30 .. 15:30 ET
+    post = _bar(regular[-1].timestamp + timedelta(minutes=30))
+
+    assert _drop_off_grid_tail(regular + [post], "1h") == regular + [post]
+
+
 @pytest.mark.parametrize(
     ("interval", "step_seconds"),
     [("1m", 60), ("5m", 300), ("15m", 900), ("30m", 1800), ("1h", 3600), ("60m", 3600)],

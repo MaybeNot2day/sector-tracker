@@ -31,6 +31,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from app import db
+from app.services.key_dates import event_moment_utc
 
 logger = logging.getLogger(__name__)
 
@@ -142,19 +143,6 @@ _ATTRIBUTION_SPLIT = re.compile(r"\s+[—–]\s+")
 # exact-match score must not beat the lead series (1.1 * 0.85 < 0.957,
 # the full-variant score for "Initial / Continuing Jobless Claims").
 _SECONDARY_SEGMENT_DISCOUNT = 0.85
-_EVENT_TIME = re.compile(r"\b(\d{1,2}):(\d{2})\s*([A-Za-z]{2,4})?\b")
-# Coarse zone map for the time-proximity tiebreak only; ZoneInfo handles
-# DST for the aliases that have it.
-_ZONES = {
-    "ET": "America/New_York",
-    "EST": "America/New_York",
-    "EDT": "America/New_York",
-    "CET": "Europe/Paris",
-    "CEST": "Europe/Paris",
-    "BST": "Europe/London",
-    "GMT": "UTC",
-    "UTC": "UTC",
-}
 
 
 def _apply_subs(text: str, subs: tuple[tuple[re.Pattern[str], str], ...]) -> str:
@@ -252,31 +240,41 @@ def normalize_calendar_rows(raw: list[dict[str, Any]]) -> list[CalendarRow]:
     """Parse raw TradingView rows once at fetch; malformed rows are dropped."""
     rows: list[CalendarRow] = []
     for entry in raw:
-        title = str(entry.get("title") or "").strip()
-        when = _parse_row_date(entry.get("date"))
-        if not title or when is None:
+        try:
+            row = _calendar_row(entry)
+        except (AttributeError, TypeError, ValueError):
+            # One odd row (non-dict, "importance": "high") must not discard
+            # the whole snapshot.
+            logger.debug("skipping malformed calendar row: %r", entry)
             continue
-        indicator = str(entry.get("indicator") or "")
-        rows.append(
-            CalendarRow(
-                title=title,
-                country=str(entry.get("country") or ""),
-                ticker=str(entry.get("ticker") or ""),
-                source=entry.get("source") or None,
-                period=str(entry.get("period") or ""),
-                date=when,
-                actual=_as_number(entry.get("actual")),
-                forecast=_as_number(entry.get("forecast")),
-                previous=_as_number(entry.get("previous")),
-                unit=entry.get("unit") or None,
-                scale=entry.get("scale") or None,
-                importance=int(entry.get("importance") or 0),
-                comment=entry.get("comment") or None,
-                title_tokens=_normalize_row_title(title),
-                indicator_tokens=_normalize_row_title(indicator),
-            )
-        )
+        if row is not None:
+            rows.append(row)
     return rows
+
+
+def _calendar_row(entry: dict[str, Any]) -> CalendarRow | None:
+    title = str(entry.get("title") or "").strip()
+    when = _parse_row_date(entry.get("date"))
+    if not title or when is None:
+        return None
+    indicator = str(entry.get("indicator") or "")
+    return CalendarRow(
+        title=title,
+        country=str(entry.get("country") or ""),
+        ticker=str(entry.get("ticker") or ""),
+        source=entry.get("source") or None,
+        period=str(entry.get("period") or ""),
+        date=when,
+        actual=_as_number(entry.get("actual")),
+        forecast=_as_number(entry.get("forecast")),
+        previous=_as_number(entry.get("previous")),
+        unit=entry.get("unit") or None,
+        scale=entry.get("scale") or None,
+        importance=int(entry.get("importance") or 0),
+        comment=entry.get("comment") or None,
+        title_tokens=_normalize_row_title(title),
+        indicator_tokens=_normalize_row_title(indicator),
+    )
 
 
 def _parse_row_date(value: Any) -> datetime | None:
@@ -325,23 +323,6 @@ def _token_score(event_tokens: frozenset[str], tokens: frozenset[str]) -> float:
     return score
 
 
-def _event_moment_utc(event_date: date, event_time: str | None) -> datetime | None:
-    """UTC instant of the stored event when its time carries a known zone."""
-    if not event_time:
-        return None
-    match = _EVENT_TIME.search(event_time)
-    if match is None or match.group(3) is None:
-        return None
-    zone_name = _ZONES.get(match.group(3).upper())
-    if zone_name is None:
-        return None
-    hour, minute = int(match.group(1)), int(match.group(2))
-    if hour > 23 or minute > 59:
-        return None
-    local = datetime(event_date.year, event_date.month, event_date.day, hour, minute)
-    return local.replace(tzinfo=ZoneInfo(zone_name)).astimezone(UTC)
-
-
 _QUARTER_HINT = re.compile(r"\bq([1-4])\b")
 
 
@@ -370,7 +351,7 @@ def match_release(event: Mapping[str, object], rows: list[CalendarRow]) -> dict[
     quarter_match = _QUARTER_HINT.search(title.lower())
     quarter = f"q{quarter_match.group(1)}" if quarter_match else None
     time_raw = event.get("time")
-    moment = _event_moment_utc(event_date, str(time_raw) if time_raw else None)
+    moment = event_moment_utc(event_date, str(time_raw) if time_raw else None)
 
     best: tuple[float, int, int, float] | None = None
     best_row: CalendarRow | None = None
@@ -518,13 +499,14 @@ class EconCalendarService:
                 return
             try:
                 raw = await self._fetch()
+                rows = normalize_calendar_rows(raw)
             except Exception:
                 # Keep the previous snapshot: stale enrichment beats none,
                 # and the cooldown stops per-request refetch storms.
                 self._failed = time.monotonic()
                 logger.warning("economic calendar fetch failed", exc_info=True)
                 return
-            self._rows = normalize_calendar_rows(raw)
+            self._rows = rows
             self._fetched = time.monotonic()
             self._failed = None
 
@@ -669,7 +651,7 @@ async def key_dates_payload(
                 event_date = None
             if event_date is not None:
                 time_raw = item.get("time")
-                parsed = _event_moment_utc(event_date, str(time_raw) if time_raw else None)
+                parsed = event_moment_utc(event_date, str(time_raw) if time_raw else None)
                 if parsed is not None:
                     moment = parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
         item["time_utc"] = moment

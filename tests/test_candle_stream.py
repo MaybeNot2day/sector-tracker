@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from app.providers.hyperliquid import HyperliquidProvider
+from app.services import candle_stream
 from app.services.candle_stream import CandleStreamService, _candle_bar
 
 
@@ -319,3 +320,51 @@ async def test_old_connection_cleanup_cannot_clear_replacement_connection() -> N
         allow_close.set()
         await asyncio.gather(removing, return_exceptions=True)
         await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_aliased_symbols_share_one_upstream_coin_subscription() -> None:
+    # GOOG and GOOGL resolve to the same Hyperliquid coin: closing one chart
+    # must not unsubscribe the coin the other chart still streams.
+    provider = provider_with_markets()
+    market = {"coin": "xyz:GOOGL", "display": "GOOGL", "last": 180.0}
+    provider._tradfi = {"GOOGL": market, "GOOG": market}
+    connector = FakeConnector()
+    service = CandleStreamService(provider, connector=connector)
+
+    goog = await service.subscribe("GOOG", "1m", "equity")
+    googl = await service.subscribe("GOOGL", "1m", "equity")
+    assert goog is not None and googl is not None
+    await settled()
+    upstream = connector.connections[0]
+    assert [frame["method"] for frame in upstream.sent] == ["subscribe"]
+
+    await service.unsubscribe("GOOG", "1m", goog)
+    await settled()
+    assert [frame["method"] for frame in upstream.sent] == ["subscribe"]
+
+    upstream.publish("xyz:GOOGL", "1m", 181.0)
+    frame = json.loads(await asyncio.wait_for(googl.get(), timeout=5))
+    assert frame["symbol"] == "GOOGL"
+    assert frame["bar"]["close"] == 181.0
+
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_full_client_queue_drops_oldest_frame(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(candle_stream, "CLIENT_QUEUE_MAX", 2)
+    connector = FakeConnector()
+    service = CandleStreamService(provider_with_markets(), connector=connector)
+    queue = await service.subscribe("BTC", "1m", "crypto_perp")
+    assert queue is not None
+    await settled()
+
+    for close in (80001.0, 80002.0, 80003.0):
+        connector.connections[0].publish("BTC", "1m", close)
+    await settled()
+
+    closes = [json.loads(queue.get_nowait())["bar"]["close"] for _ in range(queue.qsize())]
+    assert closes == [80002.0, 80003.0]  # the newest candle state survives
+
+    await service.aclose()

@@ -245,3 +245,19 @@ def test_market_summary_includes_open_change_pct() -> None:
     summary = _market_summary(asset, _quote(103.5), bars)
 
     assert summary["open_change_pct"] == 3.5
+
+
+def test_us_equity_open_change_survives_utc_midnight() -> None:
+    # 00:30 UTC Wed 2026-11-04 is 19:30 EST Tue: the Hyperliquid-first quote
+    # carries no open, so Tuesday's bar open must still anchor ΔOpen.
+    quote = Quote.from_last_and_prev_close(
+        symbol="AAPL",
+        asset_type="equity",
+        provider="hyperliquid",
+        last=103.5,
+        previous_close=99.0,
+        timestamp=datetime(2026, 11, 4, 0, 30, tzinfo=UTC),
+    )
+    bars = [_bar(datetime(2026, 11, 3, 14, 30, tzinfo=UTC), open_=100.0)]
+
+    assert _open_change_pct(quote, bars) == 3.5

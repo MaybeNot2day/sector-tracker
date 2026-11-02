@@ -78,12 +78,15 @@ class CandleStreamService:
             subscribers.add(queue)
             first = len(subscribers) == 1
             if first:
+                # Several symbols may alias one market (e.g. "AAPL" and
+                # "XYZ:AAPL"): the upstream subscription is per coin.
+                coin_was_active = self._coin_active(coin, interval)
                 self._coins[key] = coin
                 self._ensure_upstream()
-            if first and self._ws is not None:
-                # Control frames share the state lock: a resubscribe cannot
-                # overtake an in-flight unsubscribe for the same market.
-                await self._send_frame(self._ws, "subscribe", coin, interval)
+                if not coin_was_active and self._ws is not None:
+                    # Control frames share the state lock: a resubscribe cannot
+                    # overtake an in-flight unsubscribe for the same market.
+                    await self._send_frame(self._ws, "subscribe", coin, interval)
         return queue
 
     async def unsubscribe(
@@ -101,7 +104,7 @@ class CandleStreamService:
             coin = self._coins.pop(key, None)
             ws = self._ws
             empty = not self._coins
-            if coin is not None and ws is not None:
+            if coin is not None and ws is not None and not self._coin_active(coin, interval):
                 await self._send_frame(ws, "unsubscribe", coin, interval)
         if empty:
             await self._stop_upstream()
@@ -112,6 +115,12 @@ class CandleStreamService:
             self._subscribers.clear()
             self._coins.clear()
         await self._stop_upstream()
+
+    def _coin_active(self, coin: str, interval: str) -> bool:
+        return any(
+            active == coin and key_interval == interval
+            for (_symbol, key_interval), active in self._coins.items()
+        )
 
     # --- upstream ----------------------------------------------------------
 
@@ -149,7 +158,10 @@ class CandleStreamService:
                 async with self._connector() as ws:
                     async with self._lock:
                         self._ws = ws
-                        for (_symbol, interval), coin in self._coins.items():
+                        upstream = {
+                            (coin, interval) for (_s, interval), coin in self._coins.items()
+                        }
+                        for coin, interval in upstream:
                             await self._send_frame(ws, "subscribe", coin, interval)
                     backoff = RECONNECT_BASE_SECONDS
                     async for raw in ws:
@@ -208,10 +220,13 @@ class CandleStreamService:
                 separators=(",", ":"),
             )
             for queue in self._subscribers.get((symbol, sub_interval), ()):
-                try:
+                if queue.full():
+                    # Slow client: the newest candle state supersedes the
+                    # oldest queued frame, never the other way round.
+                    with suppress(asyncio.QueueEmpty):
+                        queue.get_nowait()
+                with suppress(asyncio.QueueFull):
                     queue.put_nowait(frame)
-                except asyncio.QueueFull:
-                    pass  # slow client: next frame lands in under a minute
 
     @staticmethod
     def _log_upstream_exit(task: asyncio.Task[None]) -> None:

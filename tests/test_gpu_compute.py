@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from app import db
+from app.services import gpu_compute
 from app.services.gpu_compute import GPUComputeService
 
 API_ROWS: list[dict[str, Any]] = [
@@ -84,6 +85,36 @@ async def test_authenticated_api_normalizes_and_persists_gpu_prices(tmp_path: Pa
         assert conn.execute("SELECT COUNT(*) FROM ai_gpu_compute_snapshots").fetchone() == (1,)
 
     await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_transient_failure_retries_long_before_the_cache_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = 1_000.0
+    monkeypatch.setattr(gpu_compute, "monotonic", lambda: now)
+    healthy = True
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if not healthy:
+            return httpx.Response(503)
+        return httpx.Response(200, json={"data": API_ROWS, "meta": {"tier": "free"}})
+
+    database = tmp_path / "board.sqlite3"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        seed = GPUComputeService(database, api_key="key", cache_seconds=6 * 3600, client=client)
+        await seed.get_hardware()
+
+        healthy = False
+        service = GPUComputeService(database, api_key="key", cache_seconds=6 * 3600, client=client)
+        assert (await service.get_hardware()).get("stale") is True
+
+        healthy = True
+        now += 15 * 60  # far inside the 6 h cache window
+        recovered = await service.get_hardware()
+
+    assert recovered.get("stale") is None
+    assert cast(dict[str, Any], recovered["source"])["mode"] == "authenticated_api"
 
 
 @pytest.mark.asyncio

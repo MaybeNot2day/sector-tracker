@@ -210,7 +210,7 @@ async def test_sqlite_fallback_chooses_one_provider_series(
             close=close,
         )
         for index, (provider, close) in enumerate(
-            [("yahoo", 100.0), ("stooq", 90.0), ("yahoo", 101.0)]
+            [("yahoo", 100.0), ("hyperliquid", 90.0), ("yahoo", 101.0)]
         )
     ]
 
@@ -348,8 +348,7 @@ async def test_krx_fx_outage_keeps_one_usd_history_series(
         return [native]
 
     monkeypatch.setattr(yahoo, "_get_raw_history_sync", raw_history)
-    stooq = CountingHistoryProvider()
-    service = HistoryService(database, {"yahoo": yahoo.YahooProvider(), "stooq": stooq})
+    service = HistoryService(database, {"yahoo": yahoo.YahooProvider()})
     first = await service.get_history(
         groups, asset.symbol, interval="1d", range_="1y", force_refresh=True
     )
@@ -360,7 +359,6 @@ async def test_krx_fx_outage_keeps_one_usd_history_series(
     )
     assert [bar.close for bar in stale] == [100.0]
     assert [bar.close for bar in db.load_bars(database, asset.symbol, "1d")] == [100.0]
-    assert stooq.calls == 0
 
 
 def test_daily_range_filters_use_calendar_month_and_year() -> None:
@@ -391,7 +389,7 @@ async def test_krx_outage_does_not_switch_to_unlabelled_foreign_provider_cache(
     now = datetime.now(UTC)
     db.save_bars(
         database,
-        [Bar("005930.KS", "stooq", "1d", now, 155_000, 170_500, 139_500, 155_000)],
+        [Bar("005930.KS", "hyperliquid", "1d", now, 155_000, 170_500, 139_500, 155_000)],
     )
     asset = AssetConfig("005930.KS", "equity", "yahoo")
     service = HistoryService(database, {"yahoo": EmptyHistoryProvider()})

@@ -544,8 +544,7 @@ async def test_krx_fx_outage_keeps_last_coherent_quote(
 
     monkeypatch.setattr(provider, "_get_spark_quotes_sync", spark)
     monkeypatch.setattr(provider, "_get_chart_quote_sync", lambda asset: None)
-    stooq = CountingProvider()
-    service = QuoteService(database, {"yahoo": provider, "stooq": stooq})
+    service = QuoteService(database, {"yahoo": provider})
     groups = [GroupConfig("KRX", [asset])]
     fresh = (await service.get_board_quotes(groups))["KRX"][0]
     assert fresh.display_last == 100.0
@@ -557,7 +556,6 @@ async def test_krx_fx_outage_keeps_last_coherent_quote(
     assert stale.display_currency == "USD"
     persisted = db.load_latest_quote(database, asset.symbol)
     assert persisted is not None and persisted.display_last == 100.0
-    assert stooq.calls == 0
 
 
 @pytest.mark.asyncio
@@ -575,3 +573,45 @@ async def test_krx_outage_does_not_serve_unconverted_legacy_quote(tmp_path: Path
     assert quote.last == 0.0
     assert quote.error == "no_quote_available"
     assert quote.is_stale is True
+
+
+@pytest.mark.asyncio
+async def test_poll_refresh_runs_every_period_despite_slow_fetch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Poll period == min_refresh_seconds == 10 s and a fetch takes 2 s: the
+    # cache was stamped at fetch end, so every other tick used to see a
+    # "fresh" cache and the board only moved every 20 s.
+    clock = [1_000.0]
+    monkeypatch.setattr("app.services.quotes.monotonic", lambda: clock[0])
+
+    class SlowProvider(CountingProvider):
+        async def get_quotes(self, assets: list[AssetConfig]) -> list[Quote]:
+            clock[0] += 2.0
+            return await super().get_quotes(assets)
+
+    provider = SlowProvider()
+    service = QuoteService(tmp_path / "board.sqlite3", {"yahoo": provider}, min_refresh_seconds=10)
+    groups = [GroupConfig("TEST", [AssetConfig(symbol="AAPL", type="equity", source="yahoo")])]
+
+    for tick in range(4):
+        clock[0] = 1_000.0 + tick * 10.0
+        await service.get_board_quotes(groups, force_refresh=True)
+
+    assert provider.calls == 4
+    # Page requests in between still ride the cache.
+    await service.get_board_quotes(groups)
+    assert provider.calls == 4
+
+
+@pytest.mark.asyncio
+async def test_lookup_cache_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.services.quotes.LOOKUP_CACHE_MAX_ENTRIES", 3)
+    service = QuoteService(tmp_path / "board.sqlite3", {"yahoo": WorkingProvider()})
+
+    for symbol in ("A", "B", "C", "D", "E"):
+        await service.get_lookup_quotes([AssetConfig(symbol=symbol, type="equity", source="yahoo")])
+
+    assert len(service._lookup_cache) == 3
+    # The most recently looked-up symbols are the ones kept.
+    assert set(service._lookup_cache) == {"C", "D", "E"}

@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from calendar import monthrange
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
+
+US_EQUITY_ZONE = ZoneInfo("America/New_York")
+US_SESSION_OPEN = time(9, 30)
+US_SESSION_CLOSE = time(16, 0)
 
 
 def months_before(value: datetime, months: int) -> datetime:
@@ -28,3 +33,29 @@ def range_start(end: datetime, range_: str) -> datetime | None:
         "1w": timedelta(days=7),
     }.get(range_)
     return end - delta if delta is not None else None
+
+
+def is_us_trading_day(day: date) -> bool:
+    """US equity calendar: weekends closed (no exchange-holiday table yet)."""
+    return day.weekday() < 5
+
+
+def us_session_date(value: datetime) -> date:
+    """Exchange-local (America/New_York) calendar date of an aware instant."""
+    return value.astimezone(US_EQUITY_ZONE).date()
+
+
+def us_session_open_at(day: date) -> datetime:
+    return datetime.combine(day, US_SESSION_OPEN, tzinfo=US_EQUITY_ZONE)
+
+
+def us_session_close_at(day: date) -> datetime:
+    return datetime.combine(day, US_SESSION_CLOSE, tzinfo=US_EQUITY_ZONE)
+
+
+def last_completed_us_session(now: datetime) -> date:
+    """Trading date of the most recent US regular session closed by `now`."""
+    day = us_session_date(now)
+    while not is_us_trading_day(day) or us_session_close_at(day) > now:
+        day -= timedelta(days=1)
+    return day

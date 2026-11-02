@@ -5,7 +5,6 @@ import hashlib
 import json
 import logging
 from contextlib import suppress
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -15,7 +14,7 @@ from app import db
 from app.providers.hyperliquid import HyperliquidProvider
 from app.runtime import polling_cycle
 from app.services.daily_board import crypto_breadth_metrics
-from app.services.earnings import week_start
+from app.services.earnings import eastern_today, week_start
 from app.services.econ_calendar import any_hot_release, key_dates_payload
 from app.services.hyperliquid_discovery import HyperliquidDiscoveryService
 from app.services.macro import MACRO_TAPE_GROUP_NAME, macro_payload, with_macro_group
@@ -93,7 +92,9 @@ async def quote_poll_loop(app_state: Any) -> None:
                 # One groups snapshot per cycle: a watchlist edit completing
                 # mid-cycle must not zip NEW groups against OLD quotes.
                 groups = app_state.groups
-                grouped = await app_state.quote_service.get_board_quotes(with_macro_group(groups))
+                grouped = await app_state.quote_service.get_board_quotes(
+                    with_macro_group(groups), force_refresh=True
+                )
                 payload = {
                     "type": "quotes",
                     "data": await board_payload_async(app_state, groups, grouped),
@@ -176,7 +177,7 @@ async def earnings_warm_loop(app_state: Any) -> None:
                     for asset in group.assets
                 }
                 await app_state.earnings_service.get_week_cached(
-                    week_start(datetime.now(UTC).date()),
+                    week_start(eastern_today()),
                     held,
                     getattr(app_state, "options_service", None),
                 )

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import Counter
 from collections.abc import Iterator
+from datetime import datetime
 from typing import Any, cast
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -11,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.models import AssetConfig, GroupConfig
+from app.services import options as options_module
 from app.services.options import (
     MarketDataOptionsService,
     OptionsDataError,
@@ -210,6 +214,7 @@ async def test_chain_failure_cooldown_skips_the_second_http_attempt() -> None:
     [
         ("http", "marketdata_request_failed", 502),
         ("auth", "marketdata_auth_failed", 502),
+        ("forbidden", "marketdata_auth_failed", 502),
         ("rate-limit", "marketdata_rate_limited", 502),
         ("json", "marketdata_invalid_payload", 502),
         ("empty", "options_expirations_unavailable", 404),
@@ -233,6 +238,8 @@ async def test_cold_expiration_failures_have_cooldown_and_recover(
                 return httpx.Response(503)
             if failure == "auth":
                 return httpx.Response(401)
+            if failure == "forbidden":
+                return httpx.Response(403, json={"s": "error", "errmsg": "Forbidden"})
             if failure == "rate-limit":
                 return httpx.Response(429)
             if failure == "json":
@@ -350,6 +357,151 @@ async def test_marketdata_service_maps_rejected_token_to_provider_error() -> Non
 
     assert error.value.code == "marketdata_auth_failed"
     assert error.value.status_code == 502
+
+
+# MarketData's answer when the token was last used from another machine.
+DEVICE_LOCK_BODY = {
+    "s": "error",
+    "errmsg": (
+        "Only one device is permitted to access the API at a time. "
+        "authorizedIP: 203.0.113.7, blockedIP: 198.51.100.4"
+    ),
+}
+
+
+def _chain_response() -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={"underlyingPrice": [100], "side": ["call"], "strike": [100], "openInterest": [1]},
+    )
+
+
+@pytest.mark.asyncio
+async def test_device_locked_token_is_its_own_error_with_a_long_cooldown(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    now = 1000.0
+    locked = True
+    calls: Counter[str] = Counter()
+    monkeypatch.setattr("app.services.options.monotonic", lambda: now)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls[request.url.path] += 1
+        if locked:
+            return httpx.Response(403, json=DEVICE_LOCK_BODY)
+        if "/expirations/" in request.url.path:
+            return httpx.Response(200, json={"expirations": ["2099-01-17"]})
+        return _chain_response()
+
+    service = MarketDataOptionsService(
+        "token", client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    try:
+        with caplog.at_level(logging.WARNING, logger=options_module.__name__):
+            with pytest.raises(OptionsDataError) as error:
+                await service.get_snapshot("NVDA")
+        assert error.value.code == "marketdata_device_locked"
+        assert any(record.levelno == logging.WARNING for record in caplog.records)
+
+        # The lock is token-wide and outlives the short per-symbol cooldown:
+        # other symbols fail fast without touching the network.
+        now += service.FAILURE_COOLDOWN_SECONDS * 10
+        with pytest.raises(OptionsDataError) as error:
+            await service.get_snapshot("SPY")
+        assert error.value.code == "marketdata_device_locked"
+        assert sum(calls.values()) == 1
+
+        now += service.DEVICE_LOCK_COOLDOWN_SECONDS
+        locked = False
+        recovered = await service.get_snapshot("SPY")
+        assert recovered["status"] == "ok"
+    finally:
+        await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_responses_are_logged(caplog: pytest.LogCaptureFixture) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            headers={"x-api-ratelimit-remaining": "0", "x-api-ratelimit-reset": "1787146200"},
+            json={"s": "error", "errmsg": "Daily request limit exceeded."},
+        )
+
+    service = MarketDataOptionsService(
+        "token", client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    try:
+        with caplog.at_level(logging.WARNING, logger=options_module.__name__):
+            with pytest.raises(OptionsDataError) as error:
+                await service.get_snapshot("NVDA")
+    finally:
+        await service.aclose()
+
+    assert error.value.code == "marketdata_rate_limited"
+    assert any(record.levelno == logging.WARNING for record in caplog.records)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("hour", "minute", "expected"),
+    [
+        (15, 59, "2026-08-21"),  # Friday's chain still trades
+        # 17:00 ET is still Friday in UTC, but Friday's chain has expired.
+        (17, 0, "2026-08-28"),
+    ],
+)
+async def test_default_expiration_follows_the_eastern_close(
+    monkeypatch: pytest.MonkeyPatch, hour: int, minute: int, expected: str
+) -> None:
+    moment = datetime(2026, 8, 21, hour, minute, tzinfo=ZoneInfo("America/New_York"))
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> datetime:
+            return moment.astimezone(tz)
+
+    monkeypatch.setattr(options_module, "datetime", Clock)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/expirations/" in request.url.path:
+            return httpx.Response(200, json={"expirations": ["2026-08-21", "2026-08-28"]})
+        return _chain_response()
+
+    service = MarketDataOptionsService(
+        "token", client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    try:
+        snapshot = await service.get_snapshot("SPY")
+    finally:
+        await service.aclose()
+
+    assert snapshot["expiration"] == expected
+
+
+@pytest.mark.asyncio
+async def test_chain_request_leaves_out_per_contract_billed_price_columns() -> None:
+    """MarketData bills a chain per contract when it carries bid/ask/mid/last."""
+    requested_columns: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/expirations/" in request.url.path:
+            return httpx.Response(200, json={"expirations": ["2099-01-17"]})
+        requested_columns.append(request.url.params.get("columns"))
+        return _chain_response()
+
+    service = MarketDataOptionsService(
+        "token", client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    try:
+        await service.get_snapshot("SPY")
+    finally:
+        await service.aclose()
+
+    assert len(requested_columns) == 1 and requested_columns[0] is not None
+    columns = set(requested_columns[0].split(","))
+    assert columns.isdisjoint({"bid", "ask", "mid", "last"})
+    assert {"side", "strike", "openInterest", "gamma", "iv", "underlyingPrice"} <= columns
 
 
 class StubOptionsService:

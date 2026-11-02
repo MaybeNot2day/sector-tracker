@@ -41,29 +41,41 @@ trailing-four-quarter revenue, capex, net financing cash flow, and interest from
 facts. Their deals come from 8-K items 1.01/2.03/3.02, 6-K reports, and prospectus covers:
 each filing is classified (loan facility, senior or convertible notes, equity offering, ATM
 program, contract, lease) with its headline amount read from the text, and launch, pricing,
-and closing filings of one deal merge into one ledger row. Private issuers (Crusoe, Lambda,
+and closing filings of one deal merge into one ledger row. Multi-tranche offerings sum their
+tranches and keep each tranche's maturity (`tranches` on the event; `maturity` is the earliest);
+a reopening of a notes series ("Additional Notes") stays a separate row, and an exhibit-list 6-K
+or a Form D restating a deal counts as one more filing of it. Private issuers (Crusoe, Lambda,
 Fluidstack, Nscale, TensorWave, Lancium) appear through Form D notices (amount sold) and IPO
 registrations. Rounds that skip Form D, privately placed debt, and balances tagged only under
-issuer-specific XBRL extensions do not appear. A balance an issuer stopped tagging keeps its
-last reported value and date. Debt deals also carry their terms, read from the filing text:
-coupon or SOFR spread, maturity date (or the "due YYYY" year), tenor from the first filing to
-maturity, stated amortization start, secured or unsecured, and collateral (GPUs, data centers,
-customer contracts, equity pledges). Notes count as unsecured unless the filing says otherwise;
-loans the text is silent on stay unknown.
+issuer-specific XBRL extensions do not appear. Debt adds convertible notes and short-term
+borrowings an issuer presents beside its main debt concept. A balance an issuer stopped tagging
+keeps its last reported value and date, and every balance of an issuer whose latest balance
+sheet trails the sector's by more than a quarter (Nebius's yearly 20-F) is flagged with its
+date. Debt deals also carry their terms, read from the filing text: coupon or SOFR spread (the
+amended pricing, not the superseded one), maturity date (or the "due YYYY" year; draw-period
+end dates are skipped), tenor from the first filing to maturity, stated amortization start,
+secured or unsecured, and collateral (GPUs, data centers, customer contracts, equity pledges).
+Notes count as unsecured unless the filing says otherwise; loans the text is silent on stay
+unknown.
 
 The debt maturity wall is built from the most authoritative source available per issuer, and
 each source is a separate segment. The base is the principal maturity schedule the issuer tags
 in its latest 10-Q/10-K XBRL instance (`neocloud_debt_schedules`). That schedule is outstanding
-debt and already reflects amortization; fiscal years are mapped to the calendar year in which
-they end. The schedule's open-ended "after year N" bucket is split across years in proportion
-to the issuer's own deal maturities, and that split is shown faded as an estimate. Debt deals
-signed after the report are added as commitments. Issuers that tag no schedule fall back to deal
+debt and already reflects amortization. Wall years are the issuer's fiscal years, named by the
+calendar year in which they end, and deal maturities are placed in the same fiscal years; the
+sector wall adds them up, so IREN's June and Applied Digital's May years sit beside calendar
+years. Interim schedules that count "year two" from the current fiscal year (no remainder or
+year-one bucket) are shifted back a year. The schedule's open-ended "after year N" bucket is
+split across years in proportion to the issuer's own deal maturities, and that split is shown
+faded as an estimate. Debt deals signed after the report are added as commitments. Issuers that
+tag no schedule fall back to deal
 terms: principal at maturity, or equal installments from a stated amortization start (also an
 estimate, because the real installment table sits in the indenture). Face value from deal terms
 is the facility size or principal at signing, not the drawn balance. Amendments of existing
-facilities and non-USD tranches are excluded, and repayments before maturity show up only
-through the next reported schedule. Clicking an issuer in the debt stack redraws its wall,
-lists its schedule as reported with a link to the filing and the balance-sheet debt for
+facilities and non-USD tranches are excluded from the wall and the announced-deal totals, and
+repayments before maturity show up only through the next reported schedule. Clicking an issuer
+in the debt stack redraws its wall, lists its schedule as reported with a link to the filing
+and the balance-sheet debt for
 comparison, and scopes the ledger to that issuer. Hardware compares normalized cloud GPU rental
 rates, provider offers, and workload cost estimates from ComputePrices, alongside PCPartPicker
 component street-price trends. Catalog, index, capex, neocloud, and GPU observations accrue in
@@ -168,20 +180,31 @@ and a cached-data indication; failed categories retry after 300 seconds rather t
 disappearing for the six-hour normal cache period.
 
 The Earnings tab shows the trading week's report calendar as Mon–Fri day
-cards (`GET /api/earnings`, optional `?start=` snaps to that date's week).
+cards (`GET /api/earnings`, optional `?start=` snaps to that date's week;
+the default week follows the US Eastern date).
 Rows come from Nasdaq's public calendar API — every reporting company with
 EPS consensus, report session (BMO/AMC/TNS), and market cap. A single
 batched TradingView Scanner request adds exact scheduled/estimated release
 timestamps, rendered in CET/CEST; missing or conflicting timestamps fall
-back to the session instead of inventing a time. Per day the top seven
+back to the session instead of inventing a time. Sessions and release times
+learned before a report keep showing after it (Nasdaq reports past dates as
+TNS). Per day the top seven
 names rank board-held symbols first, then market cap, then analyst coverage;
 the rest collapse into a "+N more reports" count. Detailed rows carry a
 last-4-quarters beat/miss strip (Nasdaq earnings-surprise API) and, for held
-symbols only, an options-implied move (ATM IV from MarketData.app scaled to
-the first expiration after the report). Day lists and release times cache
-6h and surprise histories 24h with stale-on-error fallback.
+symbols reporting today or later, an options-implied move (ATM IV from
+MarketData.app for the first expiration after the report's reaction session,
+scaled from today to that expiration). Each report's implied move (or its
+absence) caches 12h, and lookups share a budget of 20 MarketData requests per
+credit day (09:30 ET reset) so the free tier's 100 credits stay available for
+the chart modal. Day lists and release times cache 6h and surprise histories
+24h with stale-on-error fallback.
 Options expiration failures are cooled for 30 seconds, including cold-cache failures;
 usable stale expirations and chains remain available during upstream outages.
+Option chains request only the columns the snapshot uses, so MarketData bills
+each chain as one credit instead of one per contract. A token locked to
+another device (`marketdata_device_locked`) pauses all MarketData requests
+for 30 minutes.
 
 ## Tests
 
@@ -299,12 +322,15 @@ Other agents can feed the panel with explicit bullets, one per event:
 ```
 
 Grammar: ISO date, optional time (`HH:MM` plus timezone word, or `AMC`/`BMO`), a dash or
-colon separator, the title, and an optional trailing `[CATEGORY]` tag. Untagged titles
-infer a category from keywords (earnings/opex/holiday/unlock); tables default to `MACRO`,
-bullets to `EVENT`. `MACRO`, `CRYPTO`, `EARNINGS`, `OPEX`, and `HOLIDAY` get dedicated
-colors. Malformed rows are skipped, never fatal. The stored rows mirror their source
-report: a re-run replaces that slug's events wholesale, deleting the report clears them,
-and two briefs naming the same `(date, title)` share one calendar row.
+colon separator, the title, and an optional trailing `[CATEGORY]` tag (one of `MACRO`,
+`EVENT`, `CRYPTO`, `EARNINGS`, `OPEX`, `HOLIDAY`; any other trailing tag such as `(YoY)` stays
+part of the title). Untagged titles infer a category from keywords
+(earnings/opex/holiday/unlock); tables default to `MACRO`, bullets to `EVENT`. `MACRO`,
+`CRYPTO`, `EARNINGS`, `OPEX`, and `HOLIDAY` get dedicated colors. Malformed rows are
+skipped, never fatal. The stored rows mirror their source report: a re-run replaces that
+slug's events wholesale, deleting the report clears them, and two briefs naming the same
+print (same date, same clock time, same normalized title) share one calendar row taken
+from the latest report. Events sort by parsed clock time within a day.
 `GET /api/key-dates` serves upcoming events from the current US-Eastern day forward
 (`days`, default 90).
 

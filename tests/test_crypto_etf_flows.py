@@ -1,6 +1,7 @@
 import asyncio
 import threading
 import time
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -207,26 +208,75 @@ def test_summarize_ignores_blank_current_day_placeholder() -> None:
     assert payload["rows"][-1]["date"] == "2026-06-26"  # type: ignore[index]
 
 
-def test_summarize_ignores_all_zero_current_day_placeholder() -> None:
-    markdown = """
-| Date | IBIT | FBTC | GBTC | Total |
-| --- | --- | --- | --- | --- |
-| 26 Jun 2026 | (444.5) | - | 0.0 | (444.5) |
-| 29 Jun 2026 | 0.0 | 0.0 | 0.0 | 0.0 |
-"""
+_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "farside"
 
-    rows = parse_pipe_table(markdown)
+
+def _fixture(name: str) -> str:
+    return (_FIXTURES / name).read_text(encoding="utf-8")
+
+
+def _assert_etf_flows_add_up(rows: list[dict[str, object]]) -> None:
+    # Every per-ETF value landing in its own column makes each day's fund
+    # flows sum to Farside's Total cell (within its 0.1m rounding).
+    for row in rows:
+        etf_flows = cast(list[dict[str, Any]], row["etf_flows"])
+        if etf_flows:
+            fund_sum = sum(flow["flow_usd"] for flow in etf_flows)
+            assert abs(fund_sum - cast(int, row["flow_usd"])) <= 250_000, row["date"]
+
+
+def test_parse_farside_table_reads_ethereum_tab_cell_layout() -> None:
+    # Regression: the reader now returns the ETH page as tab-separated cells
+    # (no pipes, no Date header, a blank MSSE seed cell); ETH dropped out as
+    # farside_partial_data.
+    rows = parse_farside_table(_fixture("eth.md"))
+    payload = summarize_flow_asset("ETH", "ETH Spot ETFs", rows)
+
+    first_flows = {
+        flow["ticker"]: flow["flow_usd"]
+        for flow in cast(list[dict[str, Any]], rows[0]["etf_flows"])
+    }
+    assert rows[0]["date"] == "2024-07-23"
+    assert rows[0]["flow_usd"] == 106_600_000
+    assert first_flows["ETHA"] == 266_500_000
+    assert first_flows["ETHE"] == -484_100_000
+    assert first_flows["ETH"] == 15_100_000
+    assert "MSSE" not in first_flows
+    _assert_etf_flows_add_up(rows)
+    assert payload["latest_date"] == "2026-10-29"
+    assert payload["latest_flow_usd"] == -105_500_000
+    assert payload["five_day_flow_usd"] == -271_300_000
+    assert payload["laggards"][0]["ticker"] == "ETHA"  # type: ignore[index]
+
+
+def test_parse_farside_table_reads_bitcoin_pipe_layout() -> None:
+    rows = parse_farside_table(_fixture("btc.md"))
     payload = summarize_flow_asset("BTC", "BTC Spot ETFs", rows)
 
-    assert rows[-1]["date"] == "2026-06-29"
-    assert rows[-1]["etf_flows"] == [
-        {"ticker": "IBIT", "flow_usd": 0},
-        {"ticker": "FBTC", "flow_usd": 0},
-        {"ticker": "GBTC", "flow_usd": 0},
-    ]
-    assert payload["latest_date"] == "2026-06-26"
-    assert payload["latest_flow_usd"] == -444_500_000
-    assert payload["laggards"][0]["ticker"] == "IBIT"  # type: ignore[index]
+    assert rows[0]["date"] == "2024-01-11"
+    assert rows[0]["flow_usd"] == 655_300_000
+    _assert_etf_flows_add_up(rows)
+    dates = [row["date"] for row in cast(list[dict[str, Any]], payload["rows"])]
+    assert "2024-01-15" not in dates  # market holiday: every fund cell is "-"
+    assert payload["latest_date"] == "2026-10-29"
+    assert payload["latest_flow_usd"] == 17_200_000
+    assert payload["five_day_flow_usd"] == 302_900_000
+
+
+def test_summarize_counts_all_zero_trading_day_but_skips_blank_placeholder() -> None:
+    # Regression: SOL's 23 Oct 2026 (every fund 0.0) was dropped as a
+    # placeholder, stretching the 5-day window back to 22 Oct (-69.7m).
+    rows = parse_farside_table(_fixture("sol.md"))
+    payload = summarize_flow_asset("SOL", "SOL Spot ETFs", rows)
+
+    dates = [row["date"] for row in cast(list[dict[str, Any]], payload["rows"])]
+    assert "2026-10-23" in dates
+    assert "2026-10-30" not in dates  # today's row: every fund cell is "-"
+    _assert_etf_flows_add_up(rows)
+    assert payload["latest_date"] == "2026-10-29"
+    assert payload["latest_flow_usd"] == -27_700_000
+    assert payload["five_day_flow_usd"] == -60_800_000
+    assert payload["laggards"][0]["ticker"] == "BSOL"  # type: ignore[index]
 
 
 def test_fetch_assets_sync_is_bounded_concurrent_ordered_and_best_effort(

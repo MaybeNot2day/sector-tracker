@@ -208,9 +208,9 @@ def test_build_board_prepares_each_symbol_once_and_reuses_fallback(
             name="MIXED",
             assets=[
                 AssetConfig(symbol="SPY", type="etf", source="yahoo"),
-                # No Stooq series exists; reuse the first cached provider
+                # No Hyperliquid series exists; reuse the first cached provider
                 # without rescanning/converting it for each output builder.
-                AssetConfig(symbol="NVDA", type="equity", source="stooq"),
+                AssetConfig(symbol="NVDA", type="equity", source="hyperliquid"),
             ],
         )
     ]
@@ -496,3 +496,35 @@ def test_official_equity_history_retains_session_windows_with_hyperliquid_quote(
     assert summary["performance"]["1M"] == 50.0  # type: ignore[index]
     assert summary["performance"]["3M"] == 60.0  # type: ignore[index]
     assert summary["performance"]["1Y"] == 100.0  # type: ignore[index]
+
+
+def test_session_windows_before_todays_bar_is_cached() -> None:
+    # Tue 2026-11-03 10:00 EST: the session is open but the hourly history
+    # refresh has not stored Tuesday's daily bar yet (newest bar = Monday).
+    # 5D/1W must still anchor on the close five sessions back (Tue 10-27).
+    sessions = [
+        datetime(2026, 10, 1, 13, 30, tzinfo=UTC) + timedelta(days=offset)
+        for offset in range(33)
+    ]
+    sessions = [day for day in sessions if day.weekday() < 5]
+    assert sessions[-1].date().isoformat() == "2026-11-02"
+    bars = [
+        Bar("AAPL", "yahoo", "1d", day, 100.0 + i, 101.0 + i, 99.0 + i, 100.0 + i)
+        for i, day in enumerate(sessions)
+    ]
+    reference = next(bar.close for bar in bars if bar.timestamp.date().isoformat() == "2026-10-27")
+    asset = AssetConfig(symbol="AAPL", type="equity", source="yahoo")
+    quote = Quote.from_last_and_prev_close(
+        symbol="AAPL",
+        asset_type="equity",
+        provider="hyperliquid",
+        last=150.0,
+        previous_close=bars[-1].close,
+        timestamp=datetime(2026, 11, 3, 15, 0, tzinfo=UTC),
+        currency="USD",
+    )
+    expected = pytest.approx((150.0 - reference) / reference * 100, abs=0.01)
+
+    assert daily_board._asset_metrics(asset, quote, bars)["change_5d"] == expected
+    summary = daily_board._market_summary(asset, quote, bars)
+    assert summary["performance"]["1W"] == expected  # type: ignore[index]

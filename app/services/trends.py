@@ -10,6 +10,7 @@ already caches in SQLite — no new provider traffic.
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -71,7 +72,10 @@ def _group_band(
     if not members:
         return None
 
-    calendar = sorted({date for series in members.values() for date in series})[-days:]
+    # Sessions most members trade: a union calendar would let 24/7 crypto
+    # members alone define weekend points and whipsaw the band.
+    coverage = Counter(date for series in members.values() for date in series)
+    calendar = sorted(date for date, count in coverage.items() if count * 2 > len(members))[-days:]
     if len(calendar) < 2:
         return None
 
@@ -80,10 +84,11 @@ def _group_band(
         windowed = {date: series[date] for date in calendar if date in series}
         if len(windowed) < len(calendar) * MIN_COVERAGE:
             continue
-        base = next(iter(windowed.values()))  # first in-window close (calendar order)
+        filled = _forward_filled(series, calendar)
+        base = next(iter(filled.values()))  # first in-window close (calendar order)
         if base <= 0:
             continue
-        indexed[symbol] = {date: value / base * 100 for date, value in windowed.items()}
+        indexed[symbol] = {date: value / base * 100 for date, value in filled.items()}
     if not indexed:
         return None
 
@@ -108,3 +113,18 @@ def _group_band(
         "members": len(indexed),
         "series": points,
     }
+
+
+def _forward_filled(series: dict[str, float], calendar: list[str]) -> dict[str, float]:
+    """The member's close on each calendar session, carrying the last known close."""
+    history = sorted(series.items())
+    filled: dict[str, float] = {}
+    last: float | None = None
+    index = 0
+    for date in calendar:
+        while index < len(history) and history[index][0] <= date:
+            last = history[index][1]
+            index += 1
+        if last is not None:
+            filled[date] = last
+    return filled

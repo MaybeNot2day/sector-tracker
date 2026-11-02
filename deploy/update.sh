@@ -69,11 +69,15 @@ if [ ! -e "$APP_DIR/data/watchlists.yaml" ] && [ -f "$APP_DIR/config/watchlists.
 fi
 if [ -f "$APP_DIR/.env" ]; then
   chmod 0600 "$APP_DIR/.env"
-  env_tmp="$(run mktemp "$APP_DIR/.env.XXXXXX")"
-  run sed -E 's|^WATCHLIST_PATH=(\./)?config/watchlists\.yaml$|WATCHLIST_PATH=./data/watchlists.yaml|' "$APP_DIR/.env" |
-    run tee "$env_tmp" >/dev/null
-  run chmod 0600 "$env_tmp"
-  run mv "$env_tmp" "$APP_DIR/.env"
+  legacy_watchlist='^WATCHLIST_PATH=(\./)?config/watchlists\.yaml$'
+  # The timer runs every 2 minutes: rewrite only when the legacy line remains.
+  if grep -qE "$legacy_watchlist" "$APP_DIR/.env"; then
+    env_tmp="$(run mktemp "$APP_DIR/.env.XXXXXX")"
+    run sed -E "s|$legacy_watchlist|WATCHLIST_PATH=./data/watchlists.yaml|" "$APP_DIR/.env" |
+      run tee "$env_tmp" >/dev/null
+    run chmod 0600 "$env_tmp"
+    run mv "$env_tmp" "$APP_DIR/.env"
+  fi
 fi
 REMOTE="$(run git rev-parse origin/main)"
 [ "$DEPLOYED" = "$REMOTE" ] && exit 0

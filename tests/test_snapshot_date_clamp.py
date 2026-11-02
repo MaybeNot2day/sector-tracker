@@ -2,8 +2,19 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 from app import db
+from app.services import daily_board
 from app.services.daily_board import DailyBoardService
+
+# A regular Friday session (US trading day).
+_FRIDAY = datetime(2026, 10, 23, 18, 0, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def _frozen_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(daily_board, "_utc_now", lambda: _FRIDAY)
 
 
 def _overview(as_of: str) -> dict[str, object]:
@@ -29,7 +40,7 @@ def test_past_as_of_neither_overwrites_nor_writes(tmp_path: Path) -> None:
     # last successful fetch, and keying by it overwrote a PAST day's
     # persisted snapshot with degraded metrics.
     database = tmp_path / "board.sqlite3"
-    stale = datetime.now(UTC) - timedelta(days=7)
+    stale = _FRIDAY - timedelta(days=7)
     stale_date = stale.date().isoformat()
     db.save_board_snapshot(database, stale_date, {"score": 71})
 
@@ -40,7 +51,7 @@ def test_past_as_of_neither_overwrites_nor_writes(tmp_path: Path) -> None:
 
 def test_current_as_of_writes_condensed_snapshot_under_today(tmp_path: Path) -> None:
     database = tmp_path / "board.sqlite3"
-    now = datetime.now(UTC)
+    now = _FRIDAY
 
     _service(database)._maybe_snapshot(_overview(now.isoformat()))
 
@@ -54,3 +65,20 @@ def test_current_as_of_writes_condensed_snapshot_under_today(tmp_path: Path) -> 
     assert universe["quoted"] == 5
     assert universe["advance_pct"] == 80.0
     assert row["themes"] == []
+
+
+@pytest.mark.parametrize(
+    "weekend",
+    [datetime(2026, 10, 24, 15, 0, tzinfo=UTC), datetime(2026, 10, 25, 15, 0, tzinfo=UTC)],
+    ids=["saturday", "sunday"],
+)
+def test_weekend_writes_no_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, weekend: datetime
+) -> None:
+    # Prod stored Sat 10-24 and Sun 10-25 rows that were copies of Friday.
+    database = tmp_path / "board.sqlite3"
+    monkeypatch.setattr(daily_board, "_utc_now", lambda: weekend)
+
+    _service(database)._maybe_snapshot(_overview(weekend.isoformat()))
+
+    assert db.load_board_snapshots(database, limit=10) == []

@@ -186,11 +186,22 @@ def _history_rows(assets: list[dict[str, object]]) -> list[tuple[str, str, float
 
 
 def parse_farside_table(markdown: str) -> list[dict[str, object]]:
-    for parser in (parse_pipe_table, parse_token_table):
+    for parser in (parse_pipe_table, parse_tab_table, parse_token_table):
         rows = parser(markdown)
         if rows:
             return rows
     return []
+
+
+def parse_tab_table(markdown: str) -> list[dict[str, object]]:
+    """Parse the reader's tab layout: rows split by blank lines, cells by tabs.
+
+    Each cell value sits on its own line between tab separators, so an empty
+    cell (e.g. a fund with no seed) still holds its column position.
+    """
+    return _parse_cell_rows(_tab_rows(markdown))
+
+
 
 
 def parse_token_table(markdown: str) -> list[dict[str, object]]:
@@ -231,44 +242,17 @@ def _parse_fee_seed_token_table(tokens: list[str]) -> list[dict[str, object]]:
 
 
 def parse_pipe_table(markdown: str) -> list[dict[str, object]]:
-    table_rows = [_pipe_cells(line) for line in markdown.splitlines() if line.startswith("|")]
-    header_rows = _parse_pipe_date_header_rows(table_rows)
-    if header_rows:
-        return header_rows
-
-    ticker_row = next((row for row in table_rows if _is_ticker_row(row)), None)
-    if ticker_row is None:
-        return []
-    tickers = ticker_row[1:-1]
-    if not _is_usable_ticker_list(tickers):
-        return []
-    rows: list[dict[str, object]] = []
-    for row in table_rows:
-        if len(row) < len(tickers) + 2:
-            continue
-        date = _parse_date(row[0])
-        if date is None:
-            continue
-        flow_values = [_parse_flow_millions(value) for value in row[1 : 1 + len(tickers)]]
-        total = _parse_flow_millions(row[1 + len(tickers)])
-        if total is not None:
-            rows.append(_flow_row(date, tickers, flow_values, total))
-    return rows
-
-
-def _parse_pipe_date_header_rows(table_rows: list[list[str]]) -> list[dict[str, object]]:
-    header_row = next(
-        (row for row in table_rows if row and row[0].casefold() == "date" and "Total" in row),
-        None,
+    return _parse_cell_rows(
+        [_pipe_cells(line) for line in markdown.splitlines() if line.startswith("|")]
     )
-    if header_row is None:
+
+
+def _parse_cell_rows(table_rows: list[list[str]]) -> list[dict[str, object]]:
+    tickers = next((found for row in table_rows if (found := _header_tickers(row))), None)
+    if tickers is None:
         return []
 
-    total_index = header_row.index("Total")
-    tickers = header_row[1:total_index]
-    if not _is_usable_ticker_list(tickers):
-        return []
-
+    total_index = 1 + len(tickers)
     rows: list[dict[str, object]] = []
     for row in table_rows:
         if len(row) <= total_index:
@@ -281,6 +265,25 @@ def _parse_pipe_date_header_rows(table_rows: list[list[str]]) -> list[dict[str, 
         if total is not None:
             rows.append(_flow_row(date, tickers, flow_values, total))
     return rows
+
+
+def _tab_rows(markdown: str) -> list[list[str]]:
+    rows: list[list[str]] = []
+    block: list[str] = []
+    for line in [*markdown.splitlines(), ""]:
+        if line.strip() or "\t" in line:
+            block.append(line)
+            continue
+        cells = "\n".join(block).split("\t")
+        if len(cells) > 1:
+            # Text preceding the table (page title, nav) shares the header
+            # row's block; only the last line is the row label.
+            label = cells[0].strip().rsplit("\n", 1)[-1].strip()
+            rows.append([label, *(cell.strip() for cell in cells[1:])])
+        block = []
+    return rows
+
+
 
 
 def summarize_flow_asset(
@@ -357,11 +360,12 @@ def _pipe_cells(line: str) -> list[str]:
     return [cell.strip() for cell in line.strip().strip("|").split("|")]
 
 
-def _is_ticker_row(row: list[str]) -> bool:
-    if len(row) < 4 or row[0] != "":
-        return False
-    tickers = [cell for cell in row[1:-1] if cell]
-    return _is_usable_ticker_list(tickers)
+def _header_tickers(row: list[str]) -> list[str]:
+    """Tickers of a header row: label cell, ticker cells, then a Total/blank cell."""
+    if len(row) < 3 or row[-1] not in {"Total", ""} or _parse_date(row[0]) is not None:
+        return []
+    tickers = row[1:-1]
+    return tickers if _is_usable_ticker_list(tickers) else []
 
 
 def _is_usable_ticker_list(tickers: list[str]) -> bool:
@@ -472,16 +476,11 @@ def _rank_etf_flows(
 
 
 def _is_populated_flow_row(row: dict[str, object]) -> bool:
+    # Farside pre-lists the current day (and market holidays) with "-" in
+    # every fund column; those placeholders parse to no per-ETF flows. A day
+    # where every fund reported 0.0 is a real, flat trading day.
     etf_flows = row.get("etf_flows")
-    if isinstance(etf_flows, list) and etf_flows:
-        for flow in etf_flows:
-            if not isinstance(flow, dict):
-                continue
-            value = flow.get("flow_usd")
-            if isinstance(value, int | float) and float(value) != 0.0:
-                return True
-    flow = row.get("flow_usd")
-    return isinstance(flow, int | float) and float(flow) != 0.0
+    return isinstance(etf_flows, list) and bool(etf_flows)
 
 
 def _sum_recent(rows: list[dict[str, object]], count: int) -> float | None:

@@ -88,7 +88,13 @@ _TRAILING_TAG = re.compile(
 )
 # First price-looking number in the target's free text ("$120", "0.55-0.60",
 # "75k"); a k suffix scales by a thousand.
-_TARGET_PRICE = re.compile(r"\$?\s*(\d+(?:,\d{3})*(?:\.\d+)?)\s*([kK])?")
+# The k must stand alone ("120 key level" is 120, not 120k) and a number
+# followed by % is a relative move, not a price ("+20% from entry").
+_TARGET_PRICE = re.compile(
+    r"\$?\s*(?<![\d.])(\d+(?:,\d{3})*(?:\.\d+)?)(?![\d.]|,\d)"
+    r"(?:\s*([kK])(?![A-Za-z]))?(?!\s*%)"
+)
+_CONFIDENCE = re.compile(r"(\d+(?:\.\d+)?)\s*(%)?")
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,11 +152,11 @@ def _confidence_pct(raw: str | None) -> float | None:
     """`60%`, `60`, or `0.6` -> percent, clamped to a sane 5-95 band."""
     if raw is None:
         return None
-    match = _TARGET_PRICE.match(raw.strip())
+    match = _CONFIDENCE.match(raw.strip())
     if match is None:
         return None
-    value = float(match.group(1).replace(",", ""))
-    if value <= 1.0:
+    value = float(match.group(1))
+    if match.group(2) is None and value <= 1.0:
         value *= 100.0
     return round(min(max(value, 5.0), 95.0), 1)
 

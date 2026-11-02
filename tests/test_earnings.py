@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime
+import logging
+from collections.abc import Callable, Iterator
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -15,8 +18,27 @@ from app.main import app
 from app.models import AssetConfig, GroupConfig
 from app.services import earnings as earnings_module
 from app.services.earnings import EarningsCalendarService, week_start
+from app.services.options import MarketDataOptionsService, OptionsDataError
 
 WEEK_MONDAY = date(2026, 8, 17)
+EASTERN = ZoneInfo("America/New_York")
+
+
+@pytest.fixture()
+def eastern_now(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[datetime], None]]:
+    """Freeze the earnings module's wall clock; call the fixture to move it."""
+    current = [datetime(2026, 8, 17, 10, 0, tzinfo=EASTERN)]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> datetime:
+            return current[0].astimezone(tz)
+
+    def move_to(moment: datetime) -> None:
+        current[0] = moment
+
+    monkeypatch.setattr(earnings_module, "datetime", Clock)
+    yield move_to
 
 
 def _epoch(year: int, month: int, day: int, hour: int, minute: int = 0) -> int:
@@ -257,8 +279,47 @@ async def test_failed_surprise_fetch_is_not_cached() -> None:
     assert attempts == 2
 
 
+class ScriptedOptions:
+    """Options service double: listed expirations and a flat ATM IV."""
+
+    def __init__(
+        self,
+        expirations: list[str],
+        *,
+        atm_iv: float = 0.40,
+        errors: dict[str, Exception] | None = None,
+    ) -> None:
+        self.expirations = expirations
+        self.atm_iv = atm_iv
+        self.errors = errors or {}
+        self.expiration_requests: list[str] = []
+        self.chain_requests: list[tuple[str, str | None]] = []
+
+    async def get_expirations(self, symbol: str) -> list[str]:
+        self.expiration_requests.append(symbol)
+        if symbol in self.errors:
+            raise self.errors[symbol]
+        return list(self.expirations)
+
+    async def get_snapshot(self, symbol: str, expiration: str | None = None) -> dict[str, object]:
+        self.chain_requests.append((symbol, expiration))
+        return {
+            "expiration": expiration or self.expirations[0],
+            "expirations": list(self.expirations),
+            "metrics": {"atm_iv": self.atm_iv},
+        }
+
+
+def _moves(payload: dict[str, object]) -> dict[str, float | None]:
+    return {
+        row["symbol"]: row["implied_move_pct"] for day in _days(payload) for row in day["reports"]
+    }
+
+
 @pytest.mark.asyncio
-async def test_implied_move_scales_atm_iv_for_held_symbols_only() -> None:
+async def test_implied_move_fetches_only_the_report_expiration_for_held_symbols(
+    eastern_now: Callable[[datetime], None],
+) -> None:
     api = NasdaqAPI(
         days={
             "2026-08-17": [
@@ -268,60 +329,245 @@ async def test_implied_move_scales_atm_iv_for_held_symbols_only() -> None:
         }
     )
     service = EarningsCalendarService(client=api.client())
-    snapshot_calls: list[tuple[str, str | None]] = []
+    options = ScriptedOptions(["2026-08-14", "2026-08-21", "2026-08-28"])
 
-    class ScriptedOptions:
-        async def get_snapshot(
-            self, symbol: str, expiration: str | None = None
-        ) -> dict[str, object]:
-            snapshot_calls.append((symbol, expiration))
-            return {
-                "expiration": expiration or "2026-08-14",
-                "expirations": ["2026-08-14", "2026-08-21", "2026-08-28"],
-                "metrics": {"atm_iv": 0.40},
-            }
+    payload = await service.get_week(WEEK_MONDAY, held={"WMT"}, options_service=options)
 
-    payload = await service.get_week(WEEK_MONDAY, held={"WMT"}, options_service=ScriptedOptions())
-
-    reports = _days(payload)[0]["reports"]
-    by_symbol = {row["symbol"]: row for row in reports}
-    # The default expiration predates the report; the first one after it is used:
-    # 0.40 * sqrt(4/365) * 100 = 4.2.
-    assert snapshot_calls == [("WMT", None), ("WMT", "2026-08-21")]
-    assert by_symbol["WMT"]["implied_move_pct"] == 4.2
-    assert by_symbol["BIG"]["implied_move_pct"] is None
+    # Straight to the first expiration after the report — no default chain:
+    # 0.40 * sqrt(4/365) * 100 = 4.2 (Monday 10:00 ET -> Friday expiry).
+    assert options.chain_requests == [("WMT", "2026-08-21")]
+    assert _moves(payload) == {"WMT": 4.2, "BIG": None}
 
 
 @pytest.mark.asyncio
-async def test_options_failures_leave_implied_move_empty() -> None:
+@pytest.mark.parametrize(
+    ("time", "expiration", "move"),
+    [
+        # Before the open: Thursday's session reacts, Thursday's expiry prices
+        # it, one day from Wednesday: 0.40 * sqrt(1/365) * 100.
+        ("time-pre-market", "2026-08-20", 2.1),
+        # After the close (or unknown): Friday's session reacts; two days out.
+        ("time-after-hours", "2026-08-21", 3.0),
+        ("time-not-supplied", "2026-08-21", 3.0),
+    ],
+)
+async def test_implied_move_covers_the_reaction_session_from_today(
+    eastern_now: Callable[[datetime], None], time: str, expiration: str, move: float
+) -> None:
+    eastern_now(datetime(2026, 8, 19, 10, 0, tzinfo=EASTERN))  # Wednesday
+    api = NasdaqAPI(days={"2026-08-20": [_calendar_row("WMT", time=time)]})
+    service = EarningsCalendarService(client=api.client())
+    options = ScriptedOptions(["2026-08-19", "2026-08-20", "2026-08-21", "2026-08-28"])
+
+    payload = await service.get_week(WEEK_MONDAY, held={"WMT"}, options_service=options)
+
+    assert options.chain_requests == [("WMT", expiration)]
+    assert _moves(payload) == {"WMT": move}
+
+
+@pytest.mark.asyncio
+async def test_implied_moves_skip_reports_already_out(
+    eastern_now: Callable[[datetime], None],
+) -> None:
+    eastern_now(datetime(2026, 8, 19, 18, 0, tzinfo=EASTERN))  # Wednesday after the close
+    api = NasdaqAPI(
+        days={
+            "2026-08-17": [_calendar_row("MON", time="time-after-hours")],
+            "2026-08-19": [
+                _calendar_row("PRE", time="time-pre-market"),
+                _calendar_row("POST", time="time-after-hours"),
+            ],
+            "2026-08-20": [_calendar_row("THU")],
+        }
+    )
+    service = EarningsCalendarService(client=api.client())
+    options = ScriptedOptions(["2026-08-21", "2026-08-28"])
+
+    payload = await service.get_week(
+        WEEK_MONDAY, held={"MON", "PRE", "POST", "THU"}, options_service=options
+    )
+
+    assert sorted(options.expiration_requests) == ["POST", "THU"]
+    moves = _moves(payload)
+    assert moves["MON"] is None and moves["PRE"] is None
+    assert moves["POST"] is not None and moves["THU"] is not None
+
+
+@pytest.mark.asyncio
+async def test_implied_moves_and_their_absence_are_cached_per_report(
+    eastern_now: Callable[[datetime], None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = [10_000.0]
+    monkeypatch.setattr(earnings_module, "monotonic", lambda: clock[0])
+    api = NasdaqAPI(days={"2026-08-18": [_calendar_row("WMT"), _calendar_row("NOP")]})
+    service = EarningsCalendarService(client=api.client())
+    options = ScriptedOptions(
+        ["2026-08-21"],
+        errors={"NOP": OptionsDataError("options_expirations_unavailable", status_code=404)},
+    )
+
+    first = await service.get_week(WEEK_MONDAY, held={"WMT", "NOP"}, options_service=options)
+    assert sorted(options.expiration_requests) == ["NOP", "WMT"]
+
+    # Hours later (well past the 30-minute warm cadence): no MarketData calls.
+    clock[0] += 4 * 3600
+    second = await service.get_week(WEEK_MONDAY, held={"WMT", "NOP"}, options_service=options)
+    assert sorted(options.expiration_requests) == ["NOP", "WMT"]
+    assert len(options.chain_requests) == 1
+    assert _moves(second) == _moves(first)
+    assert _moves(second)["WMT"] is not None and _moves(second)["NOP"] is None
+
+    clock[0] += earnings_module.IMPLIED_MOVE_CACHE_SECONDS
+    await service.get_week(WEEK_MONDAY, held={"WMT", "NOP"}, options_service=options)
+    assert sorted(options.expiration_requests) == ["NOP", "NOP", "WMT", "WMT"]
+
+
+@pytest.mark.asyncio
+async def test_warm_loop_spends_a_small_daily_marketdata_budget(
+    eastern_now: Callable[[datetime], None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A day of 30-minute warm passes over a busy held week stays within budget."""
+    symbols = [f"S{index:02d}" for index in range(25)]
+    api = NasdaqAPI(
+        days={
+            (WEEK_MONDAY + timedelta(days=offset)).isoformat(): [
+                _calendar_row(symbol) for symbol in symbols[offset * 5 : offset * 5 + 5]
+            ]
+            for offset in range(5)
+        }
+    )
+    service = EarningsCalendarService(client=api.client())
+    requests: list[str] = []
+
+    def marketdata(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if "/expirations/" in request.url.path:
+            return httpx.Response(200, json={"s": "ok", "expirations": ["2026-08-21"]})
+        return httpx.Response(
+            200,
+            json={
+                "side": ["call", "put"],
+                "strike": [100, 100],
+                "openInterest": [10, 10],
+                "gamma": [0.01, 0.01],
+                "iv": [0.40, 0.40],
+                "underlyingPrice": [100, 100],
+            },
+        )
+
+    options = MarketDataOptionsService(
+        "token", client=httpx.AsyncClient(transport=httpx.MockTransport(marketdata))
+    )
+    clock = [10_000.0]
+    monkeypatch.setattr(earnings_module, "monotonic", lambda: clock[0])
+    # One MarketData credit day: 09:30 ET Monday to 09:30 ET Tuesday.
+    start = datetime(2026, 8, 17, 9, 30, tzinfo=EASTERN)
+    try:
+        for warm_pass in range(48):
+            eastern_now(start + timedelta(minutes=30 * warm_pass))
+            payload = await service.get_week_cached(WEEK_MONDAY, set(symbols), options)
+            clock[0] += 30 * 60 + 1
+        assert 0 < len(requests) <= earnings_module.IMPLIED_MOVE_DAILY_REQUESTS
+        assert any(move is not None for move in _moves(payload).values())
+
+        # The next credit day brings a fresh budget for the remaining reports.
+        spent = len(requests)
+        eastern_now(start + timedelta(days=1, minutes=1))
+        await service.get_week_cached(WEEK_MONDAY, set(symbols), options)
+        assert spent < len(requests) <= spent + earnings_module.IMPLIED_MOVE_DAILY_REQUESTS
+    finally:
+        await options.aclose()
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_options_are_logged_and_pause_lookups(
+    eastern_now: Callable[[datetime], None], caplog: pytest.LogCaptureFixture
+) -> None:
+    api = NasdaqAPI(days={"2026-08-18": [_calendar_row(s) for s in ("AAA", "BBB", "CCC")]})
+    service = EarningsCalendarService(client=api.client())
+    limited = OptionsDataError("marketdata_rate_limited")
+    options = ScriptedOptions(
+        ["2026-08-21"], errors={symbol: limited for symbol in ("AAA", "BBB", "CCC")}
+    )
+
+    with caplog.at_level(logging.WARNING, logger=earnings_module.__name__):
+        payload = await service.get_week(
+            WEEK_MONDAY, held={"AAA", "BBB", "CCC"}, options_service=options
+        )
+        await service.get_week(WEEK_MONDAY, held={"AAA", "BBB", "CCC"}, options_service=options)
+
+    # The quota is token-wide: one failed lookup stops the pass and the next.
+    assert len(options.expiration_requests) == 1
+    assert any("marketdata_rate_limited" in record.getMessage() for record in caplog.records)
+    assert set(_moves(payload).values()) == {None}
+
+
+@pytest.mark.asyncio
+async def test_options_failures_leave_implied_move_empty(
+    eastern_now: Callable[[datetime], None],
+) -> None:
     api = NasdaqAPI(days={"2026-08-17": [_calendar_row("WMT")]})
     service = EarningsCalendarService(client=api.client())
+    options = ScriptedOptions(["2026-08-21"], errors={"WMT": RuntimeError("boom")})
 
-    class BrokenOptions:
-        async def get_snapshot(
-            self, symbol: str, expiration: str | None = None
-        ) -> dict[str, object]:
-            raise RuntimeError("options_not_configured")
+    payload = await service.get_week(WEEK_MONDAY, held={"WMT"}, options_service=options)
 
-    payload = await service.get_week(WEEK_MONDAY, held={"WMT"}, options_service=BrokenOptions())
-
+    assert options.expiration_requests == ["WMT"]
     assert _days(payload)[0]["reports"][0]["implied_move_pct"] is None
 
 
 @pytest.mark.asyncio
-async def test_payload_cache_serves_repeat_reads(monkeypatch: pytest.MonkeyPatch) -> None:
-    api = NasdaqAPI(days={"2026-08-17": [_calendar_row("WMT")]})
+async def test_past_days_keep_the_session_and_release_time_learned_earlier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = NasdaqAPI(
+        days={"2026-08-17": [_calendar_row("WMT", time="time-pre-market")]},
+        release_times={"WMT": (_epoch(2026, 8, 17, 11), -1)},
+    )
+    service = EarningsCalendarService(client=api.client())
+    clock = [10_000.0]
+    monkeypatch.setattr(earnings_module, "monotonic", lambda: clock[0])
+    await service.get_week(WEEK_MONDAY, held=set())
+
+    # Once the day is past Nasdaq answers "time not supplied" and TradingView
+    # has moved on to the next quarter's release.
+    clock[0] += earnings_module.DAY_CACHE_SECONDS + 1
+    api.days = {"2026-08-17": [_calendar_row("WMT", time="time-not-supplied")]}
+    api.release_times = {"WMT": (_epoch(2026, 11, 17, 11), -1)}
+    payload = await service.get_week(WEEK_MONDAY, held=set())
+
+    assert len(api.calendar_requests) == 10
+    wmt = _days(payload)[0]["reports"][0]
+    assert wmt["session"] == "bmo"
+    assert wmt["release_at"] == "2026-08-17T11:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_payload_cache_serves_repeat_reads_per_held_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = NasdaqAPI(
+        days={
+            "2026-08-17": [
+                _calendar_row("BIG", market_cap="$9,000,000,000"),
+                _calendar_row("WMT"),
+            ]
+        }
+    )
     service = EarningsCalendarService(client=api.client())
     clock = [10_000.0]
     monkeypatch.setattr(earnings_module, "monotonic", lambda: clock[0])
 
     first = await service.get_week_cached(WEEK_MONDAY, held=set())
+    assert [row["symbol"] for row in _days(first)[0]["reports"]] == ["BIG", "WMT"]
     assert len(api.calendar_requests) == 5
 
-    # Inside the TTL the composed payload answers with zero provider work —
-    # even for a different held set (re-ranking waits for the warm loop).
-    second = await service.get_week_cached(WEEK_MONDAY, held={"WMT"})
-    assert second is first
+    # Inside the TTL the composed payload answers with zero provider work.
+    assert await service.get_week_cached(WEEK_MONDAY, held=set()) is first
+
+    # A watchlist edit re-ranks at once, riding the warm day caches.
+    edited = await service.get_week_cached(WEEK_MONDAY, held={"WMT"})
+    assert [row["symbol"] for row in _days(edited)[0]["reports"]] == ["WMT", "BIG"]
     assert len(api.calendar_requests) == 5
 
     clock[0] += earnings_module.PAYLOAD_CACHE_SECONDS + 1
@@ -389,6 +635,19 @@ def test_route_keeps_explicit_weekend_start_in_its_own_week(
     assert response.status_code == 200
     # Saturday belongs to the Aug 10 trading week, not the following one.
     assert earnings_app_state.calls[0][0] == date(2026, 8, 10)
+
+
+def test_route_default_week_follows_the_eastern_date(
+    earnings_app_state: RecordingService, eastern_now: Callable[[datetime], None]
+) -> None:
+    # Friday 20:30 ET is already Saturday in UTC; after-close reporters of
+    # this week must stay on screen.
+    eastern_now(datetime(2026, 8, 21, 20, 30, tzinfo=EASTERN))
+
+    response = TestClient(app).get("/api/earnings")
+
+    assert response.status_code == 200
+    assert earnings_app_state.calls[0][0] == date(2026, 8, 17)
 
 
 def test_route_rejects_malformed_start(earnings_app_state: RecordingService) -> None:

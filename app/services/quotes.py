@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import replace
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
 from typing import TypeAlias
 
 from app import db
+from app.calendar_windows import last_completed_us_session, us_session_close_at
 from app.models import AssetConfig, GroupConfig, ProviderName, Quote
 from app.providers.base import QuoteProvider
 from app.providers.hyperliquid import HyperliquidProvider
@@ -24,6 +25,8 @@ STALE_WHILE_REVALIDATE_SECONDS = 120.0
 # Personal-list lookups bypass the board cache; keep a short per-symbol TTL so
 # rapid list switching or re-renders reuse the same provider round-trip.
 LOOKUP_CACHE_SECONDS = 30.0
+# Free-typed list symbols are unbounded input: cap the per-symbol cache.
+LOOKUP_CACHE_MAX_ENTRIES = 512
 
 
 class QuoteService:
@@ -45,9 +48,29 @@ class QuoteService:
         self._refresh_lock = asyncio.Lock()
 
     async def get_board_quotes(
-        self, groups: list[GroupConfig], *, allow_stale: bool = False
+        self,
+        groups: list[GroupConfig],
+        *,
+        allow_stale: bool = False,
+        force_refresh: bool = False,
     ) -> dict[str, list[Quote]]:
+        """Board quotes, cached for `min_refresh_seconds`.
+
+        `force_refresh` is the poll loop's path: it runs once per poll period,
+        so honoring a cache of the same length would skip every other tick.
+        It still coalesces with a refresh that completes while it waits.
+        """
         cache_key = _groups_cache_key(groups)
+        if force_refresh:
+            requested_at = monotonic()
+            async with self._refresh_lock:
+                if (
+                    self._cached_grouped is not None
+                    and self._cache_key == cache_key
+                    and self._cache_time >= requested_at
+                ):
+                    return self._cached_grouped
+                return await self._refresh(groups, cache_key)
         cached = self._cached_quotes(cache_key)
         if cached is not None:
             return cached
@@ -155,8 +178,23 @@ class QuoteService:
                             continue
                         key = quote.symbol.upper()
                         result[key] = quote
+                        self._lookup_cache.pop(key, None)
                         self._lookup_cache[key] = (fetched, quote)
+                self._prune_lookup_cache(fetched)
         return result
+
+    def _prune_lookup_cache(self, now: float) -> None:
+        """Drop expired entries, then the oldest ones beyond the size cap."""
+        expired = [
+            key
+            for key, (stamp, _quote) in self._lookup_cache.items()
+            if now - stamp >= LOOKUP_CACHE_SECONDS
+        ]
+        for key in expired:
+            del self._lookup_cache[key]
+        while len(self._lookup_cache) > LOOKUP_CACHE_MAX_ENTRIES:
+            # Insertion order == fetch order (entries are re-inserted on refresh).
+            del self._lookup_cache[next(iter(self._lookup_cache))]
 
     def _schedule_refresh(self, groups: list[GroupConfig], cache_key: GroupsCacheKey) -> None:
         if self._refresh_lock.locked():
@@ -244,22 +282,6 @@ class QuoteService:
         for quotes in await asyncio.gather(*tasks):
             for quote in quotes:
                 fresh_by_symbol[quote.symbol] = quote
-
-        missing_fallback_assets = [
-            asset
-            for group in groups
-            for asset in group.assets
-            if asset.symbol not in fresh_by_symbol
-            and asset.source != "stooq"
-            and asset.type in {"equity", "etf"}
-            and asset.exchange != "KRX"
-            and not asset.symbol.endswith((".KS", ".KQ"))
-        ]
-        stooq = self.providers.get("stooq")
-        if stooq and missing_fallback_assets:
-            for quote in await self._safe_provider_quotes("stooq", missing_fallback_assets):
-                fresh_by_symbol[quote.symbol] = quote
-
         await self._overlay_hyperliquid_prices(groups, fresh_by_symbol)
         return fresh_by_symbol
 
@@ -291,17 +313,27 @@ class QuoteService:
         if not live_prices:
             return {}
         try:
+            symbols = list(live_prices)
             tails = await asyncio.to_thread(
-                db.load_daily_close_tails, self.database_path, list(live_prices)
+                db.load_daily_close_tails, self.database_path, symbols
             )
+            refreshes = await asyncio.to_thread(db.load_bar_refreshes, self.database_path, "1d")
         except Exception:
             logger.warning("baseline close load failed", exc_info=True)
             return {}
-        now = datetime.now(UTC)
+        fetched_by_series = {
+            (symbol.upper(), newest): fetched_at
+            for (symbol, _provider), (fetched_at, newest) in refreshes.items()
+        }
+        now = _utc_now()
         quotes: dict[str, Quote] = {}
         for symbol, live in live_prices.items():
             asset = assets.get(symbol.upper())
-            baseline = _baseline_close(tails.get(symbol.upper(), []), now)
+            tail = tails.get(symbol.upper(), [])
+            fetched_at = (
+                fetched_by_series.get((symbol.upper(), _as_utc(tail[-1][0]))) if tail else None
+            )
+            baseline = _baseline_close(tail, now, fetched_at)
             if asset is None or baseline is None:
                 continue  # no trustworthy official close: let the venue answer
             quotes[asset.symbol] = Quote.from_last_and_prev_close(
@@ -431,29 +463,43 @@ def _cached_quote_matches(asset: AssetConfig, cached: Quote) -> bool:
 # A listing-venue quote older than this means the session (incl. pre/post
 # prints) is over; its last price then IS the most recent official close.
 OFFICIAL_QUOTE_FRESH_SECONDS = 3600.0
-# US regular sessions end 20:00-21:00 UTC (DST shift); a daily bar counts as
-# the completed official close once its date's buffer passes.
-SESSION_CLOSE_BUFFER = time(21, 30)
-# Older baselines mean the venue history is broken; re-fetch via the venue.
-BASELINE_MAX_AGE = timedelta(days=5)
 
 
-def _baseline_close(tail: list[tuple[datetime, float]], now: datetime) -> float | None:
-    """Last completed official session close from a daily-bar close tail.
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
-    A bar dated today whose session has not ended yet is still forming, so the
-    baseline is the previous bar's close — the venue's `previous_close`.
+
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _baseline_close(
+    tail: list[tuple[datetime, float]],
+    now: datetime,
+    newest_fetched_at: datetime | None,
+) -> float | None:
+    """Close of the latest completed US session from a daily-bar close tail.
+
+    The session is resolved in America/New_York (DST-safe). Its bar must be
+    present — an older bar would silently widen 1D into a multi-day change —
+    and final: either a newer session's bar exists, or the series was fetched
+    after that session's close (an earlier fetch stored an intraday close).
     """
-    if not tail:
-        return None
-    last_ts, last_close = tail[-1]
-    if last_ts.tzinfo is None:
-        last_ts = last_ts.replace(tzinfo=UTC)
-    if now - last_ts > BASELINE_MAX_AGE:
-        return None
-    session_end = datetime.combine(last_ts.date(), SESSION_CLOSE_BUFFER, tzinfo=UTC)
-    close = last_close if now >= session_end else (tail[-2][1] if len(tail) >= 2 else None)
-    return close if close is not None and close > 0 else None
+    session = last_completed_us_session(now)
+    for index in range(len(tail) - 1, -1, -1):
+        timestamp, close = tail[index]
+        bar_date = _as_utc(timestamp).date()
+        if bar_date > session:
+            continue  # the current session's bar, still forming
+        if bar_date < session:
+            return None
+        if index == len(tail) - 1 and (
+            newest_fetched_at is None
+            or _as_utc(newest_fetched_at) < us_session_close_at(session)
+        ):
+            return None
+        return close if close > 0 else None
+    return None
 
 
 def _official_close(quote: Quote, now: datetime) -> float | None:

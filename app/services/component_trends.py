@@ -59,9 +59,10 @@ _IMAGE_ENTRY = re.compile(
 )
 
 # Any failed category stamps failed_at so a partial or failed scrape uses
-# the short retry interval, not the successful scrape's six-hour cache.
+# the retry interval, not the successful scrape's six-hour cache. Consecutive
+# failures (Cloudflare blocks persist) double the interval up to that cache.
 FAILURE_RETRY_SECONDS = 300.0
-_cache: dict[str, Any] = {"at": 0.0, "payload": None, "failed_at": None}
+_cache: dict[str, Any] = {"at": 0.0, "payload": None, "failed_at": None, "failures": 0}
 _lock = asyncio.Lock()
 
 
@@ -109,8 +110,10 @@ async def component_trends_payload(store_path: Path | None = None) -> dict[str, 
 
     Priority: fresh in-memory cache, fresh pushed store (datacenter hosts
     cannot scrape PCPartPicker — Cloudflare 403s their IP ranges, so a
-    residential-network pusher POSTs the payload in), live scrape (works in
-    local development), then any stale fallback rather than an empty rail.
+    residential-network pusher POSTs the payload in), a stale pushed store
+    labelled stale (a pushed host never live-scrapes), live scrape with
+    exponential failure backoff (local development), then any stale
+    fallback rather than an empty rail.
     """
     async with _lock:
         if (
@@ -125,10 +128,15 @@ async def component_trends_payload(store_path: Path | None = None) -> dict[str, 
             _cache["at"] = monotonic()
             _cache["failed_at"] = None
             return pushed
-        failed_at = _cache["failed_at"]
-        if failed_at is not None and monotonic() - float(failed_at) < FAILURE_RETRY_SECONDS:
+        if pushed is not None:
+            # A residential pusher feeds this host (production: Cloudflare
+            # 403s the server). A stale push is served stale-labelled; live
+            # scrapes from here would only burn requests on every page view.
             return _fallback_payload(pushed)
-        previous = _fallback_payload(pushed)
+        failed_at = _cache["failed_at"]
+        if failed_at is not None and monotonic() - float(failed_at) < _failure_retry_seconds():
+            return _fallback_payload(None)
+        previous = _fallback_payload(None)
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
             results = await asyncio.gather(
                 *(_fetch_category(client, slug, label) for slug, label in CATEGORIES)
@@ -144,7 +152,7 @@ async def component_trends_payload(store_path: Path | None = None) -> dict[str, 
                 for category in cast(list[dict[str, object]], previous["categories"])
             ]
             previous["failed_categories"] = failed
-            _cache["failed_at"] = monotonic()
+            _record_failure()
             _cache["payload"] = previous
             return previous
         previous_categories = {
@@ -173,8 +181,23 @@ async def component_trends_payload(store_path: Path | None = None) -> dict[str, 
         }
         _cache["payload"] = payload
         _cache["at"] = monotonic()
-        _cache["failed_at"] = monotonic() if failed else None
+        if failed:
+            _record_failure()
+        else:
+            _cache["failed_at"] = None
+            _cache["failures"] = 0
         return payload
+
+
+def _record_failure() -> None:
+    _cache["failed_at"] = monotonic()
+    _cache["failures"] = int(_cache.get("failures") or 0) + 1
+
+
+def _failure_retry_seconds() -> float:
+    """Exponential backoff: 5 min, 10, 20, ... capped at the success cache."""
+    streak = max(1, int(_cache.get("failures") or 0))
+    return float(min(FAILURE_RETRY_SECONDS * 2 ** (streak - 1), CACHE_SECONDS))
 
 
 def _fallback_payload(pushed: dict[str, object] | None) -> dict[str, object]:
@@ -258,6 +281,7 @@ def save_pushed_payload(store_path: Path, payload: dict[str, object]) -> None:
     _cache["payload"] = payload
     _cache["at"] = monotonic()
     _cache["failed_at"] = None
+    _cache["failures"] = 0
 
 
 def _load_store(store_path: Path | None) -> dict[str, object] | None:

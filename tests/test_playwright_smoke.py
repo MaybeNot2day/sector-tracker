@@ -21,7 +21,7 @@ from urllib.request import urlopen
 import pytest
 
 if TYPE_CHECKING:
-    from playwright.sync_api import Browser, BrowserContext, Page
+    from playwright.sync_api import Browser, BrowserContext, Locator, Page
 
 
 E2E_ENABLED = bool(os.environ.get("RUN_PLAYWRIGHT") or os.environ.get("BOARD_E2E_BASE_URL"))
@@ -328,6 +328,8 @@ def test_fringe_tab_renders_portfolio_curve_and_history(page: Page, base_url: st
     # Equity curve renders as an inline SVG with baseline and live dot.
     expect(board.locator(".equity-chart")).to_be_visible()
     expect(board.locator(".equity-axis")).to_contain_text("now $10,247")
+    # A $9.97k-$10.25k book fills the plot instead of hugging a $0 axis.
+    _expect_line_fills_chart(board.locator(".equity-chart"))
 
     # Open positions reuse the blotter table; history lists every close.
     expect(board.locator(".fringe-table .fringe-row")).to_have_count(3)
@@ -428,6 +430,10 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
     capital_help = page.locator('[data-neocloud-panel="capital"] .ai-neocloud-help')
     capital_help.locator("summary").click()
     expect(capital_help.locator("li").first).to_be_visible()
+    # An opened reading guide survives the board re-render on section switches.
+    page.locator("#ai-capex-tab").click()
+    page.locator("#ai-neoclouds-tab").click()
+    expect(capital_help.locator("li").first).to_be_visible()
     # Hovering a quarter shows every series' value, the stacked total and coverage.
     capital_chart = page.locator('[data-neocloud-panel="capital"] .viz')
     chart_box = capital_chart.bounding_box()
@@ -442,11 +448,13 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
     page.mouse.move(0, 0)
     expect(tooltip).to_be_hidden()
 
-    # A balance the issuer stopped tagging is flagged with its last reported date.
+    # A balance the issuer stopped tagging is flagged with its last reported date;
+    # net debt derives from it, so it carries the same marker.
     neocloud_view("balance")
-    stale_debt = page.locator("#ai-neoclouds-board td.ai-neocloud-stale")
-    expect(stale_debt).to_have_text("$3.1B*")
-    expect(stale_debt).to_have_attribute("title", "Last tagged 2026-03-31")
+    stale_cells = page.locator("#ai-neoclouds-board td.ai-neocloud-stale")
+    expect(stale_cells).to_have_text(["$3.1B*", "$500M*"])
+    for index in range(2):
+        expect(stale_cells.nth(index)).to_have_attribute("title", "Last tagged 2026-03-31")
 
     neocloud_view("ledger")
     ledger = page.locator("#ai-neocloud-ledger tr")
@@ -485,6 +493,17 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
     page.locator(".ai-neocloud-ledger-link").click()
     expect(page.locator('[data-neocloud-panel="ledger"]')).to_be_visible()
     expect(ledger).to_have_count(1)
+    # Section, sub-view, ledger filter and issuer survive a reload via the URL.
+    page.locator('#ai-neoclouds-board button[data-neocloud-filter="debt"]').click()
+    page.reload(wait_until="domcontentloaded")
+    expect(page.locator("#ai-neoclouds-tab")).to_have_attribute("aria-selected", "true")
+    expect(page.locator('[data-neocloud-panel="ledger"]')).to_be_visible()
+    expect(
+        page.locator('#ai-neoclouds-board button[data-neocloud-filter="debt"]')
+    ).to_have_attribute("aria-pressed", "true")
+    expect(page.locator("#ai-neocloud-ledger-scope")).to_have_text(" · CoreWeave")
+    expect(ledger).to_have_count(1)
+    page.locator('#ai-neoclouds-board button[data-neocloud-filter="all"]').click()
     neocloud_view("debt")
     page.locator(".ai-neocloud-reset").click()
     expect(page.locator(".ai-neocloud-detail-block")).to_have_count(0)
@@ -500,14 +519,14 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
     gpu_select.focus()
     gpu_select.dispatch_event("change")
     expect(page.locator("#ai-hardware-gpu")).to_be_focused()
-    expect(page.locator("#ai-hardware-cost")).to_have_text("$8,640")
+    expect(page.locator("#ai-hardware-cost")).to_have_text("$8,640.00")
     page.locator("#ai-hardware-count").fill("0")
     expect(page.locator("#ai-hardware-cost")).to_have_text("—")
     expect(page.locator("#ai-hardware-cost-note")).to_contain_text("allowed range")
     page.locator("#ai-hardware-count").fill("4")
     page.locator("#ai-hardware-hours").fill("12")
     page.locator("#ai-hardware-days").fill("10")
-    expect(page.locator("#ai-hardware-cost")).to_have_text("$720")
+    expect(page.locator("#ai-hardware-cost")).to_have_text("$720.00")
     expect(page.locator("#ai-source-link")).to_have_text("ComputePrices source")
 
     # Warm-cache section switches must restore the visible section's status.
@@ -556,6 +575,168 @@ def test_ai_view_filters_models_and_renders_token_index(page: Page, base_url: st
         }"""
     )
     assert header_layout == {"separateRows": True, "tabsFit": True}
+
+
+def test_ai_charts_keep_missing_prices_as_gaps_and_mute_partial_coverage(
+    page: Page, base_url: str
+) -> None:
+    # Production shapes: a day without China/Frontier prices, capex quarters
+    # only 1 or 4 of 8 issuers reported, and a neocloud quarter 6 of 9 listed
+    # issuers reported (the best quarter had 8).
+    index = json.loads(json.dumps(AI_TOKEN_INDEX_PAYLOAD))
+    first, last = index["series"]
+    index["series"] = [
+        {**first, "date": "2026-08-16"},
+        {**first, "china_price": None, "frontier_price": None},
+        last,
+    ]
+    capex = json.loads(json.dumps(AI_CAPEX_PAYLOAD))
+    capex["summary"]["companies"] = 8
+    capex["series"] = [
+        {"period": "2025-Q1", "total_capex": 25_000_000_000, "company_count": 1},
+        {"period": "2025-Q2", "total_capex": 61_000_000_000, "company_count": 4},
+        {"period": "2025-Q3", "total_capex": 112_000_000_000, "company_count": 8},
+        {"period": "2025-Q4", "total_capex": 121_000_000_000, "company_count": 8},
+        {"period": "2026-Q1", "total_capex": 63_000_000_000, "company_count": 4},
+    ]
+    neoclouds = json.loads(json.dumps(AI_NEOCLOUDS_PAYLOAD))
+    neoclouds["summary"]["listed_companies"] = 9
+    q1, q2 = neoclouds["series"]
+    neoclouds["series"] = [
+        {**q1, "period": "2025-Q4", "company_count": 8},
+        {**q1, "company_count": 8},
+        {**q2, "company_count": 6},
+    ]
+    page.route("**/api/ai/token-index", lambda route: _fulfill_json(route, index))
+    page.route("**/api/ai/capex", lambda route: _fulfill_json(route, capex))
+    page.route("**/api/ai/neoclouds", lambda route: _fulfill_json(route, neoclouds))
+    _goto_board(page, base_url)
+    page.locator("#ai-tab").click()
+
+    # A missing price is a gap: the tooltip omits it instead of reading $0.00.
+    page.locator("#ai-token-index-tab").click()
+    index_chart = page.locator("#ai-index-board .viz")
+    expect(index_chart.locator("path.series-main")).to_have_count(1)
+    box = index_chart.bounding_box()
+    assert box is not None
+    index_chart.hover(position={"x": box["width"] / 2 + 15, "y": box["height"] / 2})
+    tooltip = index_chart.locator(".viz-tip")
+    expect(tooltip.locator(".viz-tip-title")).to_have_text("2026-08-17")
+    expect(tooltip).to_contain_text("Broad")
+    expect(tooltip).not_to_contain_text("China")
+    expect(tooltip).not_to_contain_text("Frontier")
+
+    # Quarters short of all 8 issuers are muted, not drawn as complete totals.
+    page.locator("#ai-capex-tab").click()
+    expect(page.locator("#ai-capex-board rect.series-main")).to_have_count(2)
+    partial = page.locator("#ai-capex-board rect.series-partial")
+    expect(partial).to_have_count(3)
+    _hover_bar(page.locator("#ai-capex-board .viz"), partial.first)
+    capex_tip = page.locator("#ai-capex-board .viz-tip")
+    expect(capex_tip.locator(".viz-tip-title")).to_have_text("2025-Q1")
+    expect(capex_tip).to_contain_text("1 of 8")
+
+    # Coverage counts against all 9 listed issuers: 6 of 9 is below the bar.
+    page.locator("#ai-neoclouds-tab").click()
+    _hover_bar(
+        page.locator('[data-neocloud-panel="capital"] .viz'),
+        page.locator("#ai-neoclouds-board rect.bar-debt").last,
+    )
+    neocloud_tip = page.locator('[data-neocloud-panel="capital"] .viz-tip')
+    expect(neocloud_tip.locator(".viz-tip-title")).to_have_text("2026-Q2")
+    expect(neocloud_tip).to_contain_text("6 of 9")
+    expect(neocloud_tip).not_to_contain_text("Listed capex")
+
+
+def _hover_bar(chart: Locator, bar: Locator) -> None:
+    # Bars sit under the chart's hover overlay, so point at the bar's slot.
+    x = float(bar.get_attribute("x") or 0) + float(bar.get_attribute("width") or 0) / 2
+    chart.hover(position={"x": x, "y": 20})
+
+
+def test_ai_status_line_flags_cached_openrouter_data(page: Page, base_url: str) -> None:
+    models = {**AI_MODELS_PAYLOAD, "stale": True}
+    index = {**AI_TOKEN_INDEX_PAYLOAD, "stale": True}
+    page.route("**/api/ai/models", lambda route: _fulfill_json(route, models))
+    page.route("**/api/ai/token-index", lambda route: _fulfill_json(route, index))
+    _goto_board(page, base_url)
+    page.locator("#ai-tab").click()
+    status = page.locator("#ai-data-status")
+    stale = re.compile(r"\bstale\b")
+    expect(status).to_contain_text("Cached OpenRouter")
+    expect(status).to_have_class(stale)
+    page.locator("#ai-token-index-tab").click()
+    expect(status).to_contain_text("Cached OpenRouter")
+    expect(status).to_have_class(stale)
+    page.locator("#ai-capex-tab").click()
+    expect(status).to_contain_text("Company statements")
+    expect(status).not_to_have_class(stale)
+
+
+def test_options_panel_explains_device_locked_token(page: Page, base_url: str) -> None:
+    page.route(
+        "**/api/options/**",
+        lambda route: _fulfill_json(route, {"detail": "marketdata_device_locked"}, status=503),
+    )
+    _goto_board(page, base_url)
+    page.locator('.benchmark-card[data-symbol="SPY"]').click()
+    panel = page.locator("[data-options-panel]")
+    expect(panel).to_contain_text("Snapshot unavailable")
+    expect(panel).to_contain_text("locked to another device")
+
+
+def test_phone_touch_tooltip_stays_and_tab_groups_scroll(browser: Browser, base_url: str) -> None:
+    context = browser.new_context(
+        viewport={"width": 390, "height": 844}, has_touch=True, is_mobile=True
+    )
+    page = context.new_page()
+    page_errors: list[str] = []
+    page.on("pageerror", lambda error: page_errors.append(str(error)))
+    page.add_init_script(_QUIET_WS_SCRIPT)
+    _stub_board_apis(page)
+    try:
+        page.goto(f"{base_url}/#view=ai&ai=neoclouds", wait_until="domcontentloaded")
+        expect(page.locator("#ai-neoclouds-panel")).to_be_visible()
+
+        # A tab group wider than the phone scrolls sideways instead of clipping
+        # its last tabs (Hardware, Contracts).
+        page.locator('#ai-neoclouds-board button[data-neocloud-view="ledger"]').click()
+        for selector in (
+            "#ai-section-tabs",
+            '#ai-neoclouds-board [aria-label="Neocloud section"]',
+        ):
+            tabs = page.locator(selector)
+            assert tabs.evaluate("tabs => tabs.scrollWidth > tabs.clientWidth")
+            box = tabs.bounding_box()
+            assert box is not None
+            page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            page.mouse.wheel(400, 0)
+            page.wait_for_function("tabs => tabs.scrollLeft > 0", arg=tabs.element_handle())
+
+        # A tap keeps the tooltip up (the finger lifting is not a hover-out),
+        # inside the chart even with the wall's long segment labels, until the
+        # next tap elsewhere.
+        page.locator('#ai-neoclouds-board button[data-neocloud-view="debt"]').click()
+        chart = page.locator("#ai-neocloud-debt-section .viz")
+        chart_box = chart.bounding_box()
+        assert chart_box is not None
+        bar = chart.locator("rect.wall-reported_split")
+        x = float(bar.get_attribute("x") or 0) + float(bar.get_attribute("width") or 0) / 2
+        chart.tap(position={"x": x, "y": 20})
+        tooltip = chart.locator(".viz-tip")
+        assert tooltip.is_visible()
+        expect(tooltip).to_contain_text("Total")
+        tip_box = tooltip.bounding_box()
+        assert tip_box is not None
+        assert tip_box["x"] >= chart_box["x"]
+        assert tip_box["x"] + tip_box["width"] <= chart_box["x"] + chart_box["width"]
+        assert tooltip.evaluate("tip => tip.scrollWidth <= tip.clientWidth")
+        page.locator('[data-neocloud-panel="debt"] .ai-neocloud-head h3').tap()
+        expect(tooltip).to_be_hidden()
+    finally:
+        context.close()
+    if page_errors:
+        pytest.fail("Unexpected pageerror events:\n" + "\n".join(page_errors))
 
 
 def test_closed_news_panel_is_inert_until_opened(page: Page, base_url: str) -> None:
@@ -1163,6 +1344,7 @@ def test_news_semantic_map_tiles_and_cluster_drilldown(
     expect(page.locator("#news-map-modal")).to_be_visible()
     expect(tiles).to_have_count(3)
     expect(tiles.filter(has_text="FED / Cuts")).to_have_count(1)
+    expect(tiles.filter(has_text="FED / Cuts")).to_contain_text("100 stories")
     # The modal is fullscreen: tiles must be large enough to click comfortably.
     first_tile = tiles.filter(has_text="FED / Cuts").first
     box = first_tile.bounding_box()
@@ -1573,12 +1755,22 @@ def test_reports_modal_lists_reports_and_renders_escaped_markdown_reader(
     # malformed spec falls back to a plain code block, and language fences
     # stay untouched code.
     charts = body.locator(".report-chart")
-    expect(charts).to_have_count(2)
+    expect(charts).to_have_count(3)
     bar_chart = charts.first
     expect(bar_chart.locator("figcaption")).to_have_text("Crypto ETF flows, $M")
     expect(bar_chart.locator("rect.chart-bar")).to_have_count(5)
     expect(bar_chart.locator("rect.chart-bar.negative")).to_have_count(2)
     expect(bar_chart.locator("text").filter(has_text="Mon")).to_have_count(1)
+    # The bar legend swatch takes the latest bar's sign color, like the bar.
+    swatch_matches_bar = bar_chart.evaluate(
+        """figure => {
+          const swatch = figure.querySelector('.report-chart-legend .viz-swatch');
+          const bars = figure.querySelectorAll('rect.chart-bar');
+          return getComputedStyle(swatch).backgroundColor
+            === getComputedStyle(bars[bars.length - 1]).fill;
+        }"""
+    )
+    assert swatch_matches_bar
     line_chart = charts.nth(1)
     expect(line_chart.locator("path.chart-line")).to_have_count(2)
     legend = line_chart.locator(".report-chart-legend span")
@@ -1586,6 +1778,11 @@ def test_reports_modal_lists_reports_and_renders_escaped_markdown_reader(
     expect(legend.first).to_have_text("SPY 2 %")
     expect(legend.nth(1)).to_have_text("QQQ 2.6 %")
     expect(body.locator("pre code").filter(has_text="not, numbers, at, all")).to_have_count(1)
+    # Fractional ticks land exactly on zero: a zero gridline, never a "-0" label.
+    drift_chart = charts.nth(2)
+    expect(drift_chart.locator("line.viz-zero")).to_have_count(1)
+    negative_zero = re.compile(r"^-0$")
+    expect(drift_chart.locator("text.viz-axis").filter(has_text=negative_zero)).to_have_count(0)
     expect(
         body.locator("pre code").filter(has_text="fence with language stays code")
     ).to_have_count(1)
@@ -1812,6 +2009,16 @@ def test_benchmark_table_renders_one_actionable_row_per_symbol(
 def _goto_board(page: Page, base_url: str, fragment: str = "") -> None:
     page.goto(f"{base_url.rstrip('/')}/{fragment}", wait_until="domcontentloaded")
     expect(page.locator("#status-copy")).to_contain_text("Quoted", timeout=10_000)
+
+
+def _expect_line_fills_chart(chart: Locator) -> None:
+    """The data line spans a real share of the plot, so the y-domain follows
+    the data instead of stretching down to 0."""
+    expect(chart.locator("path.viz-line")).to_have_count(1)
+    share = chart.evaluate(
+        "chart => chart.querySelector('path.viz-line').getBBox().height / chart.clientHeight"
+    )
+    assert share > 0.25
 
 
 def _expect_chart_canvas_content(page: Page) -> None:
@@ -2234,6 +2441,8 @@ def test_trends_tab_renders_group_bands_and_links_to_markets(page: Page, base_ur
     # Band area + average line render as SVG primitives.
     expect(cards.first.locator("svg path.viz-band")).to_have_count(1)
     expect(cards.first.locator("svg path.viz-line")).to_have_count(1)
+    # The band card scales to the data, not to a 0 baseline that flattens it.
+    _expect_line_fills_chart(cards.first.locator(".trend-chart"))
     expect(cards.first.locator("footer")).to_contain_text("7 members · tradfi")
 
     # Range flip refetches the window and keeps the grid populated.
@@ -2272,6 +2481,14 @@ def test_earnings_tab_renders_week_calendar_with_ranked_reports(
     expect(held).to_have_class(re.compile(r"\bearnings-held\b"))
     expect(held.locator("strong")).to_have_text("WMT")
     expect(held.locator(".held-chip")).to_have_text("HELD")
+    # A long company name truncates; the chip itself is never clipped.
+    chip_inside = held.locator(".earnings-name").evaluate(
+        """name => {
+          const chip = name.querySelector('.held-chip').getBoundingClientRect();
+          return chip.width > 0 && chip.right <= name.getBoundingClientRect().right + 0.5;
+        }"""
+    )
+    assert chip_inside
     expect(held.locator(".earnings-eps")).to_have_text("0.75")
     expect(held.locator(".earnings-impl")).to_have_text("±4.2%")
     expect(held.locator(".earnings-marks .beat")).to_have_count(3)
@@ -3010,7 +3227,7 @@ EARNINGS_PAYLOAD: dict[str, Any] = {
             "reports": [
                 {
                     "symbol": "WMT",
-                    "name": "Walmart Inc.",
+                    "name": "Walmart Inc. Common Stock (NYSE Listed)",
                     "session": "bmo",
                     "eps_estimate": 0.75,
                     "implied_move_pct": 4.2,
@@ -3930,15 +4147,21 @@ REPORT_BODY_MARKDOWN = "\n".join(
         "type: bar",
         "title: Crypto ETF flows, $M",
         "labels: Mon, Tue, Wed, Thu, Fri",
-        "series: 120, -45, 300, 210, -80",
+        "series: Net flow: 120, -45, 300, 210, -80",
         "```",
         "",
         "```chart",
         "type: line",
         "title: SPY vs QQQ, 5d %",
         "unit: %",
-        "series: SPY: 0.2, 0.8, 1.4, 1.1, 2.0",
+        "series: SPY: 0.2, 0.8, 1.4, 1.1, 2.0,",
         "series: QQQ: -0.3, 0.5, 1.9, 1.6, 2.6",
+        "```",
+        "",
+        "```chart",
+        "type: line",
+        "title: Basis drift, %",
+        "series: -0.25, -0.1, 0.1",
         "```",
         "",
         "```chart",

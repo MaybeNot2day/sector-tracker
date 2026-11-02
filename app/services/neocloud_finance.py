@@ -42,15 +42,21 @@ EVENT_LOOKBACK_DAYS = 1095
 # Prospectus supplements run to megabytes; the cover page is all we parse.
 DOCUMENT_BYTE_LIMIT = 400_000
 EVENT_MERGE_DAYS = 10
+# A Form D notice trails the 8-K of the same private placement by a few weeks.
+FORM_D_MATCH_DAYS = 30
 EVENT_LIMIT = 250
 SERIES_QUARTERS = 8
 HISTORY_QUARTERS = 12
 # A balance an issuer stopped tagging stays visible, dated, for up to a year.
 INSTANT_FALLBACK_DAYS = 400
+# One quarter plus the 45-day 10-Q filing window: an issuer whose latest
+# balance sheet is further behind the sector's latest reports on an older basis.
+SECTOR_LAG_DAYS = 135
 # Smaller figures in deal text are par values, share prices or fees.
 MIN_DEAL_AMOUNT = 1_000_000
-# Bump when filing parsing changes so stored filings are reviewed again.
-PARSER_VERSION = 3
+# Bump when filing parsing changes so stored filings and schedules are
+# reviewed again.
+PARSER_VERSION = 4
 # Collateral and security language sits in the first pages of the terms.
 DEBT_TERMS_CHARS = 6000
 
@@ -154,6 +160,23 @@ _INSTANT_METRICS: dict[str, tuple[tuple[str, ...], ...]] = {
     ),
     "backlog": (("RevenueRemainingPerformanceObligation",),),
 }
+# Debt lines an issuer may present apart from its leading debt concept, keyed
+# by that concept. Each group lists alternative tag sets; the first reported
+# one counts. Combined debt totals take none: they already include everything.
+_CONVERTIBLE_LINES = (
+    ("ConvertibleDebtNoncurrent", "ConvertibleDebtCurrent"),
+    ("ConvertibleLongTermNotesPayable", "ConvertibleNotesPayableCurrent"),
+    ("ConvertibleNotesPayable",),
+    ("ConvertibleDebt",),
+)
+_SHORT_TERM_LINES = (("ShortTermBorrowings",),)
+_SEPARATE_LINES: dict[str, tuple[tuple[tuple[str, ...], ...], ...]] = {
+    "LongTermDebt": (_CONVERTIBLE_LINES, _SHORT_TERM_LINES),
+    "LongTermDebtNoncurrent": (_CONVERTIBLE_LINES, _SHORT_TERM_LINES),
+    "LongTermNotesPayable": (_CONVERTIBLE_LINES, _SHORT_TERM_LINES),
+    # A debt-note total of carrying amounts already holds short-term loans.
+    "DebtInstrumentCarryingAmount": (_CONVERTIBLE_LINES,),
+}
 
 KIND_CATEGORY = {
     "Loan facility": "debt",
@@ -234,12 +257,28 @@ _ORDINALS = {
     for word in words
 }
 _ORDINAL_WORDS = "|".join(_ORDINALS)
+_MONTH_DATE = (
+    r"\b(?P<month>" + "|".join(_MONTHS) + r")\s+(?P<day>\d{1,2}),\s*(?P<year>20\d\d)"
+)
+# Explicit maturity phrasing: "The maturity date of the DDTL 5.5 Facility is
+# September 1, 2031", "will mature on", "senior notes due December 31, 2031".
+_MATURITY_EXPLICIT_RE = re.compile(
+    r"(?:\bmaturity date\b(?:[^.;]|\.(?=\d)){0,120}?\b(?:is|shall be|will be|on)"
+    r"|\bmatur(?:e|es|ing)\s+on|\b(?:notes?|debentures|loans?|facility)\s+due(?:\s+on)?)\s+"
+    + _MONTH_DATE,
+    re.IGNORECASE,
+)
 # A maturity keyword followed within the clause by a full date; the window may
 # cross periods in names such as "DDTL 5.5 Facility" but not a semicolon.
 _MATURITY_DATE_RE = re.compile(
     r"(?:matur\w*|due and payable|final (?:scheduled )?(?:payment|repayment) date)[^;]{0,160}?"
-    r"\b(?P<month>" + "|".join(_MONTHS) + r")\s+(?P<day>\d{1,2}),\s*(?P<year>20\d\d)",
+    + _MONTH_DATE,
     re.IGNORECASE,
+)
+# "Availability and Maturity: borrowings ... are available until May 29, 2027"
+# dates the draw period, not the maturity.
+_AVAILABILITY_RE = re.compile(
+    r"\bavailab\w*|\buntil\b|commitment termination|draw period", re.IGNORECASE
 )
 _ANNIVERSARY_RE = re.compile(
     r"(?:matur\w*|until|terminat\w*)[^;]{0,160}?\b(" + _ORDINAL_WORDS + r")\s+anniversary of the"
@@ -254,12 +293,13 @@ _YEARS_AFTER_RE = re.compile(
 )
 _DUE_YEAR_RE = re.compile(r"(?:Notes|Debentures|Loans?) due (20\d\d)")
 _SECURED_RE = re.compile(
-    r"senior secured|secured by|first[- ]priority (?:lien|security interest)|collateralized by"
-    r"|security interest in|secured on a",
+    r"\b(?:senior secured|secured by|first[- ]priority (?:lien|security interest)"
+    r"|collateralized by|security interest in|secured on a)",
     re.IGNORECASE,
 )
+# Word boundaries keep "senior unsecured convertible notes" unsecured.
 _SECURED_CONVERTIBLE_RE = re.compile(
-    r"convertible senior secured|secured convertible", re.IGNORECASE
+    r"\bconvertible senior secured\b|\bsecured convertible\b", re.IGNORECASE
 )
 _UNSECURED_RE = re.compile(r"\bunsecured\b", re.IGNORECASE)
 _AMENDMENT_RE = re.compile(r"\bamend(?:ment|ed)\b", re.IGNORECASE)
@@ -295,6 +335,46 @@ _FLOATING_RATE_PATTERNS = (
         r"(?:Term\s+)?SOFR",
         re.IGNORECASE,
     ),
+)
+# "Prior to the Fifth Amendment, amounts borrowed ... were subject to ... 13.00%
+# plus the term SOFR" states superseded pricing; the sentence is dropped.
+_PRIOR_TERMS_RE = re.compile(
+    r"\bPrior to (?:the |this |such )?(?:[\w-]+ ){0,4}?amendments?\b(?:[^.]|\.(?=\d))*\.?",
+    re.IGNORECASE,
+)
+_TRANCHE_MONEY = (
+    r"(?:US\$|\$)\s?(?P<digits>\d[\d,]*(?:\.\d+)?)(?:\s*(?P<scale>billion|million)\b)?"
+)
+_TRANCHE_SERIES = (
+    r"(?:(?P<rate>\d{1,2}(?:\.\d{1,4})?)%\s+)?(?:[\w-]+\s+){0,4}?(?:notes|debentures)\s+due\s+"
+    r"(?:(?P<month>" + "|".join(_MONTHS) + r")\s+(?P<day>\d{1,2}),\s*)?(?P<year>20\d\d)"
+)
+# "$1.15 billion aggregate principal amount of its 0.25% convertible senior
+# notes due 2032 ... and $1.15 billion aggregate principal amount of its 1.00%
+# convertible senior notes due 2033".
+_TRANCHE_RE = re.compile(
+    _TRANCHE_MONEY + r"\s+(?:in\s+)?aggregate\s+principal\s+amount\s+of\s+(?:[^$;.%]{0,40}?\s)?"
+    + _TRANCHE_SERIES,
+    re.IGNORECASE,
+)
+# Tranches of one offering are listed together; a later mention of another
+# series (repurchased or existing notes) is not a tranche.
+_TRANCHE_GAP_CHARS = 250
+# Exhibit lists of a closing report name one indenture per series:
+# "Indenture dated as of September 15, 2025, ... for the 1.00% Convertible
+# Senior Notes due 2030".
+_INDENTURE_SERIES_RE = re.compile(
+    r"\bIndenture,?\s+dated\s+as\s+of\s+[^;]{0,160}?\bfor\s+the\s+" + _TRANCHE_SERIES,
+    re.IGNORECASE,
+)
+# A reopening restates the series it adds to: "issued $1,750,000,000 aggregate
+# principal amount of 9.750% Senior Notes due 2031 under the Base Indenture
+# (the "Existing Notes")".
+_ADD_ON_RE = re.compile(r"\badditional notes\b", re.IGNORECASE)
+_EXISTING_SERIES_RE = re.compile(
+    _TRANCHE_MONEY + r"\s+(?:in\s+)?aggregate\s+principal\s+amount\s+of\s+[^;]{0,160}?"
+    r"\(the\s+[\"“](?:Existing|Initial|Original)\s+Notes[\"”]",
+    re.IGNORECASE,
 )
 _AMORTIZATION_RE = re.compile(
     r"amortiz\w*[^.;]{0,160}?beginning\s+(?:on|with)\s+(?:the\s+)?(?P<month>"
@@ -395,8 +475,11 @@ class NeocloudFinanceService:
             stored_schedules = await asyncio.to_thread(
                 db.load_neocloud_debt_schedules, self.database_path
             )
+            # A schedule read by an older parser is read again from its filing.
             schedule_accessions = {
-                key: str(schedule["accession"]) for key, schedule in stored_schedules.items()
+                key: str(schedule["accession"])
+                for key, schedule in stored_schedules.items()
+                if schedule["parser_version"] == PARSER_VERSION
             }
             results = await asyncio.gather(
                 *(
@@ -417,7 +500,10 @@ class NeocloudFinanceService:
                 filing_rows.extend(result[1])
                 if result[2] is not None:
                     await asyncio.to_thread(
-                        db.save_neocloud_debt_schedule, self.database_path, result[2]
+                        db.save_neocloud_debt_schedule,
+                        self.database_path,
+                        result[2],
+                        parser_version=PARSER_VERSION,
                     )
 
             if financial_rows:
@@ -555,6 +641,7 @@ class NeocloudFinanceService:
             "secured": None,
             "collateral": [],
             "amendment": False,
+            "tranches": [],
         }
         if form in {"S-1", "F-1"}:
             row.update(
@@ -693,19 +780,54 @@ def parse_company_facts(payload: dict[str, Any]) -> list[dict[str, object]]:
             if ttm is not None:
                 rows.append({"period_end": end, "metric": f"{metric}_ttm", "value": ttm})
 
+    liabilities = _instant_periods(usd_facts("Liabilities"))
     for metric, options in _INSTANT_METRICS.items():
-        by_concept = {
-            concept: _instant_periods(usd_facts(concept))
+        wanted = {concept for option in options for concept in option}
+        wanted.update(
+            concept
             for option in options
-            for concept in option
-        }
-        ends = sorted({end for values in by_concept.values() for end in values})
+            for group in _SEPARATE_LINES.get(option[0], ())
+            for alternative in group
+            for concept in alternative
+        )
+        by_concept = {concept: _instant_periods(usd_facts(concept)) for concept in wanted}
+        ends = sorted({end for option in options for end in by_concept[option[0]]})
         for end in ends[-HISTORY_QUARTERS:]:
             option = next((choice for choice in options if end in by_concept[choice[0]]), None)
             if option is not None:
                 value = sum(by_concept[name][end] for name in option if end in by_concept[name])
+                value += _separate_lines(option[0], end, value, by_concept, liabilities.get(end))
                 rows.append({"period_end": end, "metric": metric, "value": value})
     return rows
+
+
+def _separate_lines(
+    lead: str,
+    end: str,
+    value: float,
+    by_concept: dict[str, dict[str, float]],
+    liabilities: float | None,
+) -> float:
+    """Debt presented apart from the leading concept, e.g. convertible notes.
+
+    TeraWulf books converts and short-term borrowings beside LongTermDebt;
+    IREN tags its converts inside LongTermDebt as well. A line equal to the
+    lead, or one that would push debt past total liabilities, is already in it.
+    """
+    added = 0.0
+    for group in _SEPARATE_LINES.get(lead, ()):
+        alternative = next(
+            (names for names in group if any(end in by_concept[name] for name in names)), None
+        )
+        if alternative is None:
+            continue
+        amount = sum(by_concept[name][end] for name in alternative if end in by_concept[name])
+        if not amount or math.isclose(amount, value, rel_tol=0.005):
+            continue
+        if liabilities is not None and value + added + amount > liabilities:
+            continue
+        added += amount
+    return added
 
 
 def _latest_durations(facts: list[dict[str, Any]]) -> dict[tuple[str, str], float]:
@@ -736,6 +858,10 @@ def _flow_periods(
     years: dict[str, float] = {}
     chains: dict[str, list[tuple[str, float]]] = defaultdict(list)
     for (start, end), value in durations.items():
+        # A negative figure on an unsigned line (interest, capex) is a sign
+        # error or a net amount, not the line itself.
+        if not signed and value < 0:
+            continue
         days = (date.fromisoformat(end) - date.fromisoformat(start)).days
         if 80 <= days <= 100:
             quarters[end] = value
@@ -834,7 +960,7 @@ def parse_reported_schedule(instance: bytes) -> dict[str, object]:
     except ValueError:
         return {"as_of": None, "fiscal_year_end": fiscal_year_end, "buckets": []}
 
-    groups: dict[tuple[str, str], dict[tuple[int, bool], float]] = defaultdict(dict)
+    entries: list[tuple[tuple[str, str], str, float]] = []
     for bucket, dims, when, value in tagged:
         if when != balance_date.isoformat():
             continue
@@ -845,7 +971,22 @@ def parse_reported_schedule(instance: bytes) -> dict[str, object]:
             group = (axis, member)
         else:
             continue
-        groups[group].setdefault(_schedule_offset(bucket), value)
+        entries.append((group, bucket, value))
+    base_year = _fiscal_base_year(balance_date, fiscal_year_end)
+    # Some interim filers count "year one" from the current fiscal year: Hut 8's
+    # June 2026 10-Q tags 2027 as year two and 2031+ as after year five, with
+    # neither a remainder nor a year-one bucket (not even zero). A schedule that
+    # opens with year two is shifted back so its first year is the next one.
+    interim = balance_date != _fiscal_year_end_date(base_year, fiscal_year_end)
+    shift = (
+        1
+        if interim and entries and all(_schedule_offset(bucket)[0] > 1 for _, bucket, _ in entries)
+        else 0
+    )
+    groups: dict[tuple[str, str], dict[tuple[int, bool], float]] = defaultdict(dict)
+    for group, bucket, value in entries:
+        offset, is_open = _schedule_offset(bucket)
+        groups[group].setdefault((offset - shift, is_open), value)
     if ("", "") in groups:
         chosen = [groups[("", "")]]
     else:
@@ -857,7 +998,6 @@ def parse_reported_schedule(instance: bytes) -> dict[str, object]:
     for values in chosen:
         for key, value in values.items():
             totals[key] += value
-    base_year = _fiscal_base_year(balance_date, fiscal_year_end)
     return {
         "as_of": balance_date.isoformat(),
         "fiscal_year_end": fiscal_year_end,
@@ -879,7 +1019,7 @@ def _schedule_offset(bucket: str) -> tuple[int, bool]:
     return (year + 1, True) if bucket.startswith("After") else (year, False)
 
 
-def _fiscal_base_year(balance_date: date, fiscal_year_end: str | None) -> int:
+def _fiscal_base_year(balance_date: date, fiscal_year_end: object) -> int:
     """Year in which the fiscal year containing the balance-sheet date ends."""
     year_end = _fiscal_year_end_date(balance_date.year, fiscal_year_end)
     return balance_date.year if year_end >= balance_date else balance_date.year + 1
@@ -967,7 +1107,16 @@ def parse_filing_event(
         "summary": _truncate(body, 320),
     }
     if KIND_CATEGORY.get(kind) == "debt":
-        event.update(parse_debt_terms(kind, body, filed=filed))
+        terms = parse_debt_terms(kind, body, filed=filed)
+        event.update(terms)
+        tranches = cast(list[dict[str, Any]], terms["tranches"])
+        amounts = [tranche["amount"] for tranche in tranches]
+        if amounts and None not in amounts:
+            event.update(amount=sum(amounts), currency="USD")
+        if kind in {"Senior notes", "Convertible notes"}:
+            # A reopening keeps the size of the series it adds to; the merge
+            # keeps it apart from the original issue and corrects that size.
+            event["offering_amount"] = _existing_series_amount(body[:1500])
     return event
 
 
@@ -979,6 +1128,7 @@ def parse_debt_terms(kind: str, body: str, *, filed: date) -> dict[str, object]:
     reference to a separate collateral agreement.
     """
     terms = body[:DEBT_TERMS_CHARS]
+    tranches = _tranches(terms, filed)
     if kind == "Convertible notes":
         secured: bool | None = bool(_SECURED_CONVERTIBLE_RE.search(terms))
     elif _SECURED_RE.search(terms):
@@ -1008,7 +1158,9 @@ def parse_debt_terms(kind: str, body: str, *, filed: date) -> dict[str, object]:
             (count for word, count in _PAYMENT_FREQUENCIES if word in window), None
         )
     return {
-        "maturity": _maturity(body, filed),
+        # Multi-tranche offerings date their first maturity; each tranche keeps its own.
+        "maturity": tranches[0]["maturity"] if tranches else _maturity(body, filed),
+        "tranches": tranches,
         "secured": secured,
         "collateral": collateral,
         # Amendments restate or upsize an existing facility: they stay in the
@@ -1024,8 +1176,10 @@ def _rate(kind: str, terms: str) -> str | None:
     """Coupon ("9.625%") or floating spread ("SOFR + 2.25%") as the filing states it.
 
     Loans quote a spread over SOFR; the base-rate alternative ("federal funds
-    rate plus 0.50%") is never taken for the spread. Notes quote a coupon.
+    rate plus 0.50%") is never taken for the spread, nor is the pricing an
+    amendment replaced. Notes quote a coupon.
     """
+    terms = _PRIOR_TERMS_RE.sub(" ", terms)
     floating = next(
         (match for pattern in _FLOATING_RATE_PATTERNS if (match := pattern.search(terms))), None
     )
@@ -1040,15 +1194,18 @@ def _rate(kind: str, terms: str) -> str | None:
 
 
 def _maturity(body: str, filed: date) -> str | None:
-    """Maturity as an ISO date, or a bare year when only "Notes due YYYY" is given."""
-    for match in _MATURITY_DATE_RE.finditer(body):
-        month, day, year = match.group("month", "day", "year")
-        try:
-            maturity = date(int(year), _MONTHS.index(month.lower()) + 1, int(day))
-        except ValueError:
-            continue
-        if maturity > filed:
-            return maturity.isoformat()
+    """Maturity as an ISO date, or a bare year when only "Notes due YYYY" is given.
+
+    Explicit maturity phrasing wins over a date that merely follows a maturity
+    keyword; draw-period and commitment-termination dates are never taken.
+    """
+    for pattern in (_MATURITY_EXPLICIT_RE, _MATURITY_DATE_RE):
+        for match in pattern.finditer(body):
+            if _AVAILABILITY_RE.search(body[match.start() : match.start("month")]):
+                continue
+            maturity = _month_date(match)
+            if maturity is not None and maturity > filed:
+                return maturity.isoformat()
     anniversary = _ANNIVERSARY_RE.search(body)
     if anniversary:
         return _add_years(filed, _ORDINALS[anniversary.group(1).lower()]).isoformat()
@@ -1061,6 +1218,85 @@ def _maturity(body: str, filed: date) -> str | None:
         return _add_years(filed, int(count) if count.isdigit() else _ORDINALS[count]).isoformat()
     due = _DUE_YEAR_RE.search(body)
     return due.group(1) if due else None
+
+
+def _month_date(match: re.Match[str]) -> date | None:
+    month, day, year = match.group("month", "day", "year")
+    try:
+        return date(int(year), _MONTHS.index(month.lower()) + 1, int(day))
+    except ValueError:
+        return None
+
+
+def _tranches(terms: str, filed: date) -> list[dict[str, object]]:
+    """Series of a multi-tranche offering, earliest maturity first.
+
+    Amounts come from "$X aggregate principal amount of ... notes due YYYY"
+    listed together; an exhibit list of one indenture per series gives the
+    series without amounts. A single series is not a multi-tranche deal.
+    """
+    listed: list[re.Match[str]] = []
+    for match in _TRANCHE_RE.finditer(terms):
+        if listed and match.start() - listed[-1].end() > _TRANCHE_GAP_CHARS:
+            break
+        if re.search(r"\bExisting\b", terms[match.end() : match.end() + 80]):
+            continue
+        listed.append(match)
+    series = _distinct_series(listed, terms, filed)
+    if len(series) < 2:
+        series = _distinct_series(list(_INDENTURE_SERIES_RE.finditer(terms)), terms, filed)
+    if len(series) < 2:
+        return []
+    return sorted(series, key=lambda tranche: maturity_date(str(tranche["maturity"])))
+
+
+def _distinct_series(
+    matches: list[re.Match[str]], terms: str, filed: date
+) -> list[dict[str, object]]:
+    series: dict[tuple[str | None, str], dict[str, object]] = {}
+    for match in matches:
+        rate = f"{float(match.group('rate')):g}%" if match.group("rate") else None
+        year = match.group("year")
+        if (rate, year) in series:
+            continue
+        amount = _scaled_amount(match) if "digits" in match.groupdict() else None
+        maturity = (_month_date(match) if match.group("month") else None) or _series_maturity(
+            terms, year, filed
+        )
+        series[(rate, year)] = {
+            "amount": amount if amount is not None and amount >= MIN_DEAL_AMOUNT else None,
+            "maturity": maturity.isoformat() if maturity else year,
+            "rate": rate,
+        }
+    return list(series.values())
+
+
+def _series_maturity(terms: str, year: str, filed: date) -> date | None:
+    """Full maturity date of the series due in `year`, when the terms state one."""
+    pattern = re.compile(
+        r"matur\w*[^;]{0,200}?\b(?P<month>" + "|".join(_MONTHS) + r")\s+(?P<day>\d{1,2}),\s*"
+        r"(?P<year>" + year + r")\b",
+        re.IGNORECASE,
+    )
+    match = pattern.search(terms)
+    maturity = _month_date(match) if match else None
+    return maturity if maturity is not None and maturity > filed else None
+
+
+def _scaled_amount(match: re.Match[str]) -> float | None:
+    try:
+        value = float(match.group("digits").rstrip(",.").replace(",", ""))
+    except ValueError:
+        return None
+    return value * _SCALES.get((match.group("scale") or "").lower(), 1.0)
+
+
+def _existing_series_amount(lead: str) -> float | None:
+    """Principal of the series a reopening adds to, as the add-on filing restates it."""
+    if not _ADD_ON_RE.search(lead):
+        return None
+    match = _EXISTING_SERIES_RE.search(lead)
+    return _scaled_amount(match) if match else None
 
 
 def _add_years(start: date, years: int) -> date:
@@ -1146,7 +1382,11 @@ def _classify(form: str, items: set[str], lead: str) -> str | None:
         return None
     if "3.02" in items and "1.01" not in items:
         return "Equity offering"
-    if _CONVERTIBLE_RE.search(lead):
+    convertible = _CONVERTIBLE_RE.search(lead)
+    loan = _LOAN_RE.search(lead)
+    # "Exit Credit Agreement ... first-lien credit facility with certain holders
+    # of the Company's April Convertible Notes": the facility named first is the deal.
+    if convertible and (loan is None or convertible.start() < loan.start()):
         return "Convertible notes"
     if _ATM_RE.search(lead):
         return "ATM program"
@@ -1284,12 +1524,26 @@ def compose_payload(
             }
         )
     public_rows.sort(key=lambda row: _number(row["debt"]) or 0.0, reverse=True)
+    # Stale is otherwise relative to the issuer's own latest filing; an issuer
+    # whose balance sheet lags the sector's (Nebius files a yearly 20-F) has
+    # every balance flagged with its date, though still summed in totals.
+    sector_period = max((str(row["period_end"]) for row in public_rows), default=None)
+    if sector_period is not None:
+        lag_cutoff = (
+            date.fromisoformat(sector_period) - timedelta(days=SECTOR_LAG_DAYS)
+        ).isoformat()
+        for row in public_rows:
+            if str(row["period_end"]) < lag_cutoff:
+                stale = cast(dict[str, str], row["stale"])
+                row["stale"] = {
+                    metric: stale.get(metric, str(row["period_end"]))
+                    for metric in _INSTANT_METRICS
+                    if row[metric] is not None
+                }
 
     for event in merged:
-        amount = _number(event["amount"])
-        if amount is None or event["currency"] != "USD":
-            continue
-        if event["category"] in {"debt", "equity"}:
+        amount = _announced_amount(event)
+        if amount is not None:
             bucket = series[_calendar_quarter(str(event["date"]))]
             bucket[f"announced_{event['category']}"] += amount
 
@@ -1327,9 +1581,7 @@ def compose_payload(
 
     def announced(category: str) -> float:
         return sum(
-            _number(event["amount"]) or 0.0
-            for event in recent
-            if event["category"] == category and event["currency"] == "USD"
+            _announced_amount(event) or 0.0 for event in recent if event["category"] == category
         )
 
     def total(field: str) -> float:
@@ -1357,19 +1609,24 @@ def compose_payload(
             "label": "SEC filings ledger",
             "description": (
                 "Listed issuers: balance-sheet and cash-flow lines from XBRL company facts; "
-                "trailing figures sum the last four reported quarters, and a balance an issuer "
-                "stopped tagging keeps its last reported date. Deals: 8-K items 1.01, 2.03 and "
-                "3.02, 6-K reports and prospectus covers, with the headline amount read from "
-                "the filing text (facility size or principal, not drawn balance) and launch, "
-                "pricing and closing filings merged. Private issuers: Form D exempt-offering "
+                "trailing figures sum the last four reported quarters, a balance an issuer "
+                "stopped tagging keeps its last reported date, and every balance of an issuer "
+                "whose latest balance sheet trails the sector's by more than a quarter is "
+                "flagged with its date. Deals: 8-K items 1.01, 2.03 and 3.02, 6-K reports and "
+                "prospectus covers, with the headline amount read from the filing text "
+                "(facility size or principal, not drawn balance; multi-tranche offerings sum "
+                "their tranches) and launch, pricing and closing filings merged; reopenings "
+                "of a notes series are separate deals. Private issuers: Form D exempt-offering "
                 "notices (amount sold) and IPO registrations; rounds that skip Form D and "
                 "privately placed debt do not appear. Debt: rate, maturity, amortization start, "
                 "security and collateral are read from each deal's terms (notes count as "
                 "unsecured unless stated). The maturity wall uses each issuer's own 10-Q/10-K "
                 "principal schedule where tagged, splits its open-ended last bucket by the "
                 "issuer's deal maturities (estimate), adds deals signed after that report as "
-                "commitments, and falls back to deal terms elsewhere. Amendments of existing "
-                "facilities and non-USD tranches are excluded."
+                "commitments, and falls back to deal terms elsewhere; each tranche falls due "
+                "in its own year. Wall years are each issuer's fiscal years (IREN ends June, "
+                "Applied Digital May, the others December). Amendments of existing facilities "
+                "and non-USD tranches are excluded from the wall and the announced totals."
             ),
         },
         "summary": {
@@ -1419,7 +1676,13 @@ def _debt_profile(
     issuer's deal maturities (an estimate, kept as its own segment). Debt deals
     signed after that report are added as commitments. Issuers that tag no
     schedule fall back to deal terms: principal at maturity, or equal
-    installments from a stated amortization start (also an estimate).
+    installments from a stated amortization start (also an estimate). Each
+    tranche of a multi-tranche deal is its own position with its own maturity.
+
+    Wall years are the issuer's fiscal years (the year in which the fiscal year
+    ends), matching its schedule buckets; the sector wall adds those fiscal
+    years, so June (IREN) and May (Applied Digital) year ends sit beside
+    calendar years of the other issuers.
     """
     deals: dict[str, list[tuple[dict[str, object], float, str | None]]] = defaultdict(list)
     for event in merged:
@@ -1428,10 +1691,11 @@ def _debt_profile(
             continue
         if event["currency"] != "USD":
             continue
-        maturity = str(event["maturity"]) if event["maturity"] else None
-        if maturity is not None and maturity_date(maturity) <= today:
-            continue
-        deals[str(event["company"])].append((event, amount, maturity))
+        for position, face in _tranche_positions(event, amount):
+            maturity = str(position["maturity"]) if position["maturity"] else None
+            if maturity is not None and maturity_date(maturity) <= today:
+                continue
+            deals[str(event["company"])].append((position, face, maturity))
 
     due_year = today.year + 2
     sector: dict[int, dict[str, float]] = defaultdict(lambda: dict.fromkeys(WALL_SEGMENTS, 0.0))
@@ -1439,6 +1703,7 @@ def _debt_profile(
     for key in names:
         rows = deals.get(key, [])
         schedule = schedules.get(key)
+        fiscal_year_end = schedule.get("fiscal_year_end") if schedule else None
         buckets = cast(list[dict[str, Any]], schedule.get("buckets") or []) if schedule else []
         reported = bool(buckets) and schedule is not None and schedule.get("as_of") is not None
         if not rows and not reported:
@@ -1458,11 +1723,11 @@ def _debt_profile(
                     continue
                 profile: dict[int, float] = defaultdict(float)
                 # The bucket opens the day after the previous fiscal year ends.
-                opens = _fiscal_year_end_date(year - 1, schedule.get("fiscal_year_end"))
+                opens = _fiscal_year_end_date(year - 1, fiscal_year_end)
                 for event, face, maturity in before:
                     for paid_on, paid in _deal_payments(event, face, maturity, today):
                         if paid_on > opens:
-                            profile[paid_on.year] += paid
+                            profile[_fiscal_base_year(paid_on, fiscal_year_end)] += paid
                 weight = sum(profile.values())
                 if not weight:
                     unallocated = {"from_year": year, "amount": amount}
@@ -1471,12 +1736,12 @@ def _debt_profile(
                     wall[paid_year]["reported_split"] += amount * paid / weight
             for event, face, maturity in after_report:
                 for paid_on, paid in _deal_payments(event, face, maturity, today):
-                    wall[paid_on.year]["after_report"] += paid
+                    wall[_fiscal_base_year(paid_on, fiscal_year_end)]["after_report"] += paid
         else:
             for event, face, maturity in rows:
                 segment = "deals_amortizing" if event["amortization_start"] else "deals"
                 for paid_on, paid in _deal_payments(event, face, maturity, today):
-                    wall[paid_on.year][segment] += paid
+                    wall[_fiscal_base_year(paid_on, fiscal_year_end)][segment] += paid
 
         for year, segments in wall.items():
             for segment, amount in segments.items():
@@ -1485,7 +1750,7 @@ def _debt_profile(
         tenor_weight = sum(amount for event, amount, _ in dated if event["tenor_years"] is not None)
         upcoming = sorted(dated, key=lambda row: maturity_date(str(row[2])))
         detail = _schedule_detail(schedule) if reported and schedule else None
-        next_due = _next_due(detail, upcoming, after_report)
+        next_due = _next_due(detail, upcoming, after_report, fiscal_year_end)
         companies.append(
             {
                 "key": key,
@@ -1558,6 +1823,7 @@ def _next_due(
     detail: dict[str, object] | None,
     upcoming: Sequence[tuple[dict[str, object], float, str | None]],
     after_report: Sequence[tuple[dict[str, object], float, str | None]],
+    fiscal_year_end: object,
 ) -> tuple[str, float, str] | None:
     """Nearest principal due as (label, amount, source).
 
@@ -1575,11 +1841,56 @@ def _next_due(
     newer = sorted(
         (row for row in after_report if row[2]), key=lambda row: maturity_date(str(row[2]))
     )
-    if newer and (first is None or maturity_date(str(newer[0][2])).year < int(first["year"])):
+    if newer and (
+        first is None
+        or _fiscal_base_year(maturity_date(str(newer[0][2])), fiscal_year_end) < int(first["year"])
+    ):
         return str(newer[0][2]), newer[0][1], "deal"
     if first is None:
         return None
     return str(first["label"]), float(first["amount"]), "reported"
+
+
+def _tranche_positions(
+    event: dict[str, object], face: float
+) -> list[tuple[dict[str, object], float]]:
+    """One position per tranche, each with its own maturity, tenor and principal.
+
+    Principal a filing leaves unstated per tranche (exhibit lists name the
+    series only) is split equally across those tranches, an estimate.
+    """
+    tranches = cast(list[dict[str, Any]], event.get("tranches") or [])
+    if len(tranches) < 2:
+        return [(event, face)]
+    known = sum(float(tranche["amount"]) for tranche in tranches if tranche["amount"] is not None)
+    unstated = [tranche for tranche in tranches if tranche["amount"] is None]
+    share = max(face - known, 0.0) / len(unstated) if unstated else 0.0
+    first = maturity_date(str(tranches[0]["maturity"]))
+    tenor = _number(event.get("tenor_years"))
+    positions: list[tuple[dict[str, object], float]] = []
+    for tranche in tranches:
+        maturity = str(tranche["maturity"])
+        offset = (maturity_date(maturity) - first).days / 365.25
+        position = {
+            **event,
+            "maturity": maturity,
+            "rate": tranche["rate"] or event.get("rate"),
+            "tenor_years": round(tenor + offset, 1) if tenor is not None else None,
+        }
+        amount = float(tranche["amount"]) if tranche["amount"] is not None else share
+        if amount:
+            positions.append((position, amount))
+    return positions
+
+
+def _announced_amount(event: dict[str, object]) -> float | None:
+    """Headline USD amount of a new debt or equity raise; amendments of existing
+    facilities are not new money."""
+    if event["category"] not in {"debt", "equity"} or event.get("amendment"):
+        return None
+    if event["currency"] != "USD":
+        return None
+    return _number(event["amount"])
 
 
 def _deal_payments(
@@ -1650,19 +1961,28 @@ def _merge_events(events: list[dict[str, object]]) -> list[dict[str, object]]:
 
     Form D amendments restate the same offering, keyed by first-sale date.
     Debt and equity filings of one company and kind within EVENT_MERGE_DAYS are
-    one deal; the latest filing wins and keeps the latest disclosed amount.
-    Contracts and leases are always distinct agreements.
+    one deal; the latest filing wins and keeps the latest disclosed amount. A
+    reopening of a notes series ("Additional Notes") is a new issue, not another
+    filing of the original; the size it restates for the original series
+    replaces the original filing's figure. Filings that cannot stand as a deal
+    of their own are counted with the deal they describe: a 6-K naming a debt
+    instrument without an amount (an exhibit list) joins a priced debt deal of
+    the issuer within EVENT_MERGE_DAYS, and a Form D joins the filing of the
+    same raise (same category and amount within FORM_D_MATCH_DAYS). Contracts
+    and leases are always distinct agreements.
     """
     ordered = sorted(events, key=lambda event: (str(event["filed_date"]), str(event["accession"])))
     clusters: list[list[dict[str, object]]] = []
     open_clusters: dict[tuple[str, str, str], list[dict[str, object]]] = {}
     for event in ordered:
         filed = date.fromisoformat(str(event["filed_date"]))
+        category = KIND_CATEGORY.get(str(event["kind"]))
         if event["form"] in {"D", "D/A"} and event.get("first_sale_date"):
             key = (str(event["company"]), "form-d", str(event["first_sale_date"]))
             cluster = open_clusters.get(key)
-        elif KIND_CATEGORY.get(str(event["kind"])) in {"debt", "equity"}:
-            key = (str(event["company"]), str(event["kind"]), "")
+        elif category in {"debt", "equity"}:
+            reopening = category == "debt" and _number(event.get("offering_amount")) is not None
+            key = (str(event["company"]), str(event["kind"]), "reopening" if reopening else "")
             cluster = open_clusters.get(key)
             if cluster is not None:
                 last_filed = date.fromisoformat(str(cluster[-1]["filed_date"]))
@@ -1677,8 +1997,17 @@ def _merge_events(events: list[dict[str, object]]) -> list[dict[str, object]]:
             open_clusters[key] = cluster
         cluster.append(event)
 
-    merged: list[dict[str, object]] = []
+    restated = _restated_series(clusters)
+    absorbed: dict[int, int] = defaultdict(int)
+    hosts = list(clusters)
     for cluster in clusters:
+        host = _absorbing_deal(cluster, hosts)
+        if host is not None:
+            absorbed[id(host)] += len(cluster)
+            hosts.remove(cluster)
+
+    merged: list[dict[str, object]] = []
+    for cluster in hosts:
         latest = cluster[-1]
 
         def newest(field: str, rows: list[dict[str, object]] = cluster) -> dict[str, object]:
@@ -1687,10 +2016,15 @@ def _merge_events(events: list[dict[str, object]]) -> list[dict[str, object]]:
             )
 
         priced = newest("amount")
+        amount = restated.get(id(cluster), priced.get("amount"))
         termed = newest("secured")
         maturity = newest("maturity").get("maturity")
+        tranches = next(
+            (event["tranches"] for event in reversed(cluster) if event.get("tranches")), []
+        )
         issued = date.fromisoformat(str(cluster[0]["filed_date"]))
         kind = str(latest["kind"])
+        form_d = latest["form"] in {"D", "D/A"}
         merged.append(
             {
                 "date": latest["filed_date"],
@@ -1698,13 +2032,14 @@ def _merge_events(events: list[dict[str, object]]) -> list[dict[str, object]]:
                 "form": latest["form"],
                 "kind": kind,
                 "category": KIND_CATEGORY.get(kind, "contract"),
-                "amount": priced.get("amount"),
-                "currency": priced.get("currency") if priced.get("amount") is not None else None,
-                "offering_amount": latest.get("offering_amount"),
+                "amount": amount,
+                "currency": (priced.get("currency") or "USD") if amount is not None else None,
+                "offering_amount": latest.get("offering_amount") if form_d else None,
                 "summary": latest["summary"],
                 "url": latest["url"],
-                "filings": len(cluster),
+                "filings": len(cluster) + absorbed[id(cluster)],
                 "maturity": maturity,
+                "tranches": tranches,
                 "tenor_years": (
                     round((maturity_date(str(maturity)) - issued).days / 365.25, 1)
                     if maturity
@@ -1723,6 +2058,90 @@ def _merge_events(events: list[dict[str, object]]) -> list[dict[str, object]]:
         )
     merged.sort(key=lambda event: str(event["date"]), reverse=True)
     return merged
+
+
+def _restated_series(clusters: list[list[dict[str, object]]]) -> dict[int, float]:
+    """Original-issue size of reopened notes series, keyed by the original's cluster id.
+
+    CoreWeave's April 2026 closing 8-K misprints "$1,750,000" for its 9.750%
+    notes due 2031; the reopening a week later restates "$1,750,000,000 ... (the
+    Existing Notes)". The restated size, less earlier reopenings, is the original's.
+    """
+    restated: dict[int, float] = {}
+    for index, cluster in enumerate(clusters):
+        existing = _number(cluster[0].get("offering_amount"))
+        if existing is None or KIND_CATEGORY.get(str(cluster[0]["kind"])) != "debt":
+            continue
+        series = str(cluster[0].get("maturity") or "")[:4]
+        earlier = [
+            other
+            for other in clusters[:index]
+            if other[0]["company"] == cluster[0]["company"]
+            and other[0]["kind"] == cluster[0]["kind"]
+            and series
+            and any(str(event.get("maturity") or "")[:4] == series for event in other)
+        ]
+        originals = [other for other in earlier if _number(other[0].get("offering_amount")) is None]
+        if not originals:
+            continue
+        original = originals[-1]
+        reopened = sum(
+            _cluster_amount(other) or 0.0 for other in earlier[earlier.index(original) + 1 :]
+        )
+        if existing > reopened:
+            restated[id(original)] = existing - reopened
+    return restated
+
+
+def _absorbing_deal(
+    cluster: list[dict[str, object]], hosts: list[list[dict[str, object]]]
+) -> list[dict[str, object]] | None:
+    """The deal a filing cluster only restates, or None when it stands alone."""
+    first = cluster[0]
+    category = KIND_CATEGORY.get(str(first["kind"]))
+    amount = _cluster_amount(cluster)
+    if first["form"] in {"D", "D/A"}:
+        if amount is None:
+            return None
+        window = FORM_D_MATCH_DAYS
+    elif (
+        category == "debt"
+        and amount is None
+        and not first.get("amendment")
+        and all(event["form"] == "6-K" for event in cluster)
+    ):
+        window = EVENT_MERGE_DAYS
+    else:
+        return None
+    filed = [date.fromisoformat(str(event["filed_date"])) for event in cluster]
+    best: tuple[int, list[dict[str, object]]] | None = None
+    for host in hosts:
+        head = host[0]
+        if host is cluster or head["company"] != first["company"] or head["form"] in {"D", "D/A"}:
+            continue
+        if KIND_CATEGORY.get(str(head["kind"])) != category or head.get("amendment"):
+            continue
+        host_amount = _cluster_amount(host)
+        if host_amount is None:
+            continue
+        if amount is not None and not math.isclose(amount, host_amount, rel_tol=0.01):
+            continue
+        gap = min(
+            abs((date.fromisoformat(str(event["filed_date"])) - day).days)
+            for event in host
+            for day in filed
+        )
+        if gap <= window and (best is None or gap < best[0]):
+            best = (gap, host)
+    return best[1] if best else None
+
+
+def _cluster_amount(cluster: list[dict[str, object]]) -> float | None:
+    """Latest amount disclosed by a cluster's filings."""
+    return next(
+        (_number(event["amount"]) for event in reversed(cluster) if event["amount"] is not None),
+        None,
+    )
 
 
 def _calendar_quarter(period_end: str) -> str:

@@ -562,6 +562,25 @@ async def test_cache_serves_within_ttl_without_refetch(
     assert calls == 1
 
 
+async def test_malformed_rows_are_skipped_without_losing_the_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = EconCalendarService(cache_seconds=300)
+    bad_rows: list[Any] = [
+        {"title": "Odd row", "date": "2026-07-16T12:30:00.000Z", "importance": "high"},
+        "not-a-row",
+    ]
+
+    async def fetch_with_bad_rows() -> list[dict[str, Any]]:
+        return [*bad_rows, *FIXTURE]
+
+    monkeypatch.setattr(service, "_fetch", fetch_with_bad_rows)
+    await service.refresh()
+
+    assert len(service._rows) == len(ROWS)
+    assert service._fresh()
+
+
 # --- scheduler broadcast trigger ---
 
 

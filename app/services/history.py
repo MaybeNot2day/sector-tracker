@@ -171,19 +171,6 @@ class HistoryService:
                 bars = []
             if bars:
                 break
-        if (
-            not bars
-            and asset.type in {"equity", "etf"}
-            and asset.source != "stooq"
-            and asset.exchange != "KRX"
-            and not asset.symbol.endswith((".KS", ".KQ"))
-        ):
-            stooq = self.providers.get("stooq")
-            if stooq is not None:
-                try:
-                    bars = await stooq.get_history(asset, interval=interval, range_=range_)
-                except Exception:
-                    bars = []
         if bars:
             saved_revision = await asyncio.to_thread(
                 db.save_bars, self.database_path, bars, fetched_at=datetime.now(UTC)

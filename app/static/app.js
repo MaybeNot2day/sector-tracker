@@ -5,7 +5,7 @@ import {
 } from "./formatting.js?v=016e638c1af8";
 import { flashCell } from "./animations.js?v=7cf11f1f25c1";
 import { quoteFreshness } from "./quote-freshness.js?v=3abd8feafb2a";
-import { chartLegend, chartMarkup } from "./charts.js?v=4c2ff0226a01";
+import { chartLegend, chartMarkup } from "./charts.js?v=e1e6a0615853";
 
 const board = document.querySelector("#board");
 const dailyBoard = document.querySelector("#daily-board");
@@ -390,7 +390,6 @@ let reportsBadgeFetchSeq = 0;
 const sourceLabels = {
   yahoo: "YH",
   hyperliquid: "HL",
-  stooq: "STQ",
 };
 
 // --- Display timezone ------------------------------------------------------
@@ -602,6 +601,14 @@ function syncUrlState({ push = false } = {}) {
     if (activeInterval !== "1d") params.set("tf", activeInterval);
   }
   if (activeReportId !== null) params.set("report", String(activeReportId));
+  if (activeView === "ai") {
+    if (activeAiSection !== "models") params.set("ai", activeAiSection);
+    if (activeAiSection === "neoclouds") {
+      if (aiNeocloudView !== "capital") params.set("neo", aiNeocloudView);
+      if (aiNeocloudFilter !== "all") params.set("ledger", aiNeocloudFilter);
+      if (aiNeocloudDebtCompany) params.set("issuer", aiNeocloudDebtCompany);
+    }
+  }
   const hash = params.toString();
   const next = hash ? `#${hash}` : window.location.pathname + window.location.search;
   if (`#${hash}` === window.location.hash || (!hash && !window.location.hash)) return;
@@ -614,6 +621,16 @@ function restoreUrlState() {
   const params = new URLSearchParams(raw);
   restoringUrlState = true;
   try {
+    // AI sub-state lands before the view switch, which renders from it;
+    // selectAiSection, selectNeocloudView and the debt board validate values.
+    const aiSection = params.get("ai");
+    if (aiSection) activeAiSection = aiSection;
+    const neocloudView = params.get("neo");
+    if (neocloudView) aiNeocloudView = neocloudView;
+    const ledger = params.get("ledger");
+    if (NEOCLOUD_FILTERS.some(([value]) => value === ledger)) aiNeocloudFilter = ledger;
+    const issuer = params.get("issuer");
+    if (issuer) aiNeocloudDebtCompany = issuer;
     const view = params.get("view");
     if (["markets", "ai", "fringe", "trends", "earnings", "watch"].includes(view || "")) {
       selectView(view);
@@ -930,6 +947,7 @@ function init() {
       aiNeocloudDebtCompany = key === aiNeocloudDebtCompany ? "" : key;
       renderAiNeocloudDebt();
       renderAiNeocloudLedger();
+      syncUrlState();
       return;
     }
     const view = event.target.closest("button[data-neocloud-view], button[data-neocloud-view-link]");
@@ -941,6 +959,7 @@ function init() {
     if (!button) return;
     aiNeocloudFilter = button.dataset.neocloudFilter || "all";
     renderAiNeocloudLedger();
+    syncUrlState();
   });
   aiModelSearch.addEventListener("input", () => {
     aiModelQuery = aiModelSearch.value.trim().toLowerCase();
@@ -1309,7 +1328,7 @@ function earningsRowMarkup(report, reportDate) {
   return `<div class="earnings-row${report.held ? " earnings-held" : ""}">
     <span class="earnings-session" title="${escapeHtml(release ? `${release.title} · ${sessionTitle}` : sessionTitle)}"><em class="session-icon session-${session}" aria-hidden="true"></em><b>${escapeHtml(release?.label || sessionLabel)}</b></span>
     <strong>${escapeHtml(report.symbol || "")}</strong>
-    <span class="earnings-name">${escapeHtml(report.name || "")}${report.held ? '<b class="held-chip">HELD</b>' : ""}</span>
+    <span class="earnings-name"><span class="earnings-name-text" title="${escapeHtml(report.name || "")}">${escapeHtml(report.name || "")}</span>${report.held ? '<b class="held-chip">HELD</b>' : ""}</span>
     <span class="earnings-eps">${escapeHtml(eps)}</span>
     <span class="earnings-impl">${escapeHtml(impl)}</span>
     <span class="earnings-marks">${marks}</span>
@@ -3227,7 +3246,8 @@ function parseChartSeries(value) {
 }
 
 function parseChartNumbers(raw) {
-  const values = raw.split(",").map((item) => Number(item.trim()));
+  // A trailing comma or doubled separator is a typo, not a zero point.
+  const values = raw.split(",").map((item) => item.trim()).filter(Boolean).map(Number);
   return values.length && values.every(Number.isFinite) ? values : null;
 }
 
@@ -3268,11 +3288,12 @@ function chartSvg(spec) {
         className: "chart-line",
       }));
   const legend = spec.series.some((item) => item.name)
-    ? `<div class="report-chart-legend">${spec.series
+    ? `<div class="report-chart-legend">${series
         .map((item, index) => {
           const last = item.values[item.values.length - 1];
-          const kind = spec.type === "bar" ? "bar" : "line";
-          return `<span><i class="viz-swatch viz-swatch-${kind}" style="--swatch:${CHART_SERIES_COLORS[index]}"></i>${escapeHtml(item.name || `Series ${index + 1}`)} ${escapeHtml(format(last))}</span>`;
+          // Bars are colored by sign, so the swatch matches the latest bar.
+          const color = item.colorFor ? item.colorFor(last) : item.color;
+          return `<span><i class="viz-swatch viz-swatch-${item.type}" style="--swatch:${color}"></i>${escapeHtml(item.label)} ${escapeHtml(format(last))}</span>`;
         })
         .join("")}</div>`
     : "";
@@ -3740,7 +3761,7 @@ function newsMapTileMarkup(tile) {
     style="left:${tile.x.toFixed(1)}px;top:${tile.y.toFixed(1)}px;width:${tile.width.toFixed(1)}px;height:${tile.height.toFixed(1)}px;--news-freshness:${freshness.toFixed(1)}%"
     title="${escapeHtml(sample)}" aria-pressed="${active}">
     <strong>${escapeHtml(cluster.label)}</strong>
-    <span>${cluster.count} story${cluster.count === 1 ? "" : "s"} · ${cluster.channels} source${cluster.channels === 1 ? "" : "s"}</span>
+    <span>${cluster.count} ${cluster.count === 1 ? "story" : "stories"} · ${cluster.channels} source${cluster.channels === 1 ? "" : "s"}</span>
   </button>`;
 }
 
@@ -4939,7 +4960,7 @@ function renderFringeView() {
     <section class="analytics-panel">
       ${panelHeading(
         "Paper Book",
-        `since ${escapeHtml(curve[0]?.date || "\u2014")} \u00b7 $10,000 start`,
+        `since ${curve[0]?.date || "\u2014"} \u00b7 $10,000 start`,
         "Hermes' half-Kelly paper portfolio. Equity = starting capital + realized dollars from every sized close + open positions marked to market. Realized compounds the bankroll; unrealized does not buy new size until banked."
       )}
       <div class="regime-grid">
@@ -6935,6 +6956,7 @@ function optionsErrorMarkup(code) {
     marketdata_auth_failed: "MarketData.app rejected the configured token.",
     marketdata_entitlement_required: "The MarketData.app account does not include this options data.",
     marketdata_rate_limited: "MarketData.app request limit reached. Try again shortly.",
+    marketdata_device_locked: "The MarketData.app token is locked to another device. Release it in the MarketData.app dashboard.",
     marketdata_no_data: "MarketData.app has no chain data for this expiration.",
     options_expirations_unavailable: "No listed option expirations were found.",
     options_expiration_not_found: "That expiration is no longer listed.",
@@ -7685,8 +7707,31 @@ function toChartTime(value, interval) {
 
 // --- AI market intelligence ---------------------------------------------
 
-function setAiDataStatus(section, text) {
-  if (activeAiSection === section) aiDataStatus.textContent = text;
+function setAiDataStatus(section, text, stale = false) {
+  if (activeAiSection !== section) return;
+  aiDataStatus.textContent = text;
+  aiDataStatus.classList.toggle("stale", stale);
+}
+
+// While OpenRouter is down the API serves its last good snapshot with
+// stale: true; as_of then is that snapshot's fetch time.
+function setAiModelsStatus() {
+  const count = `${latestAiModels.summary?.models || 0} text models`;
+  if (!latestAiModels.stale) {
+    setAiDataStatus("models", `OpenRouter · ${count}`);
+    return;
+  }
+  const fetched = new Date(latestAiModels.as_of || "");
+  const when = Number.isFinite(fetched.getTime())
+    ? `${formatLocalDate(fetched)} ${formatClock(fetched)}`
+    : "unknown";
+  setAiDataStatus("models", `Cached OpenRouter data · fetched ${when} · ${count}`, true);
+}
+
+function setAiIndexStatus() {
+  const stale = Boolean(latestAiIndex.stale);
+  const prefix = stale ? "Cached OpenRouter rankings" : "OpenRouter rankings";
+  setAiDataStatus("token-index", `${prefix} · through ${latestAiIndex.as_of}`, stale);
 }
 
 
@@ -7733,6 +7778,7 @@ function selectAiSection(section) {
     loadComponentTrends();
   }
   else fetchAiModels();
+  syncUrlState();
 }
 
 function handleAiSectionKeydown(event) {
@@ -7754,7 +7800,7 @@ async function fetchAiModels(force = false) {
   if (aiModelsLoading) return;
   if (!force && latestAiModels && Date.now() - aiModelsFetchedAt < AI_DATA_TTL_MS) {
     renderAiModels();
-    setAiDataStatus("models", `OpenRouter · ${latestAiModels.summary?.models || 0} text models`);
+    setAiModelsStatus();
     return;
   }
   aiModelsLoading = true;
@@ -7769,11 +7815,11 @@ async function fetchAiModels(force = false) {
     syncAiProviderFilter();
     aiModelsFetchedAt = Date.now();
     renderAiModels();
-    setAiDataStatus("models", `OpenRouter · ${latestAiModels.summary?.models || 0} text models`);
+    setAiModelsStatus();
   } catch (error) {
     if (latestAiModels) {
       renderAiModels();
-      setAiDataStatus("models", "OpenRouter unavailable · showing cached catalog");
+      setAiDataStatus("models", "OpenRouter unavailable · showing cached catalog", true);
     } else {
       aiModelsBoard.innerHTML =
         '<div class="empty-state">Model pricing is temporarily unavailable</div>';
@@ -7941,7 +7987,7 @@ async function fetchAiTokenIndex(force = false) {
   if (aiIndexLoading) return;
   if (!force && latestAiIndex && Date.now() - aiIndexFetchedAt < AI_DATA_TTL_MS) {
     renderAiTokenIndex();
-    setAiDataStatus("token-index", `OpenRouter rankings · through ${latestAiIndex.as_of}`);
+    setAiIndexStatus();
     return;
   }
   aiIndexLoading = true;
@@ -7955,11 +8001,11 @@ async function fetchAiTokenIndex(force = false) {
     latestAiIndex = await response.json();
     aiIndexFetchedAt = Date.now();
     renderAiTokenIndex();
-    setAiDataStatus("token-index", `OpenRouter rankings · through ${latestAiIndex.as_of}`);
+    setAiIndexStatus();
   } catch (error) {
     if (latestAiIndex) {
       renderAiTokenIndex();
-      setAiDataStatus("token-index", "Rankings unavailable · showing cached index");
+      setAiDataStatus("token-index", "Rankings unavailable · showing cached index", true);
     } else {
       aiIndexBoard.innerHTML =
         '<div class="empty-state">Token index is temporarily unavailable</div>';
@@ -8038,10 +8084,8 @@ function renderAiTokenIndex() {
 }
 
 function aiIndexSeriesDefs(rows) {
-  const values = (key) => rows.map((row) => {
-    const value = Number(row[key]);
-    return Number.isFinite(value) ? value : null;
-  });
+  // Missing prices stay null so the chart draws a gap, never a $0 point.
+  const values = (key) => rows.map((row) => numericOrNull(row[key]));
   return [
     { label: "Proprietary", type: "line", values: values("proprietary_price"), color: "var(--chart-ma-50)", width: 1.4, smooth: true, className: "series-proprietary" },
     { label: "China", type: "line", values: values("china_price"), color: "var(--chart-rose)", width: 1.4, smooth: true, className: "series-china" },
@@ -8124,6 +8168,7 @@ function renderAiCapex() {
   `).join("");
   const latestSeries = latestAiCapex.series?.at(-1);
   const capexRows = (latestAiCapex.series || []).slice(-12);
+  const tracked = Number(summary.companies) || 0;
   aiCapexBoard.innerHTML = `
     <div class="ai-metrics">${metrics}</div>
     <div class="ai-index-layout ai-capex-layout">
@@ -8133,10 +8178,10 @@ function renderAiCapex() {
           <span>USD · public company statements</span>
         </div>
         <div class="ai-index-chart">
-          ${aiCapexChart(capexRows)}
+          ${aiCapexChart(capexRows, tracked)}
         </div>
         <div class="ai-index-legend">
-          ${chartLegend(aiCapexSeries(capexRows), [`${latestSeries?.company_count || 0} issuers in latest calendar quarter`])}
+          ${chartLegend(aiCapexSeries(capexRows, tracked), [`${Number(latestSeries?.company_count) || 0} of ${tracked} issuers in latest calendar quarter`])}
         </div>
       </section>
       <section class="ai-index-side ai-capex-side">
@@ -8151,32 +8196,34 @@ function renderAiCapex() {
     </div>
     <div class="ai-method-note">
       ${escapeHtml(latestAiCapex.methodology?.description || "")}
-      Source: Yahoo Finance company statements. Calendar-quarter aggregates may have partial
-      coverage until every issuer reports.
+      Source: Yahoo Finance company statements. Faded bars are quarters with fewer than all
+      ${tracked} issuers: the oldest fall outside some issuers' stored history and the latest
+      fills in as statements arrive, so their totals are not comparable with full quarters.
     </div>
   `;
 }
 
-function aiCapexSeries(rows) {
-  return [{
-    label: "Aggregate capex",
-    type: "bar",
-    values: rows.map((row) => Number(row.total_capex)),
-    color: "var(--accent)",
-    className: "series-main",
-  }];
+// A quarter is complete once every tracked issuer reported it; partial
+// quarters are faded so a missing report never reads as a ramp or a collapse.
+function aiCapexSeries(rows, tracked) {
+  const complete = (row) => !tracked || Number(row.company_count) >= tracked;
+  const amounts = (keep) => rows.map((row) => (keep(row) ? numericOrNull(row.total_capex) : null));
+  const partial = amounts((row) => !complete(row));
+  return [
+    { label: "Aggregate capex", type: "bar", values: amounts(complete), color: "var(--accent)", className: "series-main" },
+    { label: "Partial issuer coverage", type: "bar", values: partial, color: "var(--accent)", opacity: 0.4, className: "series-partial", legend: partial.some((value) => value !== null) },
+  ];
 }
 
-function aiCapexChart(rows) {
+function aiCapexChart(rows, tracked) {
   if (!rows.length) return '<div class="empty-state">No capex history yet</div>';
   return chartMarkup(
     {
       x: rows.map((row) => row.period),
-      series: aiCapexSeries(rows),
+      series: aiCapexSeries(rows, tracked),
       y: { format: formatNeocloudUsd },
       aspect: "16 / 7",
-      // A quarter is complete only once every issuer has reported it.
-      tooltipExtra: (index) => [["Issuers reported", String(rows[index].company_count || 0)]],
+      tooltipExtra: (index) => [["Issuers reported", `${Number(rows[index].company_count) || 0} of ${tracked}`]],
     },
     { label: "Aggregate quarterly reported capital expenditure" },
   );
@@ -8255,11 +8302,12 @@ function renderAiNeoclouds() {
 
   const listedRows = latestAiNeoclouds.companies.map((company) => {
     const stale = company.stale || {};
-    const balance = (field) => {
-      const value = formatNeocloudUsd(company[field]);
-      if (!stale[field]) return `<td>${value}</td>`;
-      return `<td class="ai-neocloud-stale" title="Last tagged ${escapeHtml(stale[field])}">${value}*</td>`;
-    };
+    const cell = (value, staleSince) => (staleSince
+      ? `<td class="ai-neocloud-stale" title="Last tagged ${escapeHtml(staleSince)}">${value}*</td>`
+      : `<td>${value}</td>`);
+    const balance = (field) => cell(formatNeocloudUsd(company[field]), stale[field]);
+    // Net debt is only as fresh as its older input.
+    const netDebtStale = [stale.cash, stale.debt].filter(Boolean).sort()[0];
     return `
       <tr>
         <td>
@@ -8269,7 +8317,7 @@ function renderAiNeoclouds() {
         <td>${escapeHtml(company.period_end)}</td>
         ${balance("cash")}
         ${balance("debt")}
-        <td>${formatNeocloudUsd(company.net_debt)}</td>
+        ${cell(formatNeocloudUsd(company.net_debt), netDebtStale)}
         ${balance("leases")}
         ${balance("backlog")}
         <td>${formatNeocloudUsd(company.revenue_ttm)}</td>
@@ -8302,14 +8350,18 @@ function renderAiNeoclouds() {
     <button type="button" data-neocloud-view="${value}" aria-pressed="false">${label}</button>
   `).join("");
   const capitalRows = series.slice(-8);
-  const capitalDefs = aiNeocloudSeries(capitalRows);
+  const capitalDefs = aiNeocloudSeries(capitalRows, Number(summary.listed_companies) || 0);
+  // Board refreshes rebuild every section; reading guides the user opened stay open.
+  const openHelp = new Set(
+    Array.from(aiNeocloudsBoard.querySelectorAll("details.ai-neocloud-help[open]"), (details) => details.dataset.help),
+  );
   aiNeocloudsBoard.innerHTML = `
     <div class="ai-metrics">${metrics}</div>
     <div class="ai-neocloud-views">
       <div class="category-tabs" role="group" aria-label="Neocloud section">${views}</div>
     </div>
     <section class="ai-neocloud-view" data-neocloud-panel="capital">
-      ${neocloudSectionHead("Capital raised", NEOCLOUD_HELP.capital)}
+      ${neocloudSectionHead("Capital raised", "capital", openHelp)}
       <div class="ai-index-layout ai-neocloud-layout">
         <section class="ai-index-chart-panel">
           <div class="ai-index-heading">
@@ -8333,7 +8385,7 @@ function renderAiNeoclouds() {
       </div>
     </section>
     <section class="ai-neocloud-view" data-neocloud-panel="balance">
-      ${neocloudSectionHead("Balance sheets", NEOCLOUD_HELP.balance)}
+      ${neocloudSectionHead("Balance sheets", "balance", openHelp)}
       <div class="ai-table-wrap">
         <table class="ai-table">
           <thead><tr>
@@ -8346,13 +8398,14 @@ function renderAiNeoclouds() {
       </div>
     </section>
     <section class="ai-neocloud-view" data-neocloud-panel="debt">
-      ${neocloudSectionHead("Debt & maturities", NEOCLOUD_HELP.debt)}
+      ${neocloudSectionHead("Debt & maturities", "debt", openHelp)}
       <div id="ai-neocloud-debt-section"></div>
     </section>
     <section class="ai-neocloud-view" data-neocloud-panel="ledger">
       ${neocloudSectionHead(
         'Financing ledger<span id="ai-neocloud-ledger-scope"></span>',
-        NEOCLOUD_HELP.ledger,
+        "ledger",
+        openHelp,
         `<div class="category-tabs" role="group" aria-label="Financing ledger filter">${filters}</div>`,
       )}
       <div class="ai-table-wrap ai-neocloud-ledger-wrap">
@@ -8382,11 +8435,13 @@ function selectNeocloudView(view) {
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", String(active));
   });
+  syncUrlState();
 }
 
 // Section header: title, one-line takeaway and a collapsible reading guide.
 // Help text is static copy, so only the optional controls carry markup.
-function neocloudSectionHead(title, help, controls = "") {
+function neocloudSectionHead(title, key, openHelp, controls = "") {
+  const help = NEOCLOUD_HELP[key];
   return `
     <header class="ai-neocloud-head">
       <div>
@@ -8395,7 +8450,7 @@ function neocloudSectionHead(title, help, controls = "") {
       </div>
       ${controls}
     </header>
-    <details class="ai-neocloud-help">
+    <details class="ai-neocloud-help" data-help="${key}"${openHelp.has(key) ? " open" : ""}>
       <summary>How to read this</summary>
       <ul>${help.points.map((point) => `<li>${escapeHtml(point)}</li>`).join("")}</ul>
     </details>
@@ -8771,14 +8826,13 @@ function updateAiHardwareEstimate(rateOverride = null, nameOverride = null) {
   }
 }
 
-function aiNeocloudSeries(rows) {
-  // Lines skip quarters most listed issuers have not reported yet, so a
-  // half-reported quarter does not read as a collapse in spending.
-  const maxCount = Math.max(...rows.map((row) => Number(row.company_count) || 0), 0);
-  const reported = (row) => maxCount > 0 && Number(row.company_count) >= maxCount * 0.75;
-  const listed = (field) => rows.map((row) => (reported(row) ? Number(row[field]) : null));
+function aiNeocloudSeries(rows, listedCount) {
+  // Lines skip quarters fewer than three quarters of the listed issuers have
+  // reported, so a half-reported quarter does not read as a collapse in spending.
+  const reported = (row) => listedCount > 0 && Number(row.company_count) >= listedCount * 0.75;
+  const listed = (field) => rows.map((row) => (reported(row) ? numericOrNull(row[field]) : null));
   return {
-    maxCount,
+    listedCount,
     series: [
       { label: "Debt deals announced", type: "bar", values: rows.map((row) => Number(row.announced_debt)), color: "var(--accent)", className: "bar-debt" },
       { label: "Equity deals announced", type: "bar", values: rows.map((row) => Number(row.announced_equity)), color: "var(--green)", className: "bar-equity" },
@@ -8798,7 +8852,7 @@ function aiNeocloudChart(rows, defs) {
       aspect: "19 / 8",
       tooltipExtra: (index) => [[
         "Listed issuers reported",
-        `${Number(rows[index].company_count) || 0} of ${defs.maxCount}`,
+        `${Number(rows[index].company_count) || 0} of ${defs.listedCount}`,
       ]],
     },
     { label: "Announced debt and equity deals with listed capex and net financing by calendar quarter" },
@@ -8931,7 +8985,7 @@ function formatAiPrice(value) {
   if (number === 0) return "$0.00";
   if (number < 0.01) return `$${number.toFixed(4)}`;
   if (number < 1) return `$${number.toFixed(3)}`;
-  return `$${number.toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
+  return `$${number.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function formatAiCompact(value) {

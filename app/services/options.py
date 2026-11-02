@@ -1,12 +1,25 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, date, datetime
+import logging
+from datetime import UTC, date, datetime, timedelta
 from time import monotonic
 from typing import Any, TypeVar
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import httpx
+
+logger = logging.getLogger(__name__)
+
+# Listed equity options stop trading at the 16:00 ET close of their
+# expiration day; "today" for expiry selection is the US Eastern date.
+_EASTERN = ZoneInfo("America/New_York")
+_EXPIRY_CLOSE_HOUR = 16
+# Chain columns the snapshot actually reads. MarketData bills an options
+# chain per contract when the response carries bid/ask/mid/last, but as a
+# single credit without them — the free tier has 100 credits a day.
+_CHAIN_COLUMNS = "side,strike,openInterest,gamma,iv,underlyingPrice,updated"
 
 _K = TypeVar("_K")
 
@@ -30,6 +43,9 @@ class MarketDataOptionsService:
     EXPIRATIONS_CACHE_SECONDS = 900
     REQUEST_TIMEOUT_SECONDS = 12.0
     FAILURE_COOLDOWN_SECONDS = 30.0
+    # A token locked to another device fails every request until the owner
+    # resets the authorized device in the MarketData dashboard.
+    DEVICE_LOCK_COOLDOWN_SECONDS = 30 * 60.0
     SNAPSHOT_CACHE_MAX = 64
     EXPIRATIONS_CACHE_MAX = 32
     SYMBOL_LOCKS_MAX = 64
@@ -54,6 +70,16 @@ class MarketDataOptionsService:
         self._symbol_locks: dict[str, asyncio.Lock] = {}
         self._failure_until: dict[tuple[str, str], tuple[float, str]] = {}
         self._expiration_failure_until: dict[str, tuple[float, OptionsDataError]] = {}
+        # Token-wide lockout (device lock): fail fast without any HTTP.
+        self._token_blocked_until: tuple[float, str] | None = None
+
+    async def get_expirations(self, symbol: str) -> list[str]:
+        """Listed expiration dates (cached), without fetching any chain."""
+        if not self.token:
+            raise OptionsDataError("options_not_configured", status_code=503)
+        clean_symbol = symbol.strip().upper()
+        async with self._symbol_lock(clean_symbol):
+            return list(await self._get_expirations(clean_symbol))
 
     async def get_snapshot(self, symbol: str, expiration: str | None = None) -> dict[str, object]:
         if not self.token:
@@ -86,7 +112,7 @@ class MarketDataOptionsService:
                 encoded_symbol = quote(clean_symbol, safe=".-")
                 chain_payload = await self._get_json(
                     f"/v1/options/chain/{encoded_symbol}/",
-                    {"expiration": selected},
+                    {"expiration": selected, "columns": _CHAIN_COLUMNS},
                 )
                 spot, contracts, updated_at = _marketdata_chain(chain_payload)
                 payload = build_options_snapshot(
@@ -165,6 +191,9 @@ class MarketDataOptionsService:
         return expirations
 
     async def _get_json(self, path: str, params: dict[str, str]) -> dict[str, Any]:
+        blocked = self._token_blocked_until
+        if blocked is not None and monotonic() < blocked[0]:
+            raise OptionsDataError(blocked[1])
         try:
             response = await self._http_client().get(
                 f"{self.base_url}{path}",
@@ -176,12 +205,22 @@ class MarketDataOptionsService:
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code
-            if status in {401, 403}:
+            failed = exc.response
+            status = failed.status_code
+            if status == 403 and _is_device_lock(failed.text):
+                self._lock_token(failed.text)
+                code = "marketdata_device_locked"
+            elif status in {401, 403}:
                 code = "marketdata_auth_failed"
             elif status == 402:
                 code = "marketdata_entitlement_required"
             elif status == 429:
+                logger.warning(
+                    "MarketData rate limit hit on %s (remaining=%s, reset=%s)",
+                    path,
+                    failed.headers.get("x-api-ratelimit-remaining"),
+                    failed.headers.get("x-api-ratelimit-reset"),
+                )
                 code = "marketdata_rate_limited"
             else:
                 code = "marketdata_request_failed"
@@ -198,8 +237,24 @@ class MarketDataOptionsService:
         if not isinstance(payload, dict):
             raise OptionsDataError("marketdata_invalid_payload")
         if str(payload.get("s") or "").lower() == "error":
+            message = str(payload.get("errmsg") or "")
+            if _is_device_lock(message):
+                self._lock_token(message)
+                raise OptionsDataError("marketdata_device_locked")
             raise OptionsDataError("marketdata_request_failed")
         return payload
+
+    def _lock_token(self, message: str) -> None:
+        self._token_blocked_until = (
+            monotonic() + self.DEVICE_LOCK_COOLDOWN_SECONDS,
+            "marketdata_device_locked",
+        )
+        logger.warning(
+            "MarketData token is locked to another device; pausing options requests "
+            "for %.0f minutes: %s",
+            self.DEVICE_LOCK_COOLDOWN_SECONDS / 60,
+            message[:300],
+        )
 
     def _http_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -329,8 +384,17 @@ def _select_expiration(expirations: list[str], requested: str | None) -> str:
             raise OptionsDataError("options_expiration_not_found", status_code=404)
         return requested
 
-    today = datetime.now(UTC).date().isoformat()
-    return next((value for value in expirations if value >= today), expirations[0])
+    now = datetime.now(_EASTERN)
+    # After the 16:00 ET close today's expiration has stopped trading.
+    first_open = now.date() + timedelta(days=1 if now.hour >= _EXPIRY_CLOSE_HOUR else 0)
+    earliest = first_open.isoformat()
+    return next((value for value in expirations if value >= earliest), expirations[0])
+
+
+def _is_device_lock(message: str) -> bool:
+    """MarketData's 403 for a token in use from another device/IP."""
+    text = message.lower()
+    return "only one device" in text or "blockedip" in text
 
 
 def _expiration_dates(payload: dict[str, Any]) -> list[str]:

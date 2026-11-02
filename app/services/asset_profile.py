@@ -3,16 +3,22 @@ from __future__ import annotations
 import asyncio
 import math
 import time
-from typing import Any
+from typing import Any, NamedTuple
 
 # yfinance (and its pandas dependency) is imported lazily inside the two
 # call sites: importing it at module level adds ~1s+ to serverless cold
 # starts for a dependency only the profile endpoint uses.
 from app.models import AssetConfig
 
-USD_FX_SYMBOLS = {
-    "KRW": "KRW=X",
-}
+
+class _Money(NamedTuple):
+    """How to render one money field: divide by `divisor`, prefix with `prefix`."""
+
+    divisor: float
+    prefix: str
+
+
+_USD = _Money(1.0, "$")
 
 
 class AssetProfileService:
@@ -96,7 +102,21 @@ def _base_profile(asset: AssetConfig) -> dict[str, object]:
 def _profile_from_yahoo_info(asset: AssetConfig, info: dict[str, Any]) -> dict[str, object]:
     quote_type = _text(info, "quoteType")
     is_etf = asset.type == "etf" or quote_type == "ETF"
-    money_divisor = _usd_money_divisor(info)
+    # ADRs trade in USD but Yahoo reports statements (revenue, EV) in the
+    # issuer's financialCurrency (TSM: TWD, BABA: CNY); each field converts
+    # from its own currency.
+    quote_currency = _info_currency(info, "currency")
+    statement_currency = _info_currency(info, "financialCurrency") or quote_currency
+    rates: dict[str, _Money] = {}
+
+    def money(currency: str | None) -> _Money:
+        if currency is None or currency == "USD":
+            return _USD
+        if currency not in rates:
+            rates[currency] = _usd_money(currency)
+        return rates[currency]
+
+    quote_money = money(quote_currency)
     return {
         "status": "ok",
         "symbol": asset.symbol,
@@ -109,22 +129,25 @@ def _profile_from_yahoo_info(asset: AssetConfig, info: dict[str, Any]) -> dict[s
         "website": _text(info, "website"),
         "description": _text(info, "longBusinessSummary"),
         "metrics": (
-            _etf_metrics(info, money_divisor) if is_etf else _equity_metrics(info, money_divisor)
+            _etf_metrics(info, quote_money)
+            if is_etf
+            else _equity_metrics(info, quote_money, money(statement_currency))
         ),
     }
 
 
 def _equity_metrics(
     info: dict[str, Any],
-    money_divisor: float | None = 1.0,
+    quote_money: _Money = _USD,
+    statement_money: _Money = _USD,
 ) -> list[dict[str, object]]:
     rows = [
-        _metric("Market Cap", _format_compact(_number(info, "marketCap"), money_divisor)),
-        _metric("EV", _format_compact(_number(info, "enterpriseValue"), money_divisor)),
+        _metric("Market Cap", _format_compact(_number(info, "marketCap"), quote_money)),
+        _metric("EV", _format_compact(_number(info, "enterpriseValue"), statement_money)),
         _metric("P/E", _format_ratio(_number(info, "trailingPE"))),
         _metric("Forward P/E", _format_ratio(_number(info, "forwardPE"))),
         _metric("Price / Book", _format_ratio(_number(info, "priceToBook"))),
-        _metric("Revenue", _format_compact(_number(info, "totalRevenue"), money_divisor)),
+        _metric("Revenue", _format_compact(_number(info, "totalRevenue"), statement_money)),
         _metric("Gross Margin", _format_percent(_number(info, "grossMargins"))),
         _metric("Profit Margin", _format_percent(_number(info, "profitMargins"))),
         _metric("Revenue Growth", _format_percent(_number(info, "revenueGrowth"))),
@@ -135,7 +158,7 @@ def _equity_metrics(
             _format_price_range(
                 _number(info, "fiftyTwoWeekLow"),
                 _number(info, "fiftyTwoWeekHigh"),
-                money_divisor,
+                quote_money,
             ),
         ),
     ]
@@ -144,17 +167,17 @@ def _equity_metrics(
 
 def _etf_metrics(
     info: dict[str, Any],
-    money_divisor: float | None = 1.0,
+    money: _Money = _USD,
 ) -> list[dict[str, object]]:
     rows = [
-        _metric("Assets", _format_compact(_number(info, "totalAssets"), money_divisor)),
-        _metric("NAV", _format_price(_number(info, "navPrice"), money_divisor)),
+        _metric("Assets", _format_compact(_number(info, "totalAssets"), money)),
+        _metric("NAV", _format_price(_number(info, "navPrice"), money)),
         _metric("Yield", _format_percent(_number(info, "yield"))),
         _metric("Expense", _format_percent(_number(info, "annualReportExpenseRatio"))),
         _metric("Beta 3Y", _format_ratio(_number(info, "beta3Year"))),
         _metric("Avg Volume", _format_plain_compact(_number(info, "averageVolume"))),
-        _metric("52W High", _format_price(_number(info, "fiftyTwoWeekHigh"), money_divisor)),
-        _metric("52W Low", _format_price(_number(info, "fiftyTwoWeekLow"), money_divisor)),
+        _metric("52W High", _format_price(_number(info, "fiftyTwoWeekHigh"), money)),
+        _metric("52W Low", _format_price(_number(info, "fiftyTwoWeekLow"), money)),
     ]
     return [row for row in rows if row["value"] is not None]
 
@@ -188,17 +211,23 @@ def _number(info: dict[str, Any], key: str) -> float | None:
     return None
 
 
-def _usd_money_divisor(info: dict[str, Any]) -> float | None:
-    currency = _profile_currency(info)
-    if currency is None or currency == "USD":
-        return 1.0
-    symbol = USD_FX_SYMBOLS.get(currency)
-    if symbol is None:
+def _usd_money(currency: str) -> _Money:
+    """USD conversion for `currency`; without an FX rate, label the real currency."""
+    rate = _usd_rate(currency)
+    if rate is None:
+        return _Money(1.0, f"{currency} ")
+    return _Money(rate, "$")
+
+
+def _usd_rate(currency: str) -> float | None:
+    """Units of `currency` per USD from Yahoo's `XXX=X` FX series."""
+    # Minor units (GBp, ZAc, ILA) are not ISO majors and have no =X pair.
+    if len(currency) != 3 or not currency.isalpha() or not currency.isupper():
         return None
     try:
         import yfinance as yf
 
-        df = yf.Ticker(symbol).history(period="5d", interval="1d", auto_adjust=False)
+        df = yf.Ticker(f"{currency}=X").history(period="5d", interval="1d", auto_adjust=False)
     except Exception:
         return None
     if df.empty:
@@ -208,14 +237,13 @@ def _usd_money_divisor(info: dict[str, Any]) -> float | None:
     return closes[-1] if closes else None
 
 
-def _profile_currency(info: dict[str, Any]) -> str | None:
-    for key in ("currency", "financialCurrency"):
-        value = info.get(key)
-        if isinstance(value, str):
-            cleaned = value.strip().upper()
-            if cleaned:
-                return cleaned
-    return None
+def _info_currency(info: dict[str, Any], key: str) -> str | None:
+    value = info.get(key)
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    # Only alphabetic codes reach the label; anything else is malformed.
+    return cleaned if cleaned.isalpha() and len(cleaned) <= 4 else None
 
 
 def _coerce_number(value: Any) -> float | None:
@@ -234,24 +262,22 @@ def _format_ratio(value: float | None) -> str | None:
     return f"{value:.2f}"
 
 
-def _format_price(value: float | None, divisor: float | None = 1.0) -> str | None:
+def _format_price(value: float | None, money: _Money = _USD) -> str | None:
     if value is None or value <= 0:
         return None
-    if divisor is None or divisor <= 0:
-        return None
-    value = value / divisor
+    value = value / money.divisor
     if abs(value) >= 1000:
-        return f"${value:,.0f}"
-    return f"${value:,.2f}"
+        return f"{money.prefix}{value:,.0f}"
+    return f"{money.prefix}{value:,.2f}"
 
 
 def _format_price_range(
     low: float | None,
     high: float | None,
-    divisor: float | None = 1.0,
+    money: _Money = _USD,
 ) -> str | None:
-    low_text = _format_price(low, divisor)
-    high_text = _format_price(high, divisor)
+    low_text = _format_price(low, money)
+    high_text = _format_price(high, money)
     if low_text and high_text:
         return f"{low_text} - {high_text}"
     return None
@@ -263,20 +289,19 @@ def _format_percent(value: float | None) -> str | None:
     return f"{value * 100:.1f}%"
 
 
-def _format_compact(value: float | None, divisor: float | None = 1.0) -> str | None:
+def _format_compact(value: float | None, money: _Money = _USD) -> str | None:
     if value is None:
         return None
-    if divisor is None or divisor <= 0:
-        return None
-    value = value / divisor
+    value = value / money.divisor
     abs_value = abs(value)
     sign = "-" if value < 0 else ""
+    prefix = money.prefix
     if abs_value >= 1_000_000_000_000:
-        return f"{sign}${abs_value / 1_000_000_000_000:.2f}T"
+        return f"{sign}{prefix}{abs_value / 1_000_000_000_000:.2f}T"
     if abs_value >= 1_000_000_000:
-        return f"{sign}${abs_value / 1_000_000_000:.2f}B"
+        return f"{sign}{prefix}{abs_value / 1_000_000_000:.2f}B"
     if abs_value >= 1_000_000:
-        return f"{sign}${abs_value / 1_000_000:.1f}M"
+        return f"{sign}{prefix}{abs_value / 1_000_000:.1f}M"
     if abs_value >= 1_000:
         return f"{sign}{abs_value / 1_000:.1f}K"
     return f"{sign}{abs_value:.0f}"

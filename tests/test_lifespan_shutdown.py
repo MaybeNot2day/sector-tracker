@@ -18,6 +18,7 @@ class CloseTracker:
         self.completed: list[str] = []
         self.stopped_tasks = 0
         self.all_started = asyncio.Event()
+        self.expected = 0
 
 
 class CloseProbe:
@@ -30,7 +31,7 @@ class CloseProbe:
         # Network resources must not close until every background user stopped.
         assert self.tracker.stopped_tasks == 8
         self.tracker.started.append(self.name)
-        if len(self.tracker.started) == 12:
+        if len(self.tracker.started) == self.tracker.expected:
             self.tracker.all_started.set()
         await self.tracker.all_started.wait()
         if self.fail:
@@ -39,15 +40,16 @@ class CloseProbe:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("broken_service", [None, "gpu"])
 async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    broken_service: str | None,
 ) -> None:
     tracker = CloseTracker()
-    probes = {
+    probes: dict[str, Any] = {
         "yahoo": CloseProbe("yahoo", tracker),
         "hyperliquid": CloseProbe("hyperliquid", tracker, fail=True),
-        "stooq": CloseProbe("stooq", tracker),
         "news": CloseProbe("news", tracker),
         "econ": CloseProbe("econ", tracker),
         "options": CloseProbe("options", tracker),
@@ -58,6 +60,11 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
         "gpu": CloseProbe("gpu", tracker),
         "sofr": CloseProbe("sofr", tracker),
     }
+    if broken_service is not None:
+        # A service without aclose used to abort the eagerly-built gather
+        # before any other client closed.
+        probes[broken_service] = SimpleNamespace()
+    tracker.expected = sum(isinstance(probe, CloseProbe) for probe in probes.values())
     settings = SimpleNamespace(
         watchlist_path=tmp_path / "watchlists.yaml",
         watchlist_seed_path=tmp_path / "seed.yaml",
@@ -95,7 +102,6 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
     monkeypatch.setattr(db, "init_db", lambda path: None)
     monkeypatch.setattr(main_module, "YahooProvider", lambda: probes["yahoo"])
     monkeypatch.setattr(main_module, "HyperliquidProvider", lambda: probes["hyperliquid"])
-    monkeypatch.setattr(main_module, "StooqProvider", lambda: probes["stooq"])
     monkeypatch.setattr(main_module, "NewsService", lambda *args, **kwargs: probes["news"])
     monkeypatch.setattr(main_module, "QuoteService", lambda *args, **kwargs: object())
     monkeypatch.setattr(main_module, "HistoryService", lambda *args, **kwargs: object())
@@ -140,34 +146,12 @@ async def test_lifespan_stops_tasks_then_closes_every_client_concurrently(
     await asyncio.wait_for(run_lifespan(), timeout=1.0)
 
     assert tracker.stopped_tasks == 8
-    assert set(tracker.started) == {
-        "yahoo",
-        "hyperliquid",
-        "stooq",
-        "news",
-        "options",
-        "econ",
-        "earnings",
-        "ai",
-        "capex",
-        "neoclouds",
-        "gpu",
-        "sofr",
-    }
-    # Hyperliquid's close failure is isolated; every other resource still closes.
-    assert set(tracker.completed) == {
-        "yahoo",
-        "stooq",
-        "news",
-        "options",
-        "econ",
-        "earnings",
-        "ai",
-        "capex",
-        "neoclouds",
-        "gpu",
-        "sofr",
-    }
+    closable = {name for name, probe in probes.items() if isinstance(probe, CloseProbe)}
+    assert set(tracker.started) == closable
+    # Close failures (Hyperliquid raising, a service lacking aclose) are
+    # isolated; every other resource still closes.
+    assert set(tracker.completed) == closable - {"hyperliquid"}
+    assert "yahoo" in tracker.completed and "sofr" in tracker.completed
 
 
 @pytest.mark.asyncio
@@ -185,3 +169,36 @@ async def test_background_loop_crash_is_logged(
         main_module._log_loop_crash(task)
 
     assert "background task quote-poll crashed" in caplog.text
+
+
+def test_configure_logging_emits_info_with_level_and_logger_name(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = logging.getLogger()
+    monkeypatch.setattr(root, "handlers", [])
+    monkeypatch.setattr(root, "level", logging.WARNING)
+    monkeypatch.delenv("LOG_LEVEL", raising=False)
+
+    main_module.configure_logging()
+    logging.getLogger("app.services.example").info("refreshed 3 rows")
+
+    err = capsys.readouterr().err
+    assert "INFO" in err
+    assert "app.services.example" in err
+    assert "refreshed 3 rows" in err
+    assert len(root.handlers) == 1
+
+    # Idempotent: a second call (reload) must not double every line.
+    main_module.configure_logging()
+    assert len(root.handlers) == 1
+
+
+def test_configure_logging_honors_log_level_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    root = logging.getLogger()
+    monkeypatch.setattr(root, "handlers", [])
+    monkeypatch.setattr(root, "level", logging.WARNING)
+    monkeypatch.setenv("LOG_LEVEL", "debug")
+
+    main_module.configure_logging()
+
+    assert root.level == logging.DEBUG

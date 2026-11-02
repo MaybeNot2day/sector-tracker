@@ -19,6 +19,9 @@ from app import db
 GPU_PRICES_URL = "https://computeprices.com/api/v1/gpu-prices"
 GPU_PUBLIC_URL = "https://computeprices.com/gpu"
 REQUEST_TIMEOUT_SECONDS = 30.0
+# Retry interval after a degraded refresh (API failed → public pages, or
+# both failed → stored snapshot), instead of the full cache window.
+DEGRADED_RETRY_SECONDS = 300.0
 _PUBLIC_DETAIL_LIMIT = 8
 _HEADERS = {
     "Accept": "application/json, text/html;q=0.9",
@@ -105,16 +108,19 @@ class GPUComputeService:
         )
         self._owns_client = client is None
         self._lock = asyncio.Lock()
+        # (expires_at, payload): degraded results expire sooner than good ones.
         self._cache: tuple[float, dict[str, object]] | None = None
 
     async def get_hardware(self) -> dict[str, object]:
-        now = monotonic()
-        if self._cache is not None and now - self._cache[0] < self.cache_seconds:
+        if self._cache is not None and monotonic() < self._cache[0]:
             return self._cache[1]
         async with self._lock:
             now = monotonic()
-            if self._cache is not None and now - self._cache[0] < self.cache_seconds:
+            if self._cache is not None and now < self._cache[0]:
                 return self._cache[1]
+            # One transient failure must not pin a fallback for the full
+            # cache window; degraded payloads retry after a short interval.
+            retry_at = now + min(self.cache_seconds, DEGRADED_RETRY_SECONDS)
             errors: list[str] = []
             if self.api_key:
                 try:
@@ -122,7 +128,7 @@ class GPUComputeService:
                     await asyncio.to_thread(
                         db.save_ai_gpu_compute_snapshot, self.database_path, payload
                     )
-                    self._cache = (now, payload)
+                    self._cache = (now + self.cache_seconds, payload)
                     return payload
                 except (GPUComputeError, httpx.HTTPError) as exc:
                     errors.append(f"API: {exc}")
@@ -133,7 +139,7 @@ class GPUComputeService:
                 await asyncio.to_thread(
                     db.save_ai_gpu_compute_snapshot, self.database_path, payload
                 )
-                self._cache = (now, payload)
+                self._cache = (retry_at if errors else now + self.cache_seconds, payload)
                 return payload
             except (GPUComputeError, httpx.HTTPError) as exc:
                 errors.append(f"public page: {exc}")
@@ -143,7 +149,7 @@ class GPUComputeService:
             if stale is not None:
                 stale["stale"] = True
                 stale["warning"] = "; ".join(errors)
-                self._cache = (now, stale)
+                self._cache = (retry_at, stale)
                 return stale
             raise GPUComputeError("ComputePrices unavailable: " + "; ".join(errors))
 

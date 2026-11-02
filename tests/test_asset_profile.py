@@ -51,7 +51,7 @@ def test_etf_average_volume_is_not_currency_prefixed() -> None:
 def test_non_usd_profile_monetary_metrics_are_converted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(asset_profile, "_usd_money_divisor", lambda _info: 1_550.0)
+    monkeypatch.setattr(asset_profile, "_usd_rate", lambda _currency: 1_550.0)
     asset = AssetConfig(
         symbol="000660.KS",
         type="equity",
@@ -81,6 +81,58 @@ def test_non_usd_profile_monetary_metrics_are_converted(
     assert by_label["Revenue"] == "$100.0M"
     assert by_label["Avg Volume"] == "5.1M"
     assert by_label["52W Range"] == "$100.00 - $2,000"
+
+
+def test_adr_statement_figures_convert_from_financial_currency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Prod TSM: USD-quoted ADR with TWD statements rendered "Revenue $4.94T".
+    rates = {"TWD": 31.0}
+    monkeypatch.setattr(asset_profile, "_usd_rate", rates.get)
+    asset = AssetConfig(symbol="TSM", type="equity", source="yahoo", name="TSMC")
+
+    profile = _profile_from_yahoo_info(
+        asset,
+        {
+            "currency": "USD",
+            "financialCurrency": "TWD",
+            "marketCap": 1_500_000_000_000,
+            "enterpriseValue": 31_000_000_000_000,
+            "totalRevenue": 4_940_000_000_000,
+            "fiftyTwoWeekLow": 150.0,
+            "fiftyTwoWeekHigh": 300.0,
+        },
+    )
+    by_label = {
+        str(metric["label"]): metric["value"]
+        for metric in cast(list[dict[str, str | None]], profile["metrics"])
+    }
+
+    assert by_label["Market Cap"] == "$1.50T"  # quote currency: already USD
+    assert by_label["Revenue"] == "$159.35B"
+    assert by_label["EV"] == "$1.00T"
+    assert by_label["52W Range"] == "$150.00 - $300.00"
+
+
+def test_statement_figures_without_fx_rate_keep_their_real_currency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Prod BABA: CNY revenue must never render as dollars.
+    monkeypatch.setattr(asset_profile, "_usd_rate", lambda _currency: None)
+    asset = AssetConfig(symbol="BABA", type="equity", source="yahoo", name="Alibaba")
+
+    profile = _profile_from_yahoo_info(
+        asset,
+        {"currency": "USD", "financialCurrency": "CNY", "totalRevenue": 1_040_000_000_000},
+    )
+    by_label = {
+        str(metric["label"]): metric["value"]
+        for metric in cast(list[dict[str, str | None]], profile["metrics"])
+    }
+
+    assert by_label["Revenue"] is not None
+    assert "$" not in by_label["Revenue"]
+    assert "CNY" in by_label["Revenue"]
 
 
 async def test_partial_profile_failures_are_not_long_cached(

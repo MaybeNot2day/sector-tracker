@@ -9,6 +9,7 @@ from app import db
 from app.models import AssetConfig, Bar, GroupConfig, Quote
 from app.providers.base import QuoteProvider
 from app.providers.hyperliquid import HyperliquidProvider
+from app.services import quotes as quotes_module
 from app.services.quotes import QuoteService, _baseline_close, _official_close
 
 
@@ -279,9 +280,10 @@ class RecordingQuotes(ScriptedQuotes):
         return await super().get_quotes(assets)
 
 
-def seed_daily_bars(database: Path, closes: list[float], *, ages_days: list[int]) -> None:
-    """Daily bars `ages_days` before now (descending age = oldest first)."""
-    now = datetime.now(UTC)
+def seed_daily_bars(
+    database: Path, bars: list[tuple[datetime, float]], *, fetched_at: datetime
+) -> None:
+    """Yahoo daily bars for AAPL, persisted as one fetch at `fetched_at`."""
     db.save_bars(
         database,
         [
@@ -289,22 +291,36 @@ def seed_daily_bars(database: Path, closes: list[float], *, ages_days: list[int]
                 symbol="AAPL",
                 provider="yahoo",
                 interval="1d",
-                timestamp=now - timedelta(days=age),
+                timestamp=timestamp,
                 open=close - 0.5,
                 high=close + 1,
                 low=close - 1,
                 close=close,
             )
-            for close, age in zip(closes, ages_days, strict=True)
+            for timestamp, close in bars
         ],
+        fetched_at=fetched_at,
     )
 
 
+# US DST ends Sun 2026-11-01: the regular close moves from 20:00 to 21:00 UTC.
+FRI_OCT_30 = datetime(2026, 10, 30, 13, 30, tzinfo=UTC)
+MON_NOV_2 = datetime(2026, 11, 2, 14, 30, tzinfo=UTC)
+TUE_NOV_3 = datetime(2026, 11, 3, 14, 30, tzinfo=UTC)
+
+
 @pytest.mark.asyncio
-async def test_hl_first_serves_covered_equity_without_yahoo(tmp_path: Path) -> None:
+async def test_hl_first_serves_covered_equity_without_yahoo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     database = tmp_path / "board.sqlite3"
-    # Two completed sessions; the freshest (208.0) is the baseline.
-    seed_daily_bars(database, [200.0, 208.0], ages_days=[2, 1])
+    # Tuesday morning: Monday's session is the last completed one.
+    monkeypatch.setattr(quotes_module, "_utc_now", lambda: datetime(2026, 11, 3, 15, tzinfo=UTC))
+    seed_daily_bars(
+        database,
+        [(FRI_OCT_30, 200.0), (MON_NOV_2, 208.0)],
+        fetched_at=datetime(2026, 11, 2, 22, tzinfo=UTC),
+    )
     yahoo = RecordingQuotes({"AAPL": yahoo_quote("AAPL")})
     service = QuoteService(
         database,
@@ -343,9 +359,18 @@ async def test_hl_first_falls_back_to_yahoo_without_baseline(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_hl_first_falls_back_when_stale_baseline(tmp_path: Path) -> None:
+async def test_hl_first_falls_back_when_completed_session_bar_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Wednesday with Monday as the newest bar: Tuesday's close is unknown, so
+    # Monday's close would turn 1D into a two-session change.
     database = tmp_path / "board.sqlite3"
-    seed_daily_bars(database, [200.0, 208.0], ages_days=[8, 7])
+    monkeypatch.setattr(quotes_module, "_utc_now", lambda: datetime(2026, 11, 4, 15, tzinfo=UTC))
+    seed_daily_bars(
+        database,
+        [(FRI_OCT_30, 200.0), (MON_NOV_2, 208.0)],
+        fetched_at=datetime(2026, 11, 2, 22, tzinfo=UTC),
+    )
     yahoo = RecordingQuotes({"AAPL": yahoo_quote("AAPL")})
     service = QuoteService(
         database,
@@ -355,6 +380,7 @@ async def test_hl_first_falls_back_when_stale_baseline(tmp_path: Path) -> None:
     fresh = await service._fetch_fresh_quotes(equity_group("AAPL"))
 
     assert fresh["AAPL"].provider == "hyperliquid"  # overlay on the venue quote
+    assert fresh["AAPL"].previous_close == 208.0  # the venue's own value
     assert "AAPL" in yahoo.requested
 
 
@@ -362,35 +388,49 @@ async def test_hl_first_falls_back_when_stale_baseline(tmp_path: Path) -> None:
 
 
 def test_baseline_close_uses_previous_session_while_today_is_forming() -> None:
-    tail = [
-        (datetime(2026, 7, 2, 13, 30, tzinfo=UTC), 208.0),
-        (datetime(2026, 7, 3, 13, 30, tzinfo=UTC), 210.0),  # still trading
-    ]
-    now = datetime(2026, 7, 3, 16, 0, tzinfo=UTC)
+    tail = [(MON_NOV_2, 208.0), (TUE_NOV_3, 210.0)]  # Tuesday still trading
+    now = datetime(2026, 11, 3, 16, 0, tzinfo=UTC)
 
-    assert _baseline_close(tail, now) == 208.0
+    assert _baseline_close(tail, now, now) == 208.0
 
 
-def test_baseline_close_uses_last_bar_once_its_session_ends() -> None:
-    tail = [
-        (datetime(2026, 7, 2, 13, 30, tzinfo=UTC), 208.0),
-        (datetime(2026, 7, 3, 13, 30, tzinfo=UTC), 210.0),
-    ]
-    after_close = datetime(2026, 7, 3, 22, 0, tzinfo=UTC)
-    weekend = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
+def test_baseline_close_counts_first_hour_after_close_after_dst_ends() -> None:
+    # Mon 2026-11-02 21:15 UTC is 16:15 EST: the session closed at 21:00 UTC
+    # and the bar was refreshed after it, so it is Monday's official close.
+    tail = [(FRI_OCT_30, 200.0), (MON_NOV_2, 208.0)]
+    now = datetime(2026, 11, 2, 21, 15, tzinfo=UTC)
 
-    assert _baseline_close(tail, after_close) == 210.0
-    assert _baseline_close(tail, weekend) == 210.0
+    assert _baseline_close(tail, now, datetime(2026, 11, 2, 21, 10, tzinfo=UTC)) == 208.0
+
+
+def test_baseline_close_rejects_bar_fetched_before_the_close() -> None:
+    # Same instant, but the newest bar was last fetched mid-session (20:30 UTC
+    # = 15:30 EST): its close is an intraday print, not the official close.
+    tail = [(FRI_OCT_30, 200.0), (MON_NOV_2, 208.0)]
+    now = datetime(2026, 11, 2, 21, 15, tzinfo=UTC)
+
+    assert _baseline_close(tail, now, datetime(2026, 11, 2, 20, 30, tzinfo=UTC)) is None
+
+
+def test_baseline_close_uses_session_close_during_dst() -> None:
+    # Fri 2026-10-30 20:15 UTC is 16:15 EDT: Friday's session is complete.
+    tail = [(datetime(2026, 10, 29, 13, 30, tzinfo=UTC), 199.0), (FRI_OCT_30, 200.0)]
+    now = datetime(2026, 10, 30, 20, 15, tzinfo=UTC)
+    fetched = datetime(2026, 10, 30, 20, 5, tzinfo=UTC)
+
+    assert _baseline_close(tail, now, fetched) == 200.0
+    # Over the weekend Friday stays the last completed session.
+    assert _baseline_close(tail, datetime(2026, 10, 31, 12, tzinfo=UTC), fetched) == 200.0
 
 
 def test_baseline_close_rejects_stale_or_thin_tails() -> None:
-    now = datetime(2026, 7, 10, 16, 0, tzinfo=UTC)
-    stale = [(datetime(2026, 6, 30, 13, 30, tzinfo=UTC), 208.0)]
-    forming_only = [(datetime(2026, 7, 10, 13, 30, tzinfo=UTC), 210.0)]
+    wednesday = datetime(2026, 11, 4, 15, 0, tzinfo=UTC)
+    stale = [(FRI_OCT_30, 200.0), (MON_NOV_2, 208.0)]
+    forming_only = [(datetime(2026, 11, 4, 14, 30, tzinfo=UTC), 210.0)]
 
-    assert _baseline_close(stale, now) is None
-    assert _baseline_close(forming_only, now) is None
-    assert _baseline_close([], now) is None
+    assert _baseline_close(stale, wednesday, wednesday) is None
+    assert _baseline_close(forming_only, wednesday, wednesday) is None
+    assert _baseline_close([], wednesday, wednesday) is None
 
 
 @pytest.mark.asyncio
