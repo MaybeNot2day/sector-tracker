@@ -339,6 +339,19 @@ def test_fringe_tab_renders_portfolio_curve_and_history(page: Page, base_url: st
     expect(history.nth(0)).to_contain_text("+$201")
     expect(history.nth(0)).to_contain_text("18d")
 
+    # The close reason opens the full idea underneath its row.
+    expander = history.nth(0).locator(".trade-expand")
+    detail = board.locator(".trade-detail").nth(0)
+    expect(detail).to_be_hidden()
+    expander.click()
+    expect(expander).to_have_attribute("aria-expanded", "true")
+    expect(detail).to_be_visible()
+    expect(detail).to_contain_text("Blackwell ramp")
+    expect(detail).to_contain_text("$170")
+    expect(detail).to_contain_text("worst -1.40%")
+    expander.click()
+    expect(detail).to_be_hidden()
+
     # Deep link restores the tab.
     page.goto(f"{base_url}/#view=fringe", wait_until="domcontentloaded")
     expect(page.locator("#fringe-view")).to_be_visible()
@@ -4006,6 +4019,8 @@ FRINGE_PAYLOAD: dict[str, Any] = {
             "size_notional": 2500.0,
             "realized_usd": 201.25,
             "close_reason": "Target hit into earnings",
+            "mae_pct": -1.4,
+            "mfe_pct": 9.2,
         },
         {
             "id": 0,

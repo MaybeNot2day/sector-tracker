@@ -146,6 +146,8 @@ let latestCryptoEtfFlows = null;
 let latestKeyDates = null;
 let latestFringe = null;
 let fringeRevision = 0;
+// Trade History rows the reader expanded; kept across Fringe re-renders.
+const fringeExpandedTrades = new Set();
 let latestSnapshots = null;
 let watchlistConfig = null;
 let activeSymbol = null;
@@ -4312,8 +4314,23 @@ function openFringeTicker(symbol) {
 
 fringeBoard?.addEventListener("click", (event) => {
   const fringeButton = event.target.closest(".fringe-ticker");
-  if (fringeButton) openFringeTicker(fringeButton.dataset.symbol || "");
+  if (fringeButton) {
+    openFringeTicker(fringeButton.dataset.symbol || "");
+    return;
+  }
+  const expand = event.target.closest(".trade-expand");
+  if (expand) toggleTradeDetail(expand);
 });
+
+function toggleTradeDetail(button) {
+  const detail = document.getElementById(button.getAttribute("aria-controls") || "");
+  if (!detail) return;
+  const open = button.getAttribute("aria-expanded") !== "true";
+  button.setAttribute("aria-expanded", String(open));
+  detail.hidden = !open;
+  if (open) fringeExpandedTrades.add(button.dataset.trade);
+  else fringeExpandedTrades.delete(button.dataset.trade);
+}
 
 function panelHeading(title, note, tip = "") {
   const help = tip
@@ -5039,7 +5056,7 @@ function fringeEquityChart(curve) {
 
 function fringeHistoryTable(closed) {
   if (!closed.length) return '<div class="empty-state">No closed trades yet</div>';
-  const rows = closed.map((idea) => {
+  const rows = closed.map((idea, index) => {
     const pct = numericOrNull(idea.realized_pct);
     const usd = numericOrNull(idea.realized_usd);
     const tone = pct === null ? "" : pct > 0 ? "tone-positive" : pct < 0 ? "tone-negative" : "";
@@ -5052,10 +5069,13 @@ function fringeHistoryTable(closed) {
         : null;
     const direction = String(idea.direction || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
     const ticker = escapeHtml(idea.ticker || "");
+    const key = String(idea.id ?? `${idea.ticker}-${idea.opened}-${index}`);
+    const detailId = `trade-detail-${key.replace(/[^A-Za-z0-9_-]/g, "_")}`;
+    const open = fringeExpandedTrades.has(key);
     return `<tr class="trade-row">
       <td><button type="button" class="fringe-ticker" data-symbol="${ticker}" title="Open ${ticker} chart">${ticker}</button></td>
       <td><span class="fringe-chip fringe-${direction.toLowerCase()}">${direction}</span></td>
-      <td class="trade-reason" title="${escapeHtml(idea.close_reason || "")}">${escapeHtml(idea.close_reason || idea.thesis || "")}</td>
+      <td class="trade-reason"><button type="button" class="trade-expand" data-trade="${escapeHtml(key)}" aria-expanded="${open}" aria-controls="${detailId}"><span class="trade-caret" aria-hidden="true"></span><span class="trade-reason-text">${escapeHtml(idea.close_reason || idea.thesis || "")}</span></button></td>
       <td class="fringe-num">${escapeHtml(idea.opened || "\u2014")}</td>
       <td class="fringe-num">${escapeHtml(idea.closed || "\u2014")}</td>
       <td class="fringe-num">${days === null ? "\u2014" : `${days}d`}</td>
@@ -5063,7 +5083,8 @@ function fringeHistoryTable(closed) {
       <td class="fringe-num">${entry === null ? "\u2014" : escapeHtml(formatPrice(entry))} \u2192 ${exit === null ? "\u2014" : escapeHtml(formatPrice(exit))}</td>
       <td class="fringe-num"><strong class="${tone}">${pct === null ? "\u2014" : escapeHtml(formatSignedPct(pct))}</strong></td>
       <td class="fringe-num">${usd === null ? "\u2014" : `<strong class="${tone}">${escapeHtml(formatSignedUsd(usd))}</strong>`}</td>
-    </tr>`;
+    </tr>
+    <tr class="trade-detail" id="${detailId}"${open ? "" : " hidden"}><td colspan="10">${fringeTradeDetail(idea)}</td></tr>`;
   });
   return `<div class="trade-scroll"><table class="trade-table">
     <thead><tr>
@@ -5074,6 +5095,28 @@ function fringeHistoryTable(closed) {
     </tr></thead>
     <tbody>${rows.join("")}</tbody>
   </table></div>`;
+}
+
+// The full idea behind a closed trade: thesis, exit reasoning, the declared
+// target and how far the trade ran each way while open.
+function fringeTradeDetail(idea) {
+  const mae = numericOrNull(idea.mae_pct);
+  const mfe = numericOrNull(idea.mfe_pct);
+  const excursion = [
+    mae === null ? "" : `worst ${formatSignedPct(mae)}`,
+    mfe === null ? "" : `best ${formatSignedPct(mfe)}`,
+  ]
+    .filter(Boolean)
+    .join(" \u00b7 ");
+  const items = [
+    ["Thesis", idea.thesis],
+    ["Close reason", idea.close_reason],
+    ["Target", idea.target],
+    ["While open", excursion],
+  ].filter(([, value]) => value);
+  return `<dl class="trade-detail-grid">${items
+    .map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`)
+    .join("")}</dl>`;
 }
 
 function hasLatestFlowPrint(asset) {
