@@ -7,6 +7,7 @@ from typing import Literal
 
 AssetType = Literal["equity", "etf", "future", "crypto_perp", "crypto_spot", "index_proxy"]
 ProviderName = Literal["yahoo", "hyperliquid"]
+GroupCategory = Literal["tradfi", "crypto", "commodities"]
 
 
 @dataclass(frozen=True)
@@ -130,3 +131,16 @@ class AssetConfig:
 class GroupConfig:
     name: str
     assets: list[AssetConfig]
+    # Markets tab the group belongs to. Unset groups are inferred from their
+    # assets; equity-index futures set "tradfi" so they don't read as commodities.
+    category: GroupCategory | None = None
+
+
+def group_category(group: GroupConfig) -> GroupCategory:
+    if group.category is not None:
+        return group.category
+    if any(asset.type in ("crypto_perp", "crypto_spot") for asset in group.assets):
+        return "crypto"
+    if any(asset.type == "future" for asset in group.assets):
+        return "commodities"
+    return "tradfi"

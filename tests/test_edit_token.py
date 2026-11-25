@@ -285,6 +285,39 @@ def test_create_asset_accepts_unavailable_provider_validation(
     assert [asset.symbol for asset in saved[0].assets] == ["AAPL"]
 
 
+def test_asset_edits_keep_index_futures_under_tradfi(
+    configure_asset_mutation: Callable[
+        [list[GroupConfig], ValidationStatus], tuple[TestClient, Path]
+    ],
+) -> None:
+    es = AssetConfig(symbol="ES=F", type="future", source="yahoo", exchange="CME")
+    client, watchlist_path = configure_asset_mutation(
+        [
+            GroupConfig(name="INDEX_FUTURES", assets=[es], category="tradfi"),
+            GroupConfig(name="METALS_FUTURES", assets=[]),
+        ],
+        "valid",
+    )
+
+    added = client.post(
+        "/api/groups/INDEX_FUTURES/assets",
+        json={"symbol": "NQ=F", "type": "future", "source": "yahoo", "exchange": "CME"},
+    )
+    removed = client.delete("/api/groups/INDEX_FUTURES/assets/ES=F")
+    client.post("/api/groups/METALS_FUTURES/assets", json={"symbol": "GC=F", "type": "future"})
+
+    assert added.status_code == removed.status_code == 200
+    saved = {group.name: group for group in load_watchlists(watchlist_path)}
+    assert saved["INDEX_FUTURES"].category == "tradfi"
+    assert [asset.symbol for asset in saved["INDEX_FUTURES"].assets] == ["NQ=F"]
+    payload = client.get("/api/groups").json()["groups"]
+    # Explicit category wins; unset futures groups still infer commodities.
+    assert {group["name"]: group["category"] for group in payload} == {
+        "INDEX_FUTURES": "tradfi",
+        "METALS_FUTURES": "commodities",
+    }
+
+
 def test_create_asset_rejects_definitive_provider_not_found(
     configure_asset_mutation: Callable[
         [list[GroupConfig], ValidationStatus], tuple[TestClient, Path]

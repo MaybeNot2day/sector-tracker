@@ -1202,11 +1202,10 @@ function updateCategoryButtons() {
   });
 }
 
+// The backend resolves each group's Markets tab (explicit YAML category or
+// inferred from its assets), so equity-index futures can sit under TradFi.
 function groupCategory(group) {
-  const assets = group.assets || [];
-  if (assets.some((asset) => isCryptoAsset(asset.type))) return "crypto";
-  if (assets.some((asset) => asset.type === "future")) return "commodities";
-  return "tradfi";
+  return group.category || "tradfi";
 }
 
 // --- Earnings view ----------------------------------------------------------

@@ -13,7 +13,8 @@ the curated perp watchlist plus an auto-synced tape of every crypto perp listed 
 (~110 markets), grouped into Hyperliquid's own baskets (L1, DeFi, AI, L2, Memes, Other via its
 tokenlist categories) and sortable by 24h volume, funding, and OI — new listings appear
 without config changes, and every tape row charts on click. Commodities tracks Yahoo
-continuous front-month futures (metals, energy, ags) with a Globex-aware session chip.
+continuous front-month futures (metals, energy, ags) with a Globex-aware session chip;
+the E-mini S&P 500 and Nasdaq-100 futures (`ES=F`, `NQ=F`) sit under TradFi as INDEX_FUTURES.
 A Crypto Breadth panel on the Daily Board reads advance/decline, big movers, and funding
 share across the full tape while the curated regime/breadth universe stays unpolluted.
 A toggleable full-height news drawer streams public Telegram channels (scraped from their
@@ -565,6 +566,10 @@ The board supports:
 - `crypto_perp`
 - `future` (Yahoo futures like `GC=F`; Globex session chip, no RVOL — Yahoo's
   historical futures volume uses a different counting regime than live prints)
+
+A group's Markets tab is inferred from its assets (any crypto → Crypto, any future →
+Commodities, else TradFi). Set `category: tradfi | crypto | commodities` on a group in
+the YAML to override it, as INDEX_FUTURES does for equity-index futures.
 
 Environment variables:
 

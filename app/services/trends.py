@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app import db
-from app.models import GroupConfig
+from app.models import GroupConfig, group_category
 from app.services.hyperliquid_discovery import AUTO_GROUP_NAMES
 
 # A member must cover this share of the window's sessions to join the band;
@@ -25,14 +25,6 @@ MIN_COVERAGE = 0.6
 # Guard rail for the ?days= query param.
 MIN_DAYS = 14
 MAX_DAYS = 365
-
-
-def group_category(group: GroupConfig) -> str:
-    if any(asset.type in ("crypto_perp", "crypto_spot") for asset in group.assets):
-        return "crypto"
-    if any(asset.type == "future" for asset in group.assets):
-        return "commodities"
-    return "tradfi"
 
 
 def group_trends_payload(path: Path, groups: list[GroupConfig], days: int) -> dict[str, object]:

@@ -1570,7 +1570,8 @@ def test_editor_successful_mutations_reset_saved_fields(page: Page, base_url: st
 
     def groups(route: Any) -> None:
         if route.request.method == "POST":
-            config["groups"].append({"name": route.request.post_data_json["name"], "assets": []})
+            name = route.request.post_data_json["name"]
+            config["groups"].append({"name": name, "category": "tradfi", "assets": []})
         _fulfill_json(route, config)
 
     def assets(route: Any) -> None:
@@ -3599,6 +3600,7 @@ WATCHLIST_PAYLOAD: dict[str, Any] = {
     "groups": [
         {
             "name": "QA_EQUITY",
+            "category": "tradfi",
             "assets": [
                 {
                     "symbol": "SPY",
@@ -3611,6 +3613,7 @@ WATCHLIST_PAYLOAD: dict[str, Any] = {
         },
         {
             "name": "QA_CRYPTO",
+            "category": "crypto",
             "assets": [
                 {
                     "symbol": "BTC",
@@ -3630,6 +3633,7 @@ WATCHLIST_PAYLOAD: dict[str, Any] = {
         },
         {
             "name": "QA_COMMODITIES",
+            "category": "commodities",
             "assets": [
                 {
                     "symbol": "GC=F",
@@ -3645,9 +3649,9 @@ WATCHLIST_PAYLOAD: dict[str, Any] = {
 
 BOARD_PAYLOAD: dict[str, Any] = {
     "groups": [
-        {"name": "QA_EQUITY", "assets": [TRADFI_ASSET]},
-        {"name": "QA_CRYPTO", "assets": [CRYPTO_ASSET_ETH, CRYPTO_ASSET]},
-        {"name": "QA_COMMODITIES", "assets": [COMMODITY_ASSET]},
+        {"name": "QA_EQUITY", "category": "tradfi", "assets": [TRADFI_ASSET]},
+        {"name": "QA_CRYPTO", "category": "crypto", "assets": [CRYPTO_ASSET_ETH, CRYPTO_ASSET]},
+        {"name": "QA_COMMODITIES", "category": "commodities", "assets": [COMMODITY_ASSET]},
     ],
     "crypto_tape": [
         {

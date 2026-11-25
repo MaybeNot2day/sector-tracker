@@ -10,7 +10,7 @@ from typing import TypeAlias
 
 from app import db
 from app.calendar_windows import last_completed_us_session, us_session_close_at
-from app.models import AssetConfig, GroupConfig, ProviderName, Quote
+from app.models import AssetConfig, GroupConfig, ProviderName, Quote, group_category
 from app.providers.base import QuoteProvider
 from app.providers.hyperliquid import HyperliquidProvider
 
@@ -533,6 +533,7 @@ def grouped_quotes_payload(
         "groups": [
             {
                 "name": group.name,
+                "category": group_category(group),
                 "assets": [
                     {
                         "symbol": asset.symbol,

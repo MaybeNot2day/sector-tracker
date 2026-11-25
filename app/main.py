@@ -10,6 +10,7 @@ import shutil
 import tempfile
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
 from pathlib import Path
@@ -43,7 +44,7 @@ from app.config import (
     save_watchlists,
     validate_watchlist_identities,
 )
-from app.models import AssetConfig, AssetType, GroupConfig, ProviderName
+from app.models import AssetConfig, AssetType, GroupConfig, ProviderName, group_category
 from app.providers.base import QuoteProvider
 from app.providers.hyperliquid import HyperliquidProvider
 from app.providers.yahoo import YahooProvider
@@ -637,10 +638,7 @@ async def create_asset(group_name: str, request: AssetRequest) -> dict[str, obje
         if any(existing.symbol == symbol for existing in group.assets):
             raise HTTPException(status_code=409, detail="asset_already_exists")
         groups_current = [
-            GroupConfig(
-                name=item.name,
-                assets=[*item.assets, asset] if item is group else item.assets,
-            )
+            replace(item, assets=[*item.assets, asset]) if item is group else item
             for item in groups_current
         ]
         try:
@@ -686,12 +684,9 @@ async def delete_asset(group_name: str, symbol: str) -> dict[str, object]:
         if not any(asset.symbol == wanted for asset in group.assets):
             raise HTTPException(status_code=404, detail="asset_not_found")
         groups_current = [
-            GroupConfig(
-                name=item.name,
-                assets=[asset for asset in item.assets if asset.symbol != wanted]
-                if item is group
-                else item.assets,
-            )
+            replace(item, assets=[asset for asset in item.assets if asset.symbol != wanted])
+            if item is group
+            else item
             for item in groups_current
         ]
         await asyncio.to_thread(save_watchlists, app.state.settings.watchlist_path, groups_current)
@@ -705,6 +700,7 @@ def groups_payload(groups: list[GroupConfig]) -> dict[str, object]:
         "groups": [
             {
                 "name": group.name,
+                "category": group_category(group),
                 "assets": [
                     {
                         "symbol": asset.symbol,

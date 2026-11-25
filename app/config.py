@@ -8,7 +8,7 @@ import yaml  # type: ignore[import-untyped]  # PyYAML does not ship typing metad
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.models import AssetConfig, AssetType, GroupConfig, ProviderName
+from app.models import AssetConfig, AssetType, GroupCategory, GroupConfig, ProviderName
 
 
 class Settings(BaseSettings):
@@ -95,7 +95,16 @@ def load_watchlists(path: Path) -> list[GroupConfig]:
             raise ValueError(f"group {group_raw.get('name', '<unknown>')} assets must be a list")
         group_name = str(group_raw.get("name", "<unknown>"))
         assets = [_parse_asset(asset_raw, group_name) for asset_raw in assets_raw]
-        groups.append(GroupConfig(name=str(group_raw["name"]), assets=assets))
+        category_raw = group_raw.get("category")
+        if category_raw is not None and category_raw not in get_args(GroupCategory):
+            raise ValueError(f"group {group_name}: unknown category {category_raw!r}")
+        groups.append(
+            GroupConfig(
+                name=str(group_raw["name"]),
+                assets=assets,
+                category=cast(GroupCategory | None, category_raw),
+            )
+        )
     validate_watchlist_identities(groups)
     return groups
 
@@ -108,6 +117,7 @@ def save_watchlists(path: Path, groups: list[GroupConfig]) -> None:
         "groups": [
             {
                 "name": group.name,
+                **({"category": group.category} if group.category else {}),
                 "assets": [
                     {
                         key: value

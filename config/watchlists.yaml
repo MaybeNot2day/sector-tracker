@@ -726,6 +726,19 @@ groups:
     type: index_proxy
     source: hyperliquid
     name: HL TradFi 100 Index
+- name: INDEX_FUTURES
+  category: tradfi
+  assets:
+  - symbol: ES=F
+    type: future
+    source: yahoo
+    exchange: CME
+    name: E-mini S&P 500
+  - symbol: NQ=F
+    type: future
+    source: yahoo
+    exchange: CME
+    name: E-mini Nasdaq-100
 - name: FX
   assets:
   - symbol: JPY
